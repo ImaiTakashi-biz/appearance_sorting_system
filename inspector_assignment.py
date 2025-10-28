@@ -26,6 +26,9 @@ class InspectorAssignmentManager:
         # 検査員の勤務時間を追跡（勤務時間超過を防ぐため）
         self.inspector_work_hours = {}
         self.inspector_daily_assignments = {}
+        # 品番ごとの累計作業時間を検査員別に追跡（同一品番の4時間上限判定に使用）
+        # 形式: { inspector_code: { product_number: hours } }
+        self.inspector_product_hours = {}
     
     def log_message(self, message):
         """ログメッセージを出力"""
@@ -87,9 +90,9 @@ class InspectorAssignmentManager:
                     '品番': product_number,
                     '品名': row['品名'],
                     '客先': row['客先'],
-                    'ロットID': row.get('生産ロットID', ''),
-                    '数量': lot_quantity,
-                    'ロット日': row.get('指示日', ''),
+                    '生産ロットID': row.get('生産ロットID', ''),
+                    'ロット数量': lot_quantity,
+                    '指示日': row.get('指示日', ''),
                     '号機': row.get('号機', ''),
                     '現在工程名': row.get('現在工程名', ''),
                     '現在工程番号': current_process_number,
@@ -151,6 +154,11 @@ class InspectorAssignmentManager:
             result_df['検査員3'] = ''
             result_df['検査員4'] = ''
             result_df['検査員5'] = ''
+            result_df['チーム情報'] = ''
+            
+            # 出荷予定日でソート（古い順）
+            result_df = result_df.sort_values('出荷予定日').reset_index(drop=True)
+            self.log_message("出荷予定日の古い順でソートしました")
             
             # 各ロットに対して検査員を割り当て
             for index, row in result_df.iterrows():
@@ -167,6 +175,9 @@ class InspectorAssignmentManager:
                 # 分割検査時間を計算
                 divided_time = inspection_time / required_inspectors
                 
+                # デバッグログ出力
+                self.log_message(f"品番 {product_number}: 検査時間 {inspection_time:.1f}h → 必要人数 {required_inspectors}人, 分割時間 {divided_time:.1f}h")
+                
                 # スキルマスタから該当する品番と工程番号のスキル情報を取得
                 available_inspectors = self.get_available_inspectors(
                     product_number, process_number, skill_master_df, inspector_master_df
@@ -182,28 +193,52 @@ class InspectorAssignmentManager:
                 
                 # 検査員を割り当て
                 assigned_inspectors = self.select_inspectors(
-                    available_inspectors, required_inspectors, divided_time, inspector_master_df
+                    available_inspectors, required_inspectors, divided_time, inspector_master_df, product_number
                 )
+                
+                # デバッグログ出力
+                self.log_message(f"品番 {product_number}: 要求人数 {required_inspectors}人 → 実際に選択された人数 {len(assigned_inspectors)}人")
+                if len(assigned_inspectors) != required_inspectors:
+                    self.log_message(f"警告: 品番 {product_number} で人数が不足しています (要求: {required_inspectors}人, 実際: {len(assigned_inspectors)}人)")
                 
                 # 結果を設定
                 result_df.at[index, '検査員人数'] = len(assigned_inspectors)
                 result_df.at[index, '分割検査時間'] = round(divided_time, 1)
                 
                 # 検査員名を設定
+                team_members = []
                 for i, inspector in enumerate(assigned_inspectors):
                     if i < 5:  # 最大5人まで
                         if show_skill_values:
                             # 新規品チームの場合はスキル値を表示せず(新)のみ
                             if inspector.get('is_new_team', False):
-                                result_df.at[index, f'検査員{i+1}'] = f"{inspector['氏名']}(新)"
+                                inspector_name = f"{inspector['氏名']}(新)"
                             else:
-                                result_df.at[index, f'検査員{i+1}'] = f"{inspector['氏名']}({inspector['スキル']})"
+                                inspector_name = f"{inspector['氏名']}({inspector['スキル']})"
                         else:
                             # スキル非表示でも新規品チームの場合は(新)を表示
                             if inspector.get('is_new_team', False):
-                                result_df.at[index, f'検査員{i+1}'] = f"{inspector['氏名']}(新)"
+                                inspector_name = f"{inspector['氏名']}(新)"
                             else:
-                                result_df.at[index, f'検査員{i+1}'] = inspector['氏名']
+                                inspector_name = inspector['氏名']
+                        
+                        result_df.at[index, f'検査員{i+1}'] = inspector_name
+                        team_members.append(inspector['氏名'])
+                        # 同一品番の累計時間を更新（4時間上限のためのトラッキング）
+                        code = inspector['コード']
+                        if code not in self.inspector_product_hours:
+                            self.inspector_product_hours[code] = {}
+                        self.inspector_product_hours[code][product_number] = (
+                            self.inspector_product_hours[code].get(product_number, 0.0) + divided_time
+                        )
+                
+                # チーム情報を設定
+                if len(assigned_inspectors) > 1:
+                    team_info = f"チーム: {', '.join(team_members)}"
+                else:
+                    team_info = f"個人: {team_members[0] if team_members else ''}"
+                
+                result_df.at[index, 'チーム情報'] = team_info
             
             self.log_message(f"検査員割り当てが完了しました: {len(result_df)}件")
             
@@ -269,6 +304,9 @@ class InspectorAssignmentManager:
                 return self.get_new_product_team_inspectors(inspector_master_df)
             
             # スキル情報から検査員を取得
+            self.log_message(f"スキルマスタの列数: {len(skill_master_df.columns)}")
+            self.log_message(f"スキルマスタの列名: {list(skill_master_df.columns[2:min(34, len(skill_master_df.columns))])}")
+            
             for skill_row in filtered_skill_rows:
                 # スキルマスタの列構造: 品番, 工程, V002, V004, V005, ..., Z040
                 # 列2から列33までが検査員コード（V002からZ040まで）
@@ -279,6 +317,7 @@ class InspectorAssignmentManager:
                     
                     # スキル値が1, 2, 3のいずれかで、かつ空でない場合
                     if pd.notna(skill_value) and str(skill_value).strip() != '' and str(skill_value).strip() in ['1', '2', '3']:
+                        self.log_message(f"スキル値 {skill_value} の検査員コード {inspector_code} を処理中")
                         # 検査員マスタから該当する検査員の情報を取得
                         # 検査員コード（V002, V004等）で検索
                         inspector_info = inspector_master_df[inspector_master_df['#ID'] == inspector_code]
@@ -293,7 +332,9 @@ class InspectorAssignmentManager:
                             })
                             self.log_message(f"検査員 '{inspector_data['#氏名']}' (コード: {inspector_code}, スキル: {skill_value}) を追加")
                         else:
-                            self.log_message(f"検査員コード '{inspector_code}' が検査員マスタに見つかりません")
+                            self.log_message(f"警告: 検査員コード '{inspector_code}' が検査員マスタに見つかりません")
+                            # 検査員マスタの全コードを表示
+                            self.log_message(f"検査員マスタの利用可能なコード: {list(inspector_master_df['#ID'].values)}")
             
             self.log_message(f"利用可能な検査員: {len(available_inspectors)}人")
             return available_inspectors
@@ -348,8 +389,8 @@ class InspectorAssignmentManager:
             self.log_message(f"新製品チームメンバー取得中にエラーが発生しました: {str(e)}")
             return []
     
-    def select_inspectors(self, available_inspectors, required_count, divided_time, inspector_master_df):
-        """検査員を選択する（勤務時間考慮・公平な割り当て方式）"""
+    def select_inspectors(self, available_inspectors, required_count, divided_time, inspector_master_df, product_number):
+        """検査員を選択する（スキル組み合わせ考慮・勤務時間考慮・公平な割り当て方式）"""
         try:
             if not available_inspectors:
                 return []
@@ -374,102 +415,297 @@ class InspectorAssignmentManager:
             
             # 勤務時間を考慮して利用可能な検査員をフィルタリング
             available_inspectors = self.filter_available_inspectors(available_inspectors, divided_time, inspector_master_df)
+
+            # 追加ルール: 同一品番での累計4時間を超える検査員を除外
+            filtered_by_product = []
+            for insp in available_inspectors:
+                code = insp['コード']
+                current = self.inspector_product_hours.get(code, {}).get(product_number, 0.0)
+                if current + divided_time > 4.0:
+                    self.log_message(f"検査員 '{insp['氏名']}' は品番 {product_number} の累計が {current:.1f}h のため除外 (+{divided_time:.1f}hで4h超過)")
+                    continue
+                filtered_by_product.append(insp)
+
+            if not filtered_by_product:
+                self.log_message(f"警告: 品番 {product_number} の4時間上限により全員が除外。ルールを緩和して候補から選択")
+                filtered_by_product = available_inspectors
             
-            if not available_inspectors:
+            if not filtered_by_product:
                 self.log_message("勤務時間内で利用可能な検査員がいません")
                 return []
             
-            # スキルレベル別に分類
-            high_skill_inspectors = [insp for insp in available_inspectors if insp['スキル'] == 1]
-            medium_skill_inspectors = [insp for insp in available_inspectors if insp['スキル'] == 2]
-            low_skill_inspectors = [insp for insp in available_inspectors if insp['スキル'] == 3]
-            
-            # 各スキルレベル内で公平に選択する関数
-            def select_fairly_from_group(group, count):
-                if not group or count <= 0:
-                    return []
-                
-                # 割り当て回数が少ない順、最後の割り当てが古い順でソート
-                group_with_priority = []
-                for insp in group:
-                    code = insp['コード']
-                    assignment_count = self.inspector_assignment_count.get(code, 0)
-                    last_assignment = self.inspector_last_assignment.get(code, pd.Timestamp.min)
-                    # 優先度: 割り当て回数が少ないほど高く、最後の割り当てが古いほど高い
-                    priority = (-assignment_count, last_assignment)
-                    group_with_priority.append((priority, insp))
-                
-                # 優先度順にソート
-                group_with_priority.sort(key=lambda x: x[0])
-                
-                # 上位から選択
-                selected = []
-                for _, insp in group_with_priority[:count]:
-                    selected.append(insp)
-                    # 割り当て履歴を更新
-                    code = insp['コード']
-                    self.inspector_assignment_count[code] += 1
-                    self.inspector_last_assignment[code] = current_time
-                    # 勤務時間を更新
-                    self.inspector_work_hours[code] += divided_time
-                    self.inspector_daily_assignments[code][current_date] += divided_time
-                
-                return selected
-            
-            selected_inspectors = []
-            
-            if required_count == 1:
-                # 1人の場合は、最も割り当て回数が少ない検査員を選択
-                all_inspectors = high_skill_inspectors + medium_skill_inspectors + low_skill_inspectors
-                if all_inspectors:
-                    # 全員の中で最も割り当て回数が少ない人を選択
-                    min_count = min(self.inspector_assignment_count.get(insp['コード'], 0) for insp in all_inspectors)
-                    candidates = [insp for insp in all_inspectors 
-                                if self.inspector_assignment_count.get(insp['コード'], 0) == min_count]
-                    
-                    # 同点の場合は最後の割り当てが最も古い人を選択
-                    oldest_candidate = min(candidates, 
-                                        key=lambda x: self.inspector_last_assignment.get(x['コード'], pd.Timestamp.min))
-                    selected_inspectors.append(oldest_candidate)
-                    
-                    # 割り当て履歴を更新
-                    code = oldest_candidate['コード']
-                    self.inspector_assignment_count[code] += 1
-                    self.inspector_last_assignment[code] = current_time
-                    # 勤務時間を更新
-                    self.inspector_work_hours[code] += divided_time
-                    self.inspector_daily_assignments[code][current_date] += divided_time
-            else:
-                # 複数人の場合は、スキルバランスを考慮しつつ公平に割り当て
-                # 高スキル者を優先しつつ、各スキルレベル内では公平に選択
-                
-                # 高スキル者がいる場合は、高スキル者を中心に割り当て
-                if high_skill_inspectors:
-                    high_count = min(len(high_skill_inspectors), required_count)
-                    selected_inspectors.extend(select_fairly_from_group(high_skill_inspectors, high_count))
-                    required_count -= high_count
-                
-                # 残りが必要な場合は中スキル者から選択
-                if required_count > 0 and medium_skill_inspectors:
-                    medium_count = min(len(medium_skill_inspectors), required_count)
-                    selected_inspectors.extend(select_fairly_from_group(medium_skill_inspectors, medium_count))
-                    required_count -= medium_count
-                
-                # まだ残りが必要な場合は低スキル者から選択
-                if required_count > 0 and low_skill_inspectors:
-                    low_count = min(len(low_skill_inspectors), required_count)
-                    selected_inspectors.extend(select_fairly_from_group(low_skill_inspectors, low_count))
-            
-            # 選択された検査員の情報をログ出力
-            for insp in selected_inspectors:
-                code = insp['コード']
-                count = self.inspector_assignment_count.get(code, 0)
-                self.log_message(f"検査員 '{insp['氏名']}' (スキル: {insp['スキル']}, 割り当て回数: {count}) を選択")
+            # スキル組み合わせロジックを適用
+            selected_inspectors = self.select_inspectors_with_skill_combination(
+                filtered_by_product, required_count, divided_time, current_time, current_date, inspector_master_df
+            )
             
             return selected_inspectors
             
         except Exception as e:
             self.log_message(f"検査員選択中にエラーが発生しました: {str(e)}")
+            return []
+    
+    def select_inspectors_with_skill_combination(self, available_inspectors, required_count, divided_time, current_time, current_date, inspector_master_df):
+        """スキル組み合わせを考慮した検査員選択"""
+        try:
+            # スキルレベル別に検査員を分類
+            skill_groups = {
+                1: [],
+                2: [],
+                3: [],
+                'new': []  # 新製品チーム
+            }
+            
+            for inspector in available_inspectors:
+                if inspector.get('is_new_team', False):
+                    skill_groups['new'].append(inspector)
+                else:
+                    skill = inspector.get('スキル', 1)
+                    if skill in skill_groups:
+                        skill_groups[skill].append(inspector)
+                    else:
+                        skill_groups[1].append(inspector)  # デフォルトはスキル1
+            
+            # 各グループ内で優先度を計算
+            for skill_level, inspectors in skill_groups.items():
+                if not inspectors:
+                    continue
+                    
+                inspectors_with_priority = []
+                for insp in inspectors:
+                    code = insp['コード']
+                    assignment_count = self.inspector_assignment_count.get(code, 0)
+                    last_assignment = self.inspector_last_assignment.get(code, pd.Timestamp.min)
+                    priority = (-assignment_count, last_assignment)
+                    inspectors_with_priority.append((priority, insp))
+                
+                # 優先度順にソート
+                inspectors_with_priority.sort(key=lambda x: x[0])
+                skill_groups[skill_level] = [insp for _, insp in inspectors_with_priority]
+            
+            # 利用可能な検査員の総数を確認
+            total_available = sum(len(inspectors) for inspectors in skill_groups.values())
+            if total_available < required_count:
+                self.log_message(f"警告: 利用可能な検査員数 {total_available}人 が要求人数 {required_count}人 より少ないため、新製品チームを追加で検索します")
+                
+                # 新製品チームを追加で検索
+                new_team_inspectors = self.get_new_product_team_inspectors(inspector_master_df)
+                if new_team_inspectors:
+                    # 新製品チームをスキルグループに追加
+                    skill_groups['new'] = new_team_inspectors
+                    total_available = sum(len(inspectors) for inspectors in skill_groups.values())
+                    self.log_message(f"新製品チーム追加後: 利用可能な検査員数 {total_available}人")
+                
+                # それでも足りない場合は可能な限り選択
+                if total_available < required_count:
+                    self.log_message(f"最終警告: 利用可能な検査員数 {total_available}人 が要求人数 {required_count}人 より少ないため、可能な限り選択します")
+                    required_count = total_available
+            
+            # スキル組み合わせロジックを適用
+            selected_inspectors = []
+            
+            if required_count == 1:
+                # 1人の場合は最も割り当て回数が少ない人を選択
+                all_inspectors_with_priority = []
+                for skill_level, inspectors in skill_groups.items():
+                    for insp in inspectors:
+                        code = insp['コード']
+                        assignment_count = self.inspector_assignment_count.get(code, 0)
+                        last_assignment = self.inspector_last_assignment.get(code, pd.Timestamp.min)
+                        priority = (-assignment_count, last_assignment)
+                        all_inspectors_with_priority.append((priority, insp))
+                
+                all_inspectors_with_priority.sort(key=lambda x: x[0])
+                if all_inspectors_with_priority:
+                    selected_inspectors.append(all_inspectors_with_priority[0][1])
+            
+            elif required_count == 2:
+                # 2人の場合の組み合わせロジック
+                selected_inspectors = self.select_two_inspectors_with_skill_combination(skill_groups)
+            
+            elif required_count == 3:
+                # 3人の場合の組み合わせロジック
+                selected_inspectors = self.select_three_inspectors_with_skill_combination(skill_groups)
+            
+            else:
+                # 4人以上の場合は公平な割り当て
+                all_inspectors_with_priority = []
+                for skill_level, inspectors in skill_groups.items():
+                    for insp in inspectors:
+                        code = insp['コード']
+                        assignment_count = self.inspector_assignment_count.get(code, 0)
+                        last_assignment = self.inspector_last_assignment.get(code, pd.Timestamp.min)
+                        priority = (-assignment_count, last_assignment)
+                        all_inspectors_with_priority.append((priority, insp))
+                
+                all_inspectors_with_priority.sort(key=lambda x: x[0])
+                selected_inspectors = [insp for _, insp in all_inspectors_with_priority[:required_count]]
+            
+            # 選択された検査員の履歴を更新
+            for insp in selected_inspectors:
+                code = insp['コード']
+                self.inspector_assignment_count[code] += 1
+                self.inspector_last_assignment[code] = current_time
+                self.inspector_work_hours[code] += divided_time
+                self.inspector_daily_assignments[code][current_date] += divided_time
+                
+                # ログ出力
+                count = self.inspector_assignment_count.get(code, 0)
+                skill_info = f"スキル: {insp['スキル']}" if not insp.get('is_new_team', False) else "新製品チーム"
+                self.log_message(f"検査員 '{insp['氏名']}' ({skill_info}, 割り当て回数: {count}) を選択")
+            
+            return selected_inspectors
+            
+        except Exception as e:
+            self.log_message(f"スキル組み合わせ選択中にエラーが発生しました: {str(e)}")
+            return []
+    
+    def select_two_inspectors_with_skill_combination(self, skill_groups):
+        """2人の検査員をスキル組み合わせ考慮で選択"""
+        try:
+            selected = []
+            
+            # 利用可能な検査員の総数を確認
+            total_available = sum(len(inspectors) for inspectors in skill_groups.values())
+            self.log_message(f"2人選択: 利用可能な検査員総数 {total_available}人")
+            for skill_level, inspectors in skill_groups.items():
+                self.log_message(f"  スキル{skill_level}: {len(inspectors)}人")
+            
+            if total_available < 2:
+                self.log_message(f"警告: 2人選択要求だが、利用可能な検査員は {total_available}人 のみ")
+                # 利用可能な分だけ選択
+                for skill_level, inspectors in skill_groups.items():
+                    for inspector in inspectors:
+                        if len(selected) >= total_available:
+                            break
+                        selected.append(inspector)
+                        self.log_message(f"  選択: {inspector['氏名']} (スキル: {inspector.get('スキル', '新製品')})")
+                return selected
+            
+            # スキル3がいる場合の組み合わせ
+            if skill_groups[3]:
+                skill3_inspector = skill_groups[3][0]
+                selected.append(skill3_inspector)
+                self.log_message(f"  スキル3選択: {skill3_inspector['氏名']}")
+                
+                # 2人目を選択
+                if len(selected) < 2:
+                    # スキル1またはスキル2の人を選択
+                    if skill_groups[1]:
+                        selected.append(skill_groups[1][0])
+                        self.log_message(f"  スキル1選択: {skill_groups[1][0]['氏名']}")
+                    elif skill_groups[2]:
+                        selected.append(skill_groups[2][0])
+                        self.log_message(f"  スキル2選択: {skill_groups[2][0]['氏名']}")
+                    elif skill_groups['new']:
+                        selected.append(skill_groups['new'][0])
+                        self.log_message(f"  新製品チーム選択: {skill_groups['new'][0]['氏名']}")
+                    elif len(skill_groups[3]) > 1:
+                        # スキル1/2/新製品チームがいない場合はスキル3の2人目を選択
+                        selected.append(skill_groups[3][1])
+                        self.log_message(f"  スキル3選択(2人目): {skill_groups[3][1]['氏名']}")
+                    else:
+                        self.log_message("  スキル3の2人目がいないため、1人のみ")
+            
+            # スキル3がいない場合
+            elif skill_groups[2]:
+                # スキル2を優先
+                selected.append(skill_groups[2][0])
+                if len(skill_groups[2]) > 1:
+                    selected.append(skill_groups[2][1])
+                elif skill_groups[1]:
+                    selected.append(skill_groups[1][0])
+                elif skill_groups['new']:
+                    selected.append(skill_groups['new'][0])
+            
+            elif skill_groups[1]:
+                # スキル1のみ
+                selected.append(skill_groups[1][0])
+                if len(skill_groups[1]) > 1:
+                    selected.append(skill_groups[1][1])
+                elif skill_groups['new']:
+                    selected.append(skill_groups['new'][0])
+            
+            elif skill_groups['new']:
+                # 新製品チームのみ
+                selected.append(skill_groups['new'][0])
+                if len(skill_groups['new']) > 1:
+                    selected.append(skill_groups['new'][1])
+            
+            return selected
+            
+        except Exception as e:
+            self.log_message(f"2人選択中にエラーが発生しました: {str(e)}")
+            return []
+    
+    def select_three_inspectors_with_skill_combination(self, skill_groups):
+        """3人の検査員をスキル組み合わせ考慮で選択"""
+        try:
+            selected = []
+            
+            # 利用可能な検査員の総数を確認
+            total_available = sum(len(inspectors) for inspectors in skill_groups.values())
+            if total_available < 3:
+                self.log_message(f"警告: 3人選択要求だが、利用可能な検査員は {total_available}人 のみ")
+                # 利用可能な分だけ選択
+                for skill_level, inspectors in skill_groups.items():
+                    for inspector in inspectors:
+                        if len(selected) >= total_available:
+                            break
+                        selected.append(inspector)
+                return selected
+            
+            # スキル3がいる場合の組み合わせ
+            if skill_groups[3]:
+                skill3_inspector = skill_groups[3][0]
+                selected.append(skill3_inspector)
+                
+                # 残り2人をスキル1/2から選択
+                remaining_count = 2
+                
+                # スキル1とスキル2を交互に選択
+                skill1_idx = 0
+                skill2_idx = 0
+                
+                while remaining_count > 0 and (skill1_idx < len(skill_groups[1]) or skill2_idx < len(skill_groups[2])):
+                    if skill1_idx < len(skill_groups[1]) and (skill2_idx >= len(skill_groups[2]) or skill1_idx <= skill2_idx):
+                        selected.append(skill_groups[1][skill1_idx])
+                        skill1_idx += 1
+                        remaining_count -= 1
+                    elif skill2_idx < len(skill_groups[2]):
+                        selected.append(skill_groups[2][skill2_idx])
+                        skill2_idx += 1
+                        remaining_count -= 1
+                
+                # まだ足りない場合は新製品チームから
+                if remaining_count > 0 and skill_groups['new']:
+                    for i in range(min(remaining_count, len(skill_groups['new']))):
+                        selected.append(skill_groups['new'][i])
+            
+            # スキル3がいない場合
+            else:
+                # スキル2を優先して選択
+                if skill_groups[2]:
+                    selected.append(skill_groups[2][0])
+                    if len(skill_groups[2]) > 1:
+                        selected.append(skill_groups[2][1])
+                    if len(skill_groups[2]) > 2:
+                        selected.append(skill_groups[2][2])
+                
+                # スキル1を追加
+                if len(selected) < 3 and skill_groups[1]:
+                    for i in range(min(3 - len(selected), len(skill_groups[1]))):
+                        selected.append(skill_groups[1][i])
+                
+                # 新製品チームを追加
+                if len(selected) < 3 and skill_groups['new']:
+                    for i in range(min(3 - len(selected), len(skill_groups['new']))):
+                        selected.append(skill_groups['new'][i])
+            
+            return selected
+            
+        except Exception as e:
+            self.log_message(f"3人選択中にエラーが発生しました: {str(e)}")
             return []
     
     def filter_available_inspectors(self, available_inspectors, divided_time, inspector_master_df):
