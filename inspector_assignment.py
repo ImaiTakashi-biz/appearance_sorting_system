@@ -114,7 +114,7 @@ class InspectorAssignmentManager:
             logger.error(error_msg)
             return None
     
-    def assign_inspectors(self, inspector_df, inspector_master_df, skill_master_df):
+    def assign_inspectors(self, inspector_df, inspector_master_df, skill_master_df, show_skill_values=False):
         """検査員を割り当てる"""
         try:
             if inspector_df is None or inspector_df.empty:
@@ -192,7 +192,10 @@ class InspectorAssignmentManager:
                 # 検査員名を設定
                 for i, inspector in enumerate(assigned_inspectors):
                     if i < 5:  # 最大5人まで
-                        result_df.at[index, f'検査員{i+1}'] = f"{inspector['氏名']}({inspector['スキル']})"
+                        if show_skill_values:
+                            result_df.at[index, f'検査員{i+1}'] = f"{inspector['氏名']}({inspector['スキル']})"
+                        else:
+                            result_df.at[index, f'検査員{i+1}'] = inspector['氏名']
             
             self.log_message(f"検査員割り当てが完了しました: {len(result_df)}件")
             

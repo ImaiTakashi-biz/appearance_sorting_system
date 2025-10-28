@@ -73,6 +73,10 @@ class ModernDataExtractorUI:
         self.current_assignment_data = None
         self.current_inspector_data = None
         
+        # スキル表示状態管理
+        self.show_skill_values = False
+        self.original_inspector_data = None  # 元のデータを保持
+        
         # マスタデータ保存用変数
         self.inspector_master_data = None
         self.skill_master_data = None
@@ -1758,11 +1762,24 @@ class ModernDataExtractorUI:
                 self.log_message("検査員割振りテーブルの作成に失敗しました")
                 return
             
-            # 検査員を割り当て
-            inspector_df = self.inspector_manager.assign_inspectors(inspector_df, inspector_master_df, skill_master_df)
+            # 検査員を割り当て（スキル値付きで保存）
+            inspector_df_with_skills = self.inspector_manager.assign_inspectors(inspector_df, inspector_master_df, skill_master_df, True)
+            
+            # 現在の表示状態に応じてデータを設定
+            if self.show_skill_values:
+                inspector_df = inspector_df_with_skills
+            else:
+                # スキル値を非表示にする場合、氏名のみのデータを作成
+                inspector_df = inspector_df_with_skills.copy()
+                for col in inspector_df.columns:
+                    if col.startswith('検査員'):
+                        inspector_df[col] = inspector_df[col].astype(str).apply(
+                            lambda x: x.split('(')[0].strip() if '(' in x and ')' in x else x
+                        )
             
             # 検査員割振りデータを保存（エクスポート用）
             self.current_inspector_data = inspector_df
+            self.original_inspector_data = inspector_df_with_skills.copy()  # スキル値付きの元データを保持
             
             self.log_message(f"検査員割振り処理が完了しました: {len(inspector_df)}件")
             
@@ -2023,13 +2040,29 @@ class ModernDataExtractorUI:
             inspector_frame.table_section = True
             inspector_frame.pack(fill="x", padx=20, pady=(10, 20))
             
+            # タイトルとスキル表示切り替えボタンのフレーム
+            title_frame = ctk.CTkFrame(inspector_frame, fg_color="transparent")
+            title_frame.pack(fill="x", padx=15, pady=(15, 10))
+            
             # タイトル
             title_label = ctk.CTkLabel(
-                inspector_frame,
+                title_frame,
                 text="検査員割振り結果",
                 font=ctk.CTkFont(family="Yu Gothic", size=16, weight="bold")
             )
-            title_label.pack(pady=(15, 10))
+            title_label.pack(side="left")
+            
+            # スキル表示切り替えボタン
+            button_text = "スキル非表示" if self.show_skill_values else "スキル表示"
+            self.skill_toggle_button = ctk.CTkButton(
+                title_frame,
+                text=button_text,
+                command=self.toggle_skill_display,
+                width=100,
+                height=30,
+                font=ctk.CTkFont(family="Yu Gothic", size=12)
+            )
+            self.skill_toggle_button.pack(side="right")
             
             # テーブルフレーム
             table_frame = tk.Frame(inspector_frame)
@@ -2089,6 +2122,26 @@ class ModernDataExtractorUI:
                             values.append(date_value.strftime('%Y/%m/%d'))
                         except:
                             values.append(str(row[col]))
+                    elif col.startswith('検査員'):
+                        # 検査員名の表示制御
+                        inspector_name = str(row[col])
+                        if not self.show_skill_values:
+                            # スキル値を非表示にする場合、括弧内を削除
+                            if '(' in inspector_name and ')' in inspector_name:
+                                inspector_name = inspector_name.split('(')[0].strip()
+                        else:
+                            # スキル値を表示する場合、元のデータから再構築
+                            if '(' not in inspector_name and ')' not in inspector_name:
+                                # 元のデータからスキル値を取得
+                                if self.original_inspector_data is not None:
+                                    try:
+                                        original_row = self.original_inspector_data.iloc[row.name]
+                                        original_name = str(original_row[col])
+                                        if '(' in original_name and ')' in original_name:
+                                            inspector_name = original_name
+                                    except:
+                                        pass
+                        values.append(inspector_name)
                     else:
                         values.append(str(row[col]))
                 inspector_tree.insert("", "end", values=values)
@@ -2116,6 +2169,40 @@ class ModernDataExtractorUI:
             error_msg = f"検査員割振りテーブルの表示に失敗しました: {str(e)}"
             self.log_message(error_msg)
             logger.error(error_msg)
+    
+    def toggle_skill_display(self):
+        """スキル表示の切り替え"""
+        try:
+            self.show_skill_values = not self.show_skill_values
+            
+            # ボタンテキストを更新
+            if self.show_skill_values:
+                self.skill_toggle_button.configure(text="スキル非表示")
+            else:
+                self.skill_toggle_button.configure(text="スキル表示")
+            
+            # データを現在の表示状態に応じて切り替え
+            if self.original_inspector_data is not None:
+                if self.show_skill_values:
+                    # スキル値付きのデータを表示
+                    self.current_inspector_data = self.original_inspector_data.copy()
+                else:
+                    # 氏名のみのデータを作成
+                    self.current_inspector_data = self.original_inspector_data.copy()
+                    for col in self.current_inspector_data.columns:
+                        if col.startswith('検査員'):
+                            self.current_inspector_data[col] = self.current_inspector_data[col].astype(str).apply(
+                                lambda x: x.split('(')[0].strip() if '(' in x and ')' in x else x
+                            )
+                
+                # テーブルを再表示
+                self.display_inspector_assignment_table(self.current_inspector_data)
+                
+        except Exception as e:
+            error_msg = f"スキル表示切り替え中にエラーが発生しました: {str(e)}"
+            self.log_message(error_msg)
+            logger.error(error_msg)
+            messagebox.showerror("エラー", error_msg)
     
     
     def start_inspector_assignment(self):
