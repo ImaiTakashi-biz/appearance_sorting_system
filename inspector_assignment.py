@@ -193,9 +193,17 @@ class InspectorAssignmentManager:
                 for i, inspector in enumerate(assigned_inspectors):
                     if i < 5:  # 最大5人まで
                         if show_skill_values:
-                            result_df.at[index, f'検査員{i+1}'] = f"{inspector['氏名']}({inspector['スキル']})"
+                            # 新規品チームの場合はスキル値を表示せず(新)のみ
+                            if inspector.get('is_new_team', False):
+                                result_df.at[index, f'検査員{i+1}'] = f"{inspector['氏名']}(新)"
+                            else:
+                                result_df.at[index, f'検査員{i+1}'] = f"{inspector['氏名']}({inspector['スキル']})"
                         else:
-                            result_df.at[index, f'検査員{i+1}'] = inspector['氏名']
+                            # スキル非表示でも新規品チームの場合は(新)を表示
+                            if inspector.get('is_new_team', False):
+                                result_df.at[index, f'検査員{i+1}'] = f"{inspector['氏名']}(新)"
+                            else:
+                                result_df.at[index, f'検査員{i+1}'] = inspector['氏名']
             
             self.log_message(f"検査員割り当てが完了しました: {len(result_df)}件")
             
@@ -280,7 +288,8 @@ class InspectorAssignmentManager:
                                 '氏名': inspector_data['#氏名'],
                                 'スキル': int(str(skill_value).strip()),
                                 '就業時間': inspector_data['開始時刻'],
-                                'コード': inspector_code
+                                'コード': inspector_code,
+                                'is_new_team': False  # 通常の検査員
                             })
                             self.log_message(f"検査員 '{inspector_data['#氏名']}' (コード: {inspector_code}, スキル: {skill_value}) を追加")
                         else:
@@ -327,7 +336,8 @@ class InspectorAssignmentManager:
                     '氏名': inspector_row['#氏名'],
                     'スキル': 2,  # 新製品チームは中スキルとして扱う
                     '就業時間': inspector_row['開始時刻'],
-                    'コード': inspector_row['#ID']
+                    'コード': inspector_row['#ID'],
+                    'is_new_team': True  # 新規品チームフラグ
                 })
                 self.log_message(f"新製品チームメンバー '{inspector_row['#氏名']}' (コード: {inspector_row['#ID']}) を追加")
             

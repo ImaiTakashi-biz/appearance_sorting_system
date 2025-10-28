@@ -41,14 +41,11 @@ class ModernDataExtractorUI:
         # メインウィンドウの作成
         self.root = ctk.CTk()
         self.root.title("出荷検査データ抽出システム")
-        self.root.geometry("1200x800")
+        self.root.geometry("1200x800")  # 初期サイズを設定
         self.root.minsize(1000, 700)
         
         # ウィンドウの背景色を白に設定
         self.root.configure(fg_color=("white", "white"))
-        
-        # ウィンドウを中央に配置
-        self.center_window()
         
         # 変数の初期化
         self.config = None
@@ -93,7 +90,15 @@ class ModernDataExtractorUI:
         # 設定の読み込み
         self.load_config()
         
-        # デフォルトのスクロール動作を使用（カスタムスクロールを削除）
+        # UI構築後に全画面表示を設定
+        self.root.after(200, self.set_fullscreen)  # UI完全構築後に全画面表示
+    
+    def set_fullscreen(self):
+        """全画面表示を設定"""
+        try:
+            self.root.state('zoomed')  # 全画面表示（Windows）
+        except Exception as e:
+            logger.error(f"全画面表示の設定に失敗しました: {e}")
     
     def center_window(self):
         """ウィンドウを画面中央に配置"""
@@ -113,9 +118,19 @@ class ModernDataExtractorUI:
         self.root.geometry(f"{window_width}x{window_height}+{x}+{y}")
     
     def bind_main_scroll(self):
-        """メイン画面のスクロールをバインド（デフォルト動作を使用）"""
-        # デフォルトのスクロール動作を使用（カスタムスクロールを削除）
-        pass
+        """メイン画面のスクロールをバインド"""
+        try:
+            # メインスクロールフレームにマウスホイールイベントをバインド
+            def on_main_mousewheel(event):
+                self.main_scroll_frame.yview_scroll(int(-1 * (event.delta / 120)), "units")
+                return "break"
+            
+            # 既存のバインドを解除してから新しいバインドを追加
+            self.main_scroll_frame.unbind_all("<MouseWheel>")
+            self.main_scroll_frame.bind("<MouseWheel>", on_main_mousewheel)
+            
+        except Exception as e:
+            logger.error(f"メインスクロールバインド中にエラーが発生しました: {str(e)}")
     
     def setup_logging(self):
         """ログ設定"""
@@ -132,13 +147,10 @@ class ModernDataExtractorUI:
         try:
             self.config = DatabaseConfig()
             if self.config.validate_config():
-                self.status_label.configure(text="データベース接続状態: 接続可能", text_color="#059669")
                 logger.info("設定の読み込みが完了しました")
             else:
-                self.status_label.configure(text="データベース接続状態: 接続不可", text_color="#DC2626")
                 logger.error("設定の検証に失敗しました")
         except Exception as e:
-            self.status_label.configure(text=f"データベース接続状態: エラー", text_color="#DC2626")
             logger.error(f"設定の読み込みに失敗しました: {e}")
     
     def setup_ui(self):
@@ -150,8 +162,6 @@ class ModernDataExtractorUI:
         # タイトルセクション
         self.create_title_section(self.main_scroll_frame)
         
-        # 設定セクション
-        self.create_config_section(self.main_scroll_frame)
         
         # 日付選択セクション
         self.create_date_section(self.main_scroll_frame)
@@ -166,54 +176,30 @@ class ModernDataExtractorUI:
         # self.create_data_display_section(self.main_scroll_frame)
         
         # ログセクションは削除
+        
+        # メインスクロールをバインド
+        self.bind_main_scroll()
     
     def create_title_section(self, parent):
         """タイトルセクションの作成"""
-        title_frame = ctk.CTkFrame(parent, height=100, fg_color="white", corner_radius=0)
-        title_frame.pack(fill="x", pady=(20, 30))
+        title_frame = ctk.CTkFrame(parent, height=60, fg_color="white", corner_radius=0)
+        title_frame.pack(fill="x", pady=(10, 15))
         title_frame.pack_propagate(False)
         
         # メインタイトル
         title_label = ctk.CTkLabel(
             title_frame,
             text="出荷検査データ抽出システム",
-            font=ctk.CTkFont(family="Yu Gothic", size=32, weight="bold"),
+            font=ctk.CTkFont(family="Yu Gothic", size=28, weight="bold"),
             text_color="#1E3A8A"  # 濃い青
         )
-        title_label.pack(pady=(20, 5))
+        title_label.pack(pady=(10, 5))
         
-        # サブタイトル
-        subtitle_label = ctk.CTkLabel(
-            title_frame,
-            text="出荷予定日を指定してAccessデータベースからデータを抽出",
-            font=ctk.CTkFont(family="Yu Gothic", size=16),
-            text_color="#64748B"  # グレー
-        )
-        subtitle_label.pack()
-    
-    def create_config_section(self, parent):
-        """設定セクションの作成"""
-        config_frame = ctk.CTkFrame(parent, fg_color="#F8FAFC", corner_radius=12)
-        config_frame.pack(fill="x", pady=(0, 20), padx=20)
-        
-        # 設定情報の表示
-        config_info_frame = ctk.CTkFrame(config_frame, fg_color="transparent")
-        config_info_frame.pack(fill="x", padx=20, pady=15)
-        
-        # ステータス表示のみ
-        self.status_label = ctk.CTkLabel(
-            config_info_frame,
-            text="データベース接続状態: 確認中...",
-            font=ctk.CTkFont(family="Yu Gothic", size=16, weight="bold"),
-            anchor="w",
-            text_color="#6B7280"
-        )
-        self.status_label.pack(fill="x")
     
     def create_date_section(self, parent):
         """日付選択セクションの作成"""
         date_frame = ctk.CTkFrame(parent, fg_color="#F8FAFC", corner_radius=12)
-        date_frame.pack(fill="x", pady=(0, 20), padx=20)
+        date_frame.pack(fill="x", pady=(0, 10), padx=20)
         
         # セクションタイトル
         date_title = ctk.CTkLabel(
@@ -222,11 +208,11 @@ class ModernDataExtractorUI:
             font=ctk.CTkFont(family="Yu Gothic", size=20, weight="bold"),
             text_color="#1E3A8A"
         )
-        date_title.pack(pady=(15, 10))
+        date_title.pack(pady=(10, 8))
         
         # 期間選択フレーム
         period_frame = ctk.CTkFrame(date_frame, fg_color="white", corner_radius=8)
-        period_frame.pack(fill="x", padx=15, pady=(0, 15))
+        period_frame.pack(fill="x", padx=15, pady=(0, 10))
         
         # 期間選択UIを作成
         self.create_period_selector(period_frame)
@@ -860,22 +846,23 @@ class ModernDataExtractorUI:
     def create_button_section(self, parent):
         """ボタンセクションの作成"""
         button_frame = ctk.CTkFrame(parent, fg_color="white", corner_radius=0)
-        button_frame.pack(fill="x", pady=(20, 20), padx=20)
+        button_frame.pack(fill="x", pady=(10, 10), padx=20)
         
         # ボタンフレーム
         buttons_frame = ctk.CTkFrame(button_frame, fg_color="transparent")
-        buttons_frame.pack(fill="x", pady=20)
+        buttons_frame.pack(fill="x", pady=10)
         
         # データ抽出ボタン
         self.extract_button = ctk.CTkButton(
             buttons_frame,
             text="データ抽出開始",
             command=self.start_extraction,
-            font=ctk.CTkFont(family="Yu Gothic", size=16, weight="bold"),
-            height=48,
+            font=ctk.CTkFont(family="Yu Gothic", size=12),
+            height=35,
+            width=120,
             fg_color="#3B82F6",
             hover_color="#2563EB",
-            corner_radius=8
+            corner_radius=6
         )
         self.extract_button.pack(side="left", padx=(0, 10))
         
@@ -884,12 +871,12 @@ class ModernDataExtractorUI:
             buttons_frame,
             text="設定リロード",
             command=self.reload_config,
-            font=ctk.CTkFont(family="Yu Gothic", size=14),
-            height=48,
-            width=140,
+            font=ctk.CTkFont(family="Yu Gothic", size=12),
+            height=35,
+            width=100,
             fg_color="#6B7280",
             hover_color="#4B5563",
-            corner_radius=8
+            corner_radius=6
         )
         self.reload_button.pack(side="left", padx=(0, 10))
         
@@ -898,12 +885,12 @@ class ModernDataExtractorUI:
             buttons_frame,
             text="Excel出力",
             command=self.export_selected_table,
-            font=ctk.CTkFont(family="Yu Gothic", size=14),
-            height=48,
-            width=120,
+            font=ctk.CTkFont(family="Yu Gothic", size=12),
+            height=35,
+            width=80,
             fg_color="#10B981",
             hover_color="#059669",
-            corner_radius=8
+            corner_radius=6
         )
         self.export_button.pack(side="left", padx=(0, 10))
         
@@ -915,7 +902,8 @@ class ModernDataExtractorUI:
         table_label = ctk.CTkLabel(
             table_selection_frame,
             text="表示テーブル:",
-            font=ctk.CTkFont(family="Yu Gothic", size=14)
+            font=ctk.CTkFont(family="Yu Gothic", size=14, weight="bold"),
+            text_color="#1E3A8A"
         )
         table_label.pack(side="left", padx=(0, 5))
         
@@ -964,19 +952,19 @@ class ModernDataExtractorUI:
             buttons_frame,
             text="終了",
             command=self.root.quit,
-            font=ctk.CTkFont(family="Yu Gothic", size=14),
-            height=48,
-            width=100,
+            font=ctk.CTkFont(family="Yu Gothic", size=12),
+            height=35,
+            width=80,
             fg_color="#EF4444",
             hover_color="#DC2626",
-            corner_radius=8
+            corner_radius=6
         )
         self.exit_button.pack(side="right")
     
     def create_progress_section(self, parent):
         """進捗セクションの作成"""
         progress_frame = ctk.CTkFrame(parent, fg_color="#F8FAFC", corner_radius=12)
-        progress_frame.pack(fill="x", pady=(0, 20), padx=20)
+        progress_frame.pack(fill="x", pady=(0, 10), padx=20)
         
         # 進捗ラベル
         self.progress_label = ctk.CTkLabel(
@@ -985,7 +973,7 @@ class ModernDataExtractorUI:
             font=ctk.CTkFont(family="Yu Gothic", size=16, weight="bold"),
             text_color="#1E3A8A"
         )
-        self.progress_label.pack(pady=(20, 10))
+        self.progress_label.pack(pady=(10, 8))
         
         # プログレスバー
         self.progress_bar = ctk.CTkProgressBar(
@@ -994,7 +982,7 @@ class ModernDataExtractorUI:
             progress_color="#3B82F6",
             fg_color="#E5E7EB"
         )
-        self.progress_bar.pack(fill="x", padx=20, pady=(0, 20))
+        self.progress_bar.pack(fill="x", padx=20, pady=(0, 10))
         self.progress_bar.set(0)
     
     def create_data_display_section(self, parent):
@@ -1873,7 +1861,7 @@ class ModernDataExtractorUI:
             lot_tree = ttk.Treeview(
                 lot_table_container,
                 show="headings",
-                height=15  # 高さを増加
+                height=20  # 他のテーブルと統一
             )
             
             # スクロールバー
@@ -1949,6 +1937,23 @@ class ModernDataExtractorUI:
                         values.append("")
                 
                 lot_tree.insert("", "end", values=values)
+            
+            # マウスホイールイベントのバインド
+            def on_lot_mousewheel(event):
+                lot_tree.yview_scroll(int(-1 * (event.delta / 120)), "units")
+                return "break"
+            
+            lot_tree.bind("<MouseWheel>", on_lot_mousewheel)
+            
+            # テーブルに入ったときと出たときのイベント
+            def on_lot_enter(event):
+                self.main_scroll_frame.unbind_all("<MouseWheel>")
+            
+            def on_lot_leave(event):
+                self.bind_main_scroll()
+            
+            lot_tree.bind("<Enter>", on_lot_enter)
+            lot_tree.bind("<Leave>", on_lot_leave)
             
         except Exception as e:
             self.log_message(f"ロット割り当てテーブル作成中にエラーが発生しました: {str(e)}")
@@ -2076,7 +2081,7 @@ class ModernDataExtractorUI:
             ]
             
             # Treeviewの作成
-            inspector_tree = ttk.Treeview(table_frame, columns=inspector_columns, show="headings", height=10)
+            inspector_tree = ttk.Treeview(table_frame, columns=inspector_columns, show="headings", height=20)
             
             # 列の設定
             inspector_column_widths = {
