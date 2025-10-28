@@ -17,6 +17,7 @@ from config import DatabaseConfig
 import calendar
 import locale
 from excel_exporter import ExcelExporter
+from inspector_assignment import InspectorAssignmentManager
 
 
 class ModernDataExtractorUI:
@@ -63,6 +64,9 @@ class ModernDataExtractorUI:
         
         # Excelエクスポーターの初期化
         self.excel_exporter = ExcelExporter()
+        
+        # 検査員割当てマネージャーの初期化
+        self.inspector_manager = InspectorAssignmentManager(log_callback=self.log_message)
         
         # データ保存用変数
         self.current_main_data = None
@@ -324,7 +328,7 @@ class ModernDataExtractorUI:
         # ポップアップウィンドウを作成
         self.calendar_window = ctk.CTkToplevel(self.root)
         self.calendar_window.title(f"{'開始日' if date_type == 'start' else '終了日'}を選択")
-        self.calendar_window.geometry("420x550")  # ボタンが見切れないようサイズ調整
+        self.calendar_window.geometry("420x580")  # コンパクトなデザインに合わせてサイズを調整
         self.calendar_window.resizable(False, False)
         
         # ウィンドウを中央に配置
@@ -345,10 +349,10 @@ class ModernDataExtractorUI:
         title_label = ctk.CTkLabel(
             main_frame,
             text=title_text,
-            font=ctk.CTkFont(family="Yu Gothic", size=20, weight="bold"),
+            font=ctk.CTkFont(family="Yu Gothic", size=16, weight="bold"),  # 20→16に縮小
             text_color="#1E3A8A"
         )
-        title_label.pack(pady=(20, 15))
+        title_label.pack(pady=(15, 10))  # パディングも縮小
         
         # カレンダーヘッダー
         header_frame = ctk.CTkFrame(main_frame, fg_color="transparent")
@@ -358,9 +362,9 @@ class ModernDataExtractorUI:
         prev_button = ctk.CTkButton(
             header_frame,
             text="◀",
-            width=32,
-            height=32,
-            font=ctk.CTkFont(family="Yu Gothic", size=14, weight="bold"),
+            width=28,  # 32→28に縮小
+            height=28,  # 32→28に縮小
+            font=ctk.CTkFont(family="Yu Gothic", size=10, weight="bold"),  # 14→10に縮小
             fg_color="#3B82F6",
             hover_color="#2563EB",
             command=self.prev_month_popup
@@ -371,7 +375,7 @@ class ModernDataExtractorUI:
         self.month_year_label_popup = ctk.CTkLabel(
             header_frame,
             text=f"{self.current_year}年 {self.current_month}月",
-            font=ctk.CTkFont(family="Yu Gothic", size=18, weight="bold"),
+            font=ctk.CTkFont(family="Yu Gothic", size=14, weight="bold"),  # 18→14に縮小
             text_color="#1E3A8A"
         )
         self.month_year_label_popup.pack(side="left", expand=True)
@@ -380,9 +384,9 @@ class ModernDataExtractorUI:
         next_button = ctk.CTkButton(
             header_frame,
             text="▶",
-            width=32,
-            height=32,
-            font=ctk.CTkFont(family="Yu Gothic", size=14, weight="bold"),
+            width=28,  # 32→28に縮小
+            height=28,  # 32→28に縮小
+            font=ctk.CTkFont(family="Yu Gothic", size=10, weight="bold"),  # 14→10に縮小
             fg_color="#3B82F6",
             hover_color="#2563EB",
             command=self.next_month_popup
@@ -393,9 +397,9 @@ class ModernDataExtractorUI:
         today_button = ctk.CTkButton(
             header_frame,
             text="今日",
-            width=50,
-            height=32,
-            font=ctk.CTkFont(family="Yu Gothic", size=12, weight="bold"),
+            width=40,  # 50→40に縮小
+            height=28,  # 32→28に縮小
+            font=ctk.CTkFont(family="Yu Gothic", size=10, weight="bold"),  # 12→10に縮小
             fg_color="#10B981",
             hover_color="#059669",
             command=self.go_to_today_popup
@@ -404,6 +408,7 @@ class ModernDataExtractorUI:
         
         # 曜日ヘッダー（日曜スタート）
         weekdays = ["日", "月", "火", "水", "木", "金", "土"]
+        weekday_colors = ["#DC2626", "#6B7280", "#6B7280", "#6B7280", "#6B7280", "#6B7280", "#2563EB"]  # 日曜日:赤、土曜日:青
         weekday_frame = ctk.CTkFrame(main_frame, fg_color="transparent")
         weekday_frame.pack(fill="x", padx=15, pady=(0, 5))
         
@@ -411,11 +416,11 @@ class ModernDataExtractorUI:
             label = ctk.CTkLabel(
                 weekday_frame,
                 text=day,
-                font=ctk.CTkFont(family="Yu Gothic", size=14, weight="bold"),
-                text_color="#6B7280",
-                width=40
+                font=ctk.CTkFont(family="Yu Gothic", size=12, weight="bold"),  # 14→12に縮小
+                text_color=weekday_colors[i],
+                width=35  # 40→35に縮小
             )
-            label.grid(row=0, column=i, padx=2)
+            label.grid(row=0, column=i, padx=1)  # padx=2→1に縮小
         
         # カレンダーグリッド
         self.calendar_frame_popup = ctk.CTkFrame(main_frame, fg_color="transparent")
@@ -428,10 +433,10 @@ class ModernDataExtractorUI:
         self.selected_dates_label_popup = ctk.CTkLabel(
             self.selected_dates_frame_popup,
             text=f"{'開始日' if self.current_date_type == 'start' else '終了日'}を選択してください",
-            font=ctk.CTkFont(family="Yu Gothic", size=14),
+            font=ctk.CTkFont(family="Yu Gothic", size=12),  # 14→12に縮小
             text_color="#1E3A8A"
         )
-        self.selected_dates_label_popup.pack(pady=10)
+        self.selected_dates_label_popup.pack(pady=8)  # 10→8に縮小
         
         # ボタンフレーム
         button_frame = ctk.CTkFrame(main_frame, fg_color="transparent")
@@ -442,28 +447,28 @@ class ModernDataExtractorUI:
             button_frame,
             text="確定",
             command=self.confirm_period_selection,
-            font=ctk.CTkFont(family="Yu Gothic", size=14, weight="bold"),
-            width=80,
-            height=40,
+            font=ctk.CTkFont(family="Yu Gothic", size=12, weight="bold"),  # 14→12に縮小
+            width=70,  # 80→70に縮小
+            height=35,  # 40→35に縮小
             fg_color="#3B82F6",
             hover_color="#2563EB",
             corner_radius=8
         )
-        confirm_button.pack(side="left", padx=(0, 8))
+        confirm_button.pack(side="left", padx=(0, 6))  # 8→6に縮小
         
         # キャンセルボタン
         cancel_button = ctk.CTkButton(
             button_frame,
             text="キャンセル",
             command=self.cancel_period_selection,
-            font=ctk.CTkFont(family="Yu Gothic", size=14, weight="bold"),
-            width=80,
-            height=40,
+            font=ctk.CTkFont(family="Yu Gothic", size=12, weight="bold"),  # 14→12に縮小
+            width=70,  # 80→70に縮小
+            height=35,  # 40→35に縮小
             fg_color="#6B7280",
             hover_color="#4B5563",
             corner_radius=8
         )
-        cancel_button.pack(side="right", padx=(8, 0))
+        cancel_button.pack(side="right", padx=(6, 0))  # 8→6に縮小
         
         # カレンダーを更新
         self.update_calendar_popup()
@@ -525,24 +530,32 @@ class ModernDataExtractorUI:
                     label = ctk.CTkLabel(
                         self.calendar_frame_popup,
                         text="",
-                        width=40,
-                        height=40
+                        width=35,  # 40→35に縮小
+                        height=35  # 40→35に縮小
                     )
-                    label.grid(row=week_num, column=day_num, padx=2, pady=2)
+                    label.grid(row=week_num, column=day_num, padx=1, pady=1)  # padx, pady=2→1に縮小
                 else:
                     # 日付ボタン
+                    # 土曜日と日曜日の色を設定
+                    if day_num == 6:  # 土曜日（日曜スタートなので6番目）
+                        text_color = "#2563EB"  # 青
+                    elif day_num == 0:  # 日曜日（日曜スタートなので0番目）
+                        text_color = "#DC2626"  # 赤
+                    else:
+                        text_color = "#374151"  # 通常のグレー
+                    
                     button = ctk.CTkButton(
                         self.calendar_frame_popup,
                         text=str(day),
-                        width=40,
-                        height=40,
-                        font=ctk.CTkFont(family="Yu Gothic", size=14),
+                        width=35,  # 40→35に縮小
+                        height=35,  # 40→35に縮小
+                        font=ctk.CTkFont(family="Yu Gothic", size=12),  # 14→12に縮小
                         fg_color="white",
                         hover_color="#F3F4F6",
-                        text_color="#374151",
+                        text_color=text_color,
                         command=lambda d=day: self.select_date_popup(d)
                     )
-                    button.grid(row=week_num, column=day_num, padx=2, pady=2)
+                    button.grid(row=week_num, column=day_num, padx=1, pady=1)  # padx, pady=2→1に縮小
                     
                     # 今日の日付をハイライト
                     today = date.today()
@@ -676,6 +689,7 @@ class ModernDataExtractorUI:
         
         # 曜日ヘッダー
         weekdays = ["月", "火", "水", "木", "金", "土", "日"]
+        weekday_colors = ["#6B7280", "#6B7280", "#6B7280", "#6B7280", "#6B7280", "#2563EB", "#DC2626"]  # 土曜日:青、日曜日:赤
         weekday_frame = ctk.CTkFrame(parent, fg_color="transparent")
         weekday_frame.pack(fill="x", padx=15, pady=(0, 5))
         
@@ -684,7 +698,7 @@ class ModernDataExtractorUI:
                 weekday_frame,
                 text=day,
                 font=ctk.CTkFont(family="Yu Gothic", size=14, weight="bold"),
-                text_color="#6B7280",
+                text_color=weekday_colors[i],
                 width=40
             )
             label.grid(row=0, column=i, padx=2)
@@ -758,6 +772,14 @@ class ModernDataExtractorUI:
                     label.grid(row=week_num, column=day_num, padx=2, pady=2)
                 else:
                     # 日付ボタン
+                    # 土曜日と日曜日の色を設定
+                    if day_num == 5:  # 土曜日（月曜スタートなので5番目）
+                        text_color = "#2563EB"  # 青
+                    elif day_num == 6:  # 日曜日（月曜スタートなので6番目）
+                        text_color = "#DC2626"  # 赤
+                    else:
+                        text_color = "#374151"  # 通常のグレー
+                    
                     button = ctk.CTkButton(
                         self.calendar_frame,
                         text=str(day),
@@ -766,7 +788,7 @@ class ModernDataExtractorUI:
                         font=ctk.CTkFont(family="Yu Gothic", size=14),
                         fg_color="white",
                         hover_color="#F3F4F6",
-                        text_color="#374151",
+                        text_color=text_color,
                         command=lambda d=day: self.select_date(d)
                     )
                     button.grid(row=week_num, column=day_num, padx=2, pady=2)
@@ -1731,13 +1753,13 @@ class ModernDataExtractorUI:
             self.skill_master_data = skill_master_df
             
             # 検査員割振りテーブルを作成
-            inspector_df = self.create_inspector_assignment_table(assignment_df, product_master_df)
+            inspector_df = self.inspector_manager.create_inspector_assignment_table(assignment_df, product_master_df)
             if inspector_df is None:
                 self.log_message("検査員割振りテーブルの作成に失敗しました")
                 return
             
             # 検査員を割り当て
-            inspector_df = self.assign_inspectors(inspector_df, inspector_master_df, skill_master_df)
+            inspector_df = self.inspector_manager.assign_inspectors(inspector_df, inspector_master_df, skill_master_df)
             
             # 検査員割振りデータを保存（エクスポート用）
             self.current_inspector_data = inspector_df
@@ -1989,85 +2011,6 @@ class ModernDataExtractorUI:
             logger.error(error_msg)
             return None
     
-    def create_inspector_assignment_table(self, assignment_df, product_master_df):
-        """検査員割振りテーブルを作成"""
-        try:
-            if assignment_df.empty:
-                self.log_message("ロット割り当て結果がありません")
-                return None
-            
-            if product_master_df is None or product_master_df.empty:
-                self.log_message("製品マスタが読み込まれていません")
-                return None
-            
-            inspector_results = []
-            
-            for _, row in assignment_df.iterrows():
-                product_number = row['品番']
-                current_process_number = row.get('現在工程番号', '')
-                lot_quantity = row['ロット数量']
-                
-                # 製品マスタから該当する品番のデータを取得
-                product_master_rows = product_master_df[product_master_df['品番'] == product_number]
-                
-                if product_master_rows.empty:
-                    # 品番が一致しない場合はスキップ
-                    continue
-                
-                inspection_time_per_unit = None
-                
-                # 工程番号が一致する行を探す
-                if current_process_number and current_process_number != '':
-                    matching_rows = product_master_rows[product_master_rows['工程番号'] == current_process_number]
-                    if not matching_rows.empty:
-                        inspection_time_per_unit = matching_rows.iloc[0]['検査時間']
-                
-                # 工程番号が一致しない場合は、品番一致した行の検査時間を取得
-                if inspection_time_per_unit is None or pd.isna(inspection_time_per_unit):
-                    inspection_time_per_unit = product_master_rows.iloc[0]['検査時間']
-                
-                if pd.isna(inspection_time_per_unit):
-                    continue
-                
-                # 検査時間を計算（秒 × ロット数量）
-                total_inspection_time_seconds = inspection_time_per_unit * lot_quantity
-                
-                # 時間表示に変換（○.○H）
-                total_inspection_time_hours = total_inspection_time_seconds / 3600
-                
-                # 秒/個はそのまま使用（既に秒単位）
-                seconds_per_unit = inspection_time_per_unit
-                
-                inspector_result = {
-                    '出荷予定日': row['出荷予定日'],
-                    '品番': product_number,
-                    '品名': row['品名'],
-                    '客先': row['客先'],
-                    'ロットID': row.get('生産ロットID', ''),
-                    '数量': lot_quantity,
-                    'ロット日': row.get('指示日', ''),
-                    '号機': row.get('号機', ''),
-                    '現在工程名': row.get('現在工程名', ''),
-                    '秒/個': round(seconds_per_unit, 1),
-                    '検査時間': round(total_inspection_time_hours, 1)
-                }
-                
-                inspector_results.append(inspector_result)
-            
-            if not inspector_results:
-                self.log_message("検査員割振りデータが生成されませんでした")
-                return None
-            
-            inspector_df = pd.DataFrame(inspector_results)
-            self.log_message(f"検査員割振りテーブルを作成しました: {len(inspector_df)}件")
-            
-            return inspector_df
-            
-        except Exception as e:
-            error_msg = f"検査員割振りテーブルの作成に失敗しました: {str(e)}"
-            self.log_message(error_msg)
-            logger.error(error_msg)
-            return None
     
     def display_inspector_assignment_table(self, inspector_df):
         """検査員割振りテーブルを表示"""
@@ -2124,12 +2067,14 @@ class ModernDataExtractorUI:
                     inspector_tree.column(col, anchor="e")
             
             # スクロールバーの追加
-            inspector_scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=inspector_tree.yview)
-            inspector_tree.configure(yscrollcommand=inspector_scrollbar.set)
+            inspector_v_scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=inspector_tree.yview)
+            inspector_h_scrollbar = ttk.Scrollbar(table_frame, orient="horizontal", command=inspector_tree.xview)
+            inspector_tree.configure(yscrollcommand=inspector_v_scrollbar.set, xscrollcommand=inspector_h_scrollbar.set)
             
             # グリッドレイアウト
             inspector_tree.grid(row=0, column=0, sticky="nsew")
-            inspector_scrollbar.grid(row=0, column=1, sticky="ns")
+            inspector_v_scrollbar.grid(row=0, column=1, sticky="ns")
+            inspector_h_scrollbar.grid(row=1, column=0, sticky="ew")
             
             table_frame.grid_rowconfigure(0, weight=1)
             table_frame.grid_columnconfigure(0, weight=1)
@@ -2186,7 +2131,7 @@ class ModernDataExtractorUI:
                 return
             
             # 検査員割振りテーブルを作成
-            inspector_df = self.create_inspector_assignment_table(self.current_assignment_data, product_master_df)
+            inspector_df = self.inspector_manager.create_inspector_assignment_table(self.current_assignment_data, product_master_df)
             if inspector_df is None:
                 return
             
@@ -2271,23 +2216,23 @@ class ModernDataExtractorUI:
                 self.log_message(f"検査員マスタファイルが見つかりません: {file_path}")
                 return None
             
-            # CSVファイルを読み込み
-            df = pd.read_csv(file_path, encoding='utf-8-sig')
+            # CSVファイルを読み込み（ヘッダーなし）
+            df = pd.read_csv(file_path, encoding='utf-8-sig', header=None)
             
             # 列名を確認
-            self.log_message(f"検査員マスタの列: {df.columns.tolist()}")
+            self.log_message(f"検査員マスタの元の列数: {len(df.columns)}")
             
-            # 最初の行をヘッダーとして使用する場合の処理
-            if len(df.columns) > 0 and str(df.columns[0]).startswith('#'):
-                # 最初の行をヘッダーとして使用
-                new_header = df.iloc[0]
-                df = df[1:]
+            # 1行目（#0,1,2,3,4,5,6,7,）をスキップし、2行目（#ID,#氏名,...）をヘッダーとして使用
+            if len(df) > 1:
+                # 2行目をヘッダーとして使用
+                new_header = df.iloc[1]
+                df = df[2:]  # 2行目以降のデータのみ残す
                 df.columns = new_header
                 df = df.reset_index(drop=True)
                 self.log_message(f"ヘッダーを修正しました: {df.columns.tolist()}")
             
             # 必要な列が存在するかチェック
-            required_columns = ['氏名', '開始時刻', '終了時刻']
+            required_columns = ['#氏名', '開始時刻', '終了時刻']
             missing_columns = [col for col in required_columns if col not in df.columns]
             
             if missing_columns:
@@ -2296,7 +2241,7 @@ class ModernDataExtractorUI:
                 for col in df.columns:
                     col_str = str(col)
                     if '氏名' in col_str or '名前' in col_str:
-                        column_mapping[col] = '氏名'
+                        column_mapping[col] = '#氏名'
                     elif ('開始' in col_str and '時刻' in col_str) or '開始時間' in col_str:
                         column_mapping[col] = '開始時刻'
                     elif ('終了' in col_str and '時刻' in col_str) or '終了時間' in col_str:
@@ -2309,7 +2254,7 @@ class ModernDataExtractorUI:
                     # デフォルトの列名を試行（B列=氏名、D列=開始時刻、E列=終了時刻）
                     if len(df.columns) >= 5:
                         df = df.rename(columns={
-                            df.columns[1]: '氏名',  # B列
+                            df.columns[1]: '#氏名',  # B列
                             df.columns[3]: '開始時刻',  # D列
                             df.columns[4]: '終了時刻'   # E列
                         })
@@ -2360,20 +2305,20 @@ class ModernDataExtractorUI:
                 self.log_message(f"スキルマスタファイルが見つかりません: {file_path}")
                 return None
             
-            # CSVファイルを読み込み
-            df = pd.read_csv(file_path, encoding='utf-8-sig')
+            # CSVファイルを読み込み（ヘッダーなし）
+            df = pd.read_csv(file_path, encoding='utf-8-sig', header=None)
             
             # 列名を確認
-            self.log_message(f"スキルマスタの列: {df.columns.tolist()}")
+            self.log_message(f"スキルマスタの元の列数: {len(df.columns)}")
             
-            # 最初の行をヘッダーとして使用する場合の処理
-            if len(df.columns) > 0 and str(df.columns[0]).startswith('#'):
-                # 最初の行をヘッダーとして使用
-                new_header = df.iloc[0]
-                df = df[1:]
-                df.columns = new_header
+            # 1行目（品番, 工程, V002, V004, ...）を列名として使用
+            if len(df) > 1:
+                # 1行目を列名として設定
+                df.columns = df.iloc[0]
+                # 1行目と2行目（検査員名の行）を削除
+                df = df[2:]  # 2行目以降のデータのみ残す
                 df = df.reset_index(drop=True)
-                self.log_message(f"ヘッダーを修正しました: {df.columns.tolist()}")
+                self.log_message(f"スキルマスタの列名: {df.columns.tolist()[:10]}...")  # 最初の10列のみ表示
             
             self.log_message(f"スキルマスタを読み込みました: {len(df)}件")
             return df
@@ -2384,197 +2329,9 @@ class ModernDataExtractorUI:
             logger.error(error_msg)
             return None
     
-    def assign_inspectors(self, inspector_df, inspector_master_df, skill_master_df):
-        """検査員を割り当てる"""
-        try:
-            if inspector_df is None or inspector_df.empty:
-                return inspector_df
-            
-            if inspector_master_df is None or inspector_master_df.empty:
-                self.log_message("検査員マスタが読み込まれていません")
-                return inspector_df
-            
-            if skill_master_df is None or skill_master_df.empty:
-                self.log_message("スキルマスタが読み込まれていません")
-                return inspector_df
-            
-            # 結果用のDataFrameを作成
-            result_df = inspector_df.copy()
-            
-            # 新しい列を追加
-            result_df['検査員人数'] = 0
-            result_df['分割検査時間'] = 0.0
-            result_df['検査員1'] = ''
-            result_df['検査員2'] = ''
-            result_df['検査員3'] = ''
-            result_df['検査員4'] = ''
-            result_df['検査員5'] = ''
-            
-            # 各ロットに対して検査員を割り当て
-            for index, row in result_df.iterrows():
-                inspection_time = row['検査時間']
-                product_number = row['品番']
-                process_number = row.get('現在工程番号', '')
-                
-                # 必要な検査員人数を計算（3時間を超える場合は複数人）
-                if inspection_time <= 3.0:
-                    required_inspectors = 1
-                else:
-                    required_inspectors = max(2, int(inspection_time / 3.0) + 1)
-                
-                # 分割検査時間を計算
-                divided_time = inspection_time / required_inspectors
-                
-                # スキルマスタから該当する品番と工程番号のスキル情報を取得
-                available_inspectors = self.get_available_inspectors(
-                    product_number, process_number, skill_master_df, inspector_master_df
-                )
-                
-                if not available_inspectors:
-                    self.log_message(f"品番 {product_number} の検査員が見つかりません")
-                    # デフォルトの検査員を割り当て（テスト用）
-                    if len(inspector_master_df) > 0:
-                        default_inspector = inspector_master_df.iloc[0]
-                        available_inspectors = [{
-                            '氏名': default_inspector['氏名'],
-                            'スキル': 2,  # 中スキル
-                            '就業時間': default_inspector['就業時間'],
-                            'コード': 'DEFAULT'
-                        }]
-                        self.log_message(f"デフォルト検査員 '{default_inspector['氏名']}' を割り当て")
-                    else:
-                        continue
-                
-                # 検査員を割り当て
-                assigned_inspectors = self.select_inspectors(
-                    available_inspectors, required_inspectors, divided_time
-                )
-                
-                # 結果を設定
-                result_df.at[index, '検査員人数'] = len(assigned_inspectors)
-                result_df.at[index, '分割検査時間'] = round(divided_time, 1)
-                
-                # 検査員名を設定
-                for i, inspector in enumerate(assigned_inspectors):
-                    if i < 5:  # 最大5人まで
-                        result_df.at[index, f'検査員{i+1}'] = f"{inspector['氏名']}({inspector['スキル']})"
-            
-            self.log_message(f"検査員割り当てが完了しました: {len(result_df)}件")
-            return result_df
-            
-        except Exception as e:
-            error_msg = f"検査員割り当て中にエラーが発生しました: {str(e)}"
-            self.log_message(error_msg)
-            logger.error(error_msg)
-            return inspector_df
     
-    def get_available_inspectors(self, product_number, process_number, skill_master_df, inspector_master_df):
-        """利用可能な検査員を取得"""
-        try:
-            available_inspectors = []
-            
-            # デバッグ情報を出力
-            self.log_message(f"品番 '{product_number}' の検査員を検索中...")
-            self.log_message(f"工程番号: '{process_number}'")
-            
-            # スキルマスタから該当する品番の行を取得
-            skill_rows = skill_master_df[skill_master_df.iloc[:, 0] == product_number]
-            
-            if skill_rows.empty:
-                self.log_message(f"品番 '{product_number}' がスキルマスタに見つかりません")
-                
-                # 部分一致検索を試行
-                skill_rows = skill_master_df[skill_master_df.iloc[:, 0].str.contains(str(product_number), na=False)]
-                if not skill_rows.empty:
-                    self.log_message(f"品番 '{product_number}' で部分一致しました: {len(skill_rows)}件")
-                else:
-                    # 品番が一致しない場合は、工程番号で検索
-                    if process_number:
-                        skill_rows = skill_master_df[skill_master_df.iloc[:, 1] == process_number]
-                        if not skill_rows.empty:
-                            self.log_message(f"工程番号 '{process_number}' でマッチしました")
-                        else:
-                            self.log_message(f"工程番号 '{process_number}' でも見つかりません")
-            else:
-                self.log_message(f"品番 '{product_number}' でマッチしました: {len(skill_rows)}件")
-            
-            if skill_rows.empty:
-                return available_inspectors
-            
-            # 各検査員のスキルを確認
-            for _, skill_row in skill_rows.iterrows():
-                for col_name in skill_master_df.columns[2:]:  # 3列目以降が検査員名
-                    inspector_code = col_name
-                    skill_value = skill_row[col_name]
-                    
-                    if pd.notna(skill_value) and skill_value in [1, 2, 3]:
-                        # 検査員マスタから該当する検査員の情報を取得
-                        # 検査員コード（V002, V004等）で検索
-                        inspector_info = inspector_master_df[inspector_master_df['#ID'] == inspector_code]
-                        if not inspector_info.empty:
-                            inspector_data = inspector_info.iloc[0]
-                            available_inspectors.append({
-                                '氏名': inspector_data['氏名'],
-                                'スキル': int(skill_value),
-                                '就業時間': inspector_data['就業時間'],
-                                'コード': inspector_code
-                            })
-                            self.log_message(f"検査員 '{inspector_data['氏名']}' (コード: {inspector_code}, スキル: {skill_value}) を追加")
-            
-            # スキルレベルでソート（1=高スキル、3=低スキル）
-            available_inspectors.sort(key=lambda x: x['スキル'])
-            
-            self.log_message(f"利用可能な検査員: {len(available_inspectors)}人")
-            return available_inspectors
-            
-        except Exception as e:
-            self.log_message(f"利用可能な検査員取得中にエラーが発生しました: {str(e)}")
-            return []
     
-    def select_inspectors(self, available_inspectors, required_count, divided_time):
-        """検査員を選択する"""
-        try:
-            if not available_inspectors:
-                return []
-            
-            selected_inspectors = []
-            
-            # 高スキル者を優先的に選択
-            high_skill_inspectors = [insp for insp in available_inspectors if insp['スキル'] == 1]
-            medium_skill_inspectors = [insp for insp in available_inspectors if insp['スキル'] == 2]
-            low_skill_inspectors = [insp for insp in available_inspectors if insp['スキル'] == 3]
-            
-            # バランスを考慮して選択
-            if required_count == 1:
-                # 1人の場合は高スキル者を優先
-                if high_skill_inspectors:
-                    selected_inspectors.append(high_skill_inspectors[0])
-                elif medium_skill_inspectors:
-                    selected_inspectors.append(medium_skill_inspectors[0])
-                elif low_skill_inspectors:
-                    selected_inspectors.append(low_skill_inspectors[0])
-            else:
-                # 複数人の場合はバランスを考慮
-                # 高スキル者と低スキル者を組み合わせ
-                if high_skill_inspectors and low_skill_inspectors:
-                    # 高スキル者と低スキル者を交互に選択
-                    for i in range(required_count):
-                        if i % 2 == 0 and high_skill_inspectors:
-                            selected_inspectors.append(high_skill_inspectors.pop(0))
-                        elif low_skill_inspectors:
-                            selected_inspectors.append(low_skill_inspectors.pop(0))
-                        elif medium_skill_inspectors:
-                            selected_inspectors.append(medium_skill_inspectors.pop(0))
-                else:
-                    # 利用可能な検査員から順番に選択
-                    all_inspectors = high_skill_inspectors + medium_skill_inspectors + low_skill_inspectors
-                    selected_inspectors = all_inspectors[:required_count]
-            
-            return selected_inspectors
-            
-        except Exception as e:
-            self.log_message(f"検査員選択中にエラーが発生しました: {str(e)}")
-            return []
+    
     
     def export_selected_table(self):
         """選択されたテーブルをExcel出力"""
