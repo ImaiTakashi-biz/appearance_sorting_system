@@ -2457,23 +2457,33 @@ class ModernDataExtractorUI:
             if self.current_inspector_data is None:
                 return
             
-            # 検査員の検査時間集計を取得
+            # 検査員の検査時間集計を取得（実際に割り当てられた検査員のみ）
             inspector_hours = {}
             for _, row in self.current_inspector_data.iterrows():
-                for i in range(1, 4):  # 検査員1, 2, 3
+                # 検査員1～5を確認
+                for i in range(1, 6):
                     inspector_col = f'検査員{i}'
                     if inspector_col in row and pd.notna(row[inspector_col]):
-                        inspector_name = row[inspector_col]
-                        # スキル値を除去して名前のみ取得
+                        inspector_name = str(row[inspector_col]).strip()
+                        
+                        # 空文字列をスキップ
+                        if not inspector_name:
+                            continue
+                        
+                        # スキル値や(新)を除去して名前のみ取得
                         if '(' in inspector_name:
-                            inspector_name = inspector_name.split('(')[0]
+                            inspector_name = inspector_name.split('(')[0].strip()
+                        
+                        # 名前が空の場合はスキップ
+                        if not inspector_name:
+                            continue
                         
                         if inspector_name not in inspector_hours:
-                            inspector_hours[inspector_name] = 0
+                            inspector_hours[inspector_name] = 0.0
                         
                         # 分割検査時間を加算
                         if '分割検査時間' in row and pd.notna(row['分割検査時間']):
-                            inspector_hours[inspector_name] += row['分割検査時間']
+                            inspector_hours[inspector_name] += float(row['分割検査時間'])
             
             if not inspector_hours:
                 no_data_label = ctk.CTkLabel(
@@ -2547,16 +2557,26 @@ class ModernDataExtractorUI:
                 no_data_label.pack(expand=True)
                 return
             
-            # 検査員ごとのロットデータを整理
+            # 検査員ごとのロットデータを整理（実際に割り当てられた検査員のみ）
             inspector_lots = {}
             for _, row in self.current_inspector_data.iterrows():
-                for i in range(1, 4):  # 検査員1, 2, 3
+                # 検査員1～5を確認
+                for i in range(1, 6):
                     inspector_col = f'検査員{i}'
                     if inspector_col in row and pd.notna(row[inspector_col]):
-                        inspector_name = row[inspector_col]
-                        # スキル値を除去して名前のみ取得
+                        inspector_name = str(row[inspector_col]).strip()
+                        
+                        # 空文字列をスキップ
+                        if not inspector_name:
+                            continue
+                        
+                        # スキル値や(新)を除去して名前のみ取得
                         if '(' in inspector_name:
-                            inspector_name = inspector_name.split('(')[0]
+                            inspector_name = inspector_name.split('(')[0].strip()
+                        
+                        # 名前が空の場合はスキップ
+                        if not inspector_name:
+                            continue
                         
                         if inspector_name not in inspector_lots:
                             inspector_lots[inspector_name] = []
@@ -2583,6 +2603,85 @@ class ModernDataExtractorUI:
                 no_data_label.pack(expand=True)
                 return
             
+            # 日付フォーマット関数（全データ処理の前に定義）
+            def format_date(date_value):
+                """日付をyyyy/mm/dd形式に変換"""
+                if pd.isna(date_value) or date_value == '' or date_value is None:
+                    return ''
+                try:
+                    # pandasのTimestamp型または文字列を処理
+                    if isinstance(date_value, pd.Timestamp):
+                        return date_value.strftime('%Y/%m/%d')
+                    elif isinstance(date_value, str):
+                        # 文字列の場合、まずパースを試みる
+                        parsed_date = pd.to_datetime(date_value, errors='coerce')
+                        if pd.notna(parsed_date):
+                            return parsed_date.strftime('%Y/%m/%d')
+                        return str(date_value)
+                    else:
+                        # その他の型（datetime等）を処理
+                        from datetime import datetime
+                        if isinstance(date_value, datetime):
+                            return date_value.strftime('%Y/%m/%d')
+                        return str(date_value)
+                except Exception:
+                    return str(date_value)
+            
+            # すべてのロットデータを収集して列幅を計算
+            headers = ['生産ロットID', '指示日', '出荷予定日', '品番', '品名', 'ロット数量', '検査時間', 'チーム情報']
+            
+            # フォントメトリクスで実際の幅を測定するためのフォントオブジェクト
+            font_data = tk.font.Font(family="Yu Gothic", size=9)
+            font_header = tk.font.Font(family="Yu Gothic", size=10, weight="bold")
+            
+            # 各列の最大幅を計算
+            column_widths = {}
+            for header in headers:
+                # ヘッダーの幅を測定（フォントメトリクスを使用）
+                header_width = font_header.measure(header)
+                max_width = header_width
+                
+                # すべてのロットデータから最大幅を計算
+                for inspector_name, lots in inspector_lots.items():
+                    for lot in lots:
+                        if header == '生産ロットID':
+                            value = str(lot.get('生産ロットID', ''))
+                        elif header == '指示日':
+                            value = format_date(lot.get('指示日', ''))
+                        elif header == '出荷予定日':
+                            value = format_date(lot.get('出荷予定日', ''))
+                        elif header == '品番':
+                            value = str(lot.get('品番', ''))
+                        elif header == '品名':
+                            value = str(lot.get('品名', ''))
+                        elif header == 'ロット数量':
+                            value = str(lot.get('ロット数量', ''))
+                        elif header == '検査時間':
+                            value = f"{lot.get('分割検査時間', 0):.1f}h" if pd.notna(lot.get('分割検査時間', 0)) else "0h"
+                        elif header == 'チーム情報':
+                            value = str(lot.get('チーム情報', ''))
+                        else:
+                            value = ''
+                        
+                        # 実際の文字列幅を測定（フォントメトリクスを使用）
+                        if value:
+                            value_width = font_data.measure(value)
+                            # パディングを追加（左右10ピクセルずつ）
+                            value_width += 20
+                            
+                            if value_width > max_width:
+                                max_width = value_width
+                
+                # 最小幅と最大幅の制限
+                min_width = header_width + 20  # ヘッダー文字列より小さくしない
+                max_width = max(min_width, max_width)
+                max_width = min(max_width, 500)  # 最大500ピクセルまで（ただし品名とチーム情報はもう少し長く）
+                
+                if header in ['品名', 'チーム情報']:
+                    max_width = min(max_width, 600)  # 長いテキスト列は600ピクセルまで
+                
+                column_widths[header] = max(int(max_width), 60)  # 最小60ピクセル
+            
             # スクロール可能なフレーム
             scroll_frame = ctk.CTkScrollableFrame(parent)
             scroll_frame.pack(fill="both", expand=True, padx=10, pady=10)
@@ -2604,12 +2703,11 @@ class ModernDataExtractorUI:
                 )
                 header_label.pack(fill="x", padx=5, pady=5)
                 
-                # ロット一覧テーブル
-                lot_frame = tk.Frame(inspector_section)
+                # ロット一覧テーブル（スクロール不要、全体のスクロールを使用）
+                lot_frame = tk.Frame(inspector_section, bg="white")
                 lot_frame.pack(fill="x", padx=5, pady=(0, 5))
                 
-                # テーブルヘッダー
-                headers = ['生産ロットID', '指示日', '出荷予定日', '品番', '品名', 'ロット数量', '検査時間', 'チーム情報']
+                # テーブルヘッダー（計算済みの列幅を使用）
                 for j, header in enumerate(headers):
                     header_label = tk.Label(
                         lot_frame,
@@ -2617,7 +2715,8 @@ class ModernDataExtractorUI:
                         font=ctk.CTkFont(family="Yu Gothic", size=10, weight="bold"),
                         bg="#F3F4F6",
                         relief="solid",
-                        borderwidth=1
+                        borderwidth=1,
+                        anchor="center"
                     )
                     header_label.grid(row=0, column=j, sticky="ew", padx=1, pady=1)
                 
@@ -2625,8 +2724,8 @@ class ModernDataExtractorUI:
                 for i, lot in enumerate(lots):
                     row_data = [
                         str(lot.get('生産ロットID', '')),
-                        str(lot.get('指示日', '')),
-                        str(lot.get('出荷予定日', '')),
+                        format_date(lot.get('指示日', '')),
+                        format_date(lot.get('出荷予定日', '')),
                         str(lot.get('品番', '')),
                         str(lot.get('品名', '')),
                         str(lot.get('ロット数量', '')),
@@ -2635,6 +2734,8 @@ class ModernDataExtractorUI:
                     ]
                     
                     for j, data in enumerate(row_data):
+                        header = headers[j]
+                        anchor_pos = "e" if header in ['ロット数量', '検査時間'] else "w"
                         data_label = tk.Label(
                             lot_frame,
                             text=data,
@@ -2642,13 +2743,14 @@ class ModernDataExtractorUI:
                             bg="white" if i % 2 == 0 else "#F9FAFB",
                             relief="solid",
                             borderwidth=1,
-                            anchor="w"
+                            anchor=anchor_pos,
+                            wraplength=column_widths.get(header, 100) * 8  # 折り返し対応
                         )
                         data_label.grid(row=i+1, column=j, sticky="ew", padx=1, pady=1)
                 
-                # 列の重みを設定
-                for j in range(len(headers)):
-                    lot_frame.grid_columnconfigure(j, weight=1)
+                # 列の重みと最小幅を設定（計算された最大幅を使用）
+                for j, header in enumerate(headers):
+                    lot_frame.grid_columnconfigure(j, weight=0, minsize=column_widths.get(header, 100))
                 
         except Exception as e:
             logger.error(f"ロット一覧作成中にエラーが発生しました: {str(e)}")
