@@ -364,4 +364,6 @@ class ExcelExporter:
             error_msg = f"Excelエクスポート中にエラーが発生しました: {str(e)}"
             logger.error(error_msg)
             messagebox.showerror("エクスポートエラー", error_msg)
-            return False
+            return False# �g�p��:
+# exporter = ExcelExporter()
+# exporter.export_main_data_to_excel(...)
