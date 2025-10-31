@@ -1370,6 +1370,123 @@ class ModernDataExtractorUI:
         print(log_entry)  # コンソール出力のみ
         logger.info(message)
     
+    def calculate_column_widths(self, df, columns, min_width=0, max_width=600):
+        """
+        データに基づいて列幅を自動計算
+        
+        Args:
+            df: DataFrame（Excel出力時の全データを使用）
+            columns: 対象となる列名のリスト
+            min_width: 最小列幅（ピクセル、デフォルトは0でデータに合わせる）
+            max_width: 最大列幅（ピクセル）
+        
+        Returns:
+            dict: 列名をキー、列幅を値とする辞書
+        """
+        column_widths = {}
+        
+        for col in columns:
+            if col not in df.columns:
+                # 列が存在しない場合はデフォルト値を使用
+                column_widths[col] = 100
+                continue
+            
+            # ヘッダーの実際の文字幅を測定（日本語文字は幅が広い）
+            header_str = str(col)
+            header_effective_width = 0
+            for char in header_str:
+                if ord(char) > 127:  # 日本語文字
+                    header_effective_width += 2
+                else:  # 英数字・記号
+                    header_effective_width += 1
+            
+            # データの最大実効幅を計算
+            max_effective_width = header_effective_width
+            for value in df[col]:
+                if pd.notna(value):
+                    value_str = str(value)
+                    effective_width = 0
+                    for char in value_str:
+                        if ord(char) > 127:  # 日本語文字
+                            effective_width += 2
+                        else:  # 英数字・記号
+                            effective_width += 1
+                    max_effective_width = max(max_effective_width, effective_width)
+            
+            # 列幅を計算（余白を最小限に）
+            # 1文字あたり約6.5ピクセル + 最小余白8ピクセル
+            # 実際のTreeviewでの表示を考慮して、少し余裕を持たせる
+            column_width = max_effective_width * 6.5 + 8
+            
+            # 最小幅と最大幅を設定（min_widthが0の場合はデータに合わせる）
+            if min_width > 0:
+                column_width = max(min_width, min(column_width, max_width))
+            else:
+                column_width = min(column_width, max_width)
+            
+            column_widths[col] = int(column_width)
+        
+        return column_widths
+    
+    def configure_table_style(self, tree, style_name="Modern.Treeview"):
+        """
+        テーブルのスタイルを統一して設定
+        
+        Args:
+            tree: ttk.Treeviewインスタンス
+            style_name: スタイル名
+        """
+        style = ttk.Style()
+        
+        # 基本スタイル設定
+        style.configure(
+            style_name,
+            background="#FFFFFF",
+            foreground="#1F2937",
+            fieldbackground="#FFFFFF",
+            font=("Yu Gothic UI", 10),
+            rowheight=30,  # 行の高さを少し増やして見やすく
+            borderwidth=0,
+            relief="flat"
+        )
+        
+        # ヘッダースタイルはデフォルトの設定を使用（元の設定に戻す）
+        
+        # 選択時のスタイル
+        style.map(
+            style_name,
+            background=[('selected', '#3B82F6')],
+            foreground=[('selected', '#FFFFFF')]
+        )
+        
+        # スタイルを適用
+        tree.configure(style=style_name)
+    
+    def apply_striped_rows(self, tree, even_color="#F9FAFB", odd_color="#FFFFFF"):
+        """
+        交互の行色を適用（ストライプ表示）
+        
+        Args:
+            tree: ttk.Treeviewインスタンス
+            even_color: 偶数行の背景色
+            odd_color: 奇数行の背景色
+        """
+        # タグ設定
+        tree.tag_configure("even", background=even_color)
+        tree.tag_configure("odd", background=odd_color)
+        
+        # 既存のアイテムにタグを適用
+        children = tree.get_children()
+        for idx, item in enumerate(children):
+            tag = "even" if idx % 2 == 0 else "odd"
+            current_tags = list(tree.item(item, "tags"))
+            # 既存のタグを保持しつつ追加
+            if "negative" not in current_tags:
+                tree.item(item, tags=(tag,))
+            else:
+                # negativeタグがある場合は両方適用
+                tree.item(item, tags=(tag, "negative"))
+    
     def display_data(self, df):
         """データをテーブル形式で表示"""
         try:
@@ -1401,6 +1518,9 @@ class ModernDataExtractorUI:
             # Treeviewの作成
             data_tree = ttk.Treeview(table_container, show="headings", height=20)
             
+            # スタイルを適用
+            self.configure_table_style(data_tree, "Data.Treeview")
+            
             # スクロールバーの追加
             v_scrollbar = ttk.Scrollbar(table_container, orient="vertical", command=data_tree.yview)
             h_scrollbar = ttk.Scrollbar(table_container, orient="horizontal", command=data_tree.xview)
@@ -1424,18 +1544,10 @@ class ModernDataExtractorUI:
             columns = df.columns.tolist()
             data_tree["columns"] = columns
             
-            # 各列の設定（列幅を調整）
-            column_widths = {
-                "品番": 100,
-                "品名": 200,
-                "客先": 150,
-                "出荷予定日": 120,
-                "出荷数": 80,
-                "在庫数": 80,
-                "梱包・完了": 100,
-                "不足数": 80,
-                "処理": 100
-            }
+            # 列幅を自動計算（Excel出力時の全データを使用）
+            # current_main_dataが存在する場合はそれを使用、ない場合は表示用のdfを使用
+            width_df = self.current_main_data if self.current_main_data is not None and not self.current_main_data.empty else df
+            column_widths = self.calculate_column_widths(width_df, columns)
             
             # 右詰めにする数値列
             numeric_columns = ["出荷数", "在庫数", "梱包・完了", "不足数"]
@@ -1445,10 +1557,11 @@ class ModernDataExtractorUI:
                 # 数値列は右詰め、その他は左詰め
                 anchor = "e" if col in numeric_columns else "w"
                 data_tree.column(col, width=width, anchor=anchor)
-                data_tree.heading(col, text=col)
+                data_tree.heading(col, text=col, anchor="center")
             
             # データの挿入（最初の100件まで）
             display_limit = min(100, len(df))
+            row_index = 0
             for index, row in df.head(display_limit).iterrows():
                 values = []
                 item_id = None
@@ -1472,30 +1585,42 @@ class ModernDataExtractorUI:
                     else:
                         values.append("")
                 
-                # データを挿入
-                item_id = data_tree.insert("", "end", values=values)
+                # 行のタグを決定（交互色 + マイナス値の場合は警告色）
+                tags = []
+                tag = "even" if row_index % 2 == 0 else "odd"
+                tags.append(tag)
                 
-                # 不足数がマイナスの場合は背景を赤くする
+                # 不足数がマイナスの場合は警告タグを追加
                 if '不足数' in columns and pd.notna(row['不足数']):
                     try:
                         shortage = float(row['不足数'])
-                        # 不足数を整数で表示
-                        data_tree.set(item_id, '不足数', str(int(shortage)))
-                        
-                        # マイナス値の場合は背景を赤くする
                         if shortage < 0:
-                            # タグを設定してスタイルを適用
-                            data_tree.item(item_id, tags=('negative',))
-                            # 不足数列の背景色を直接設定
+                            tags.append("negative")
+                    except:
+                        pass
+                
+                # データを挿入
+                item_id = data_tree.insert("", "end", values=values, tags=tuple(tags))
+                
+                # 不足数がマイナスの場合は値を更新
+                if '不足数' in columns and pd.notna(row['不足数']):
+                    try:
+                        shortage = float(row['不足数'])
+                        if shortage < 0:
                             data_tree.set(item_id, '不足数', str(int(shortage)))
                     except:
                         pass
+                
+                row_index += 1
             
             # 件数制限の表示
             if len(df) > 100:
-                data_tree.insert("", "end", values=["... 他 " + str(len(df) - 100) + "件のデータがあります"] + [""] * (len(columns) - 1))
+                tag = "even" if row_index % 2 == 0 else "odd"
+                data_tree.insert("", "end", values=["... 他 " + str(len(df) - 100) + "件のデータがあります"] + [""] * (len(columns) - 1), tags=(tag,))
             
-            # タグの設定
+            # タグの設定（交互行色と警告色）
+            data_tree.tag_configure("even", background="#F9FAFB")
+            data_tree.tag_configure("odd", background="#FFFFFF")
             data_tree.tag_configure("negative", background="#FEE2E2", foreground="#DC2626")
             
             # マウスホイールイベントのバインド
@@ -1903,6 +2028,9 @@ class ModernDataExtractorUI:
                 height=20  # 他のテーブルと統一
             )
             
+            # スタイルを適用
+            self.configure_table_style(lot_tree, "Lot.Treeview")
+            
             # スクロールバー
             lot_v_scrollbar = ttk.Scrollbar(lot_table_container, orient="vertical", command=lot_tree.yview)
             lot_h_scrollbar = ttk.Scrollbar(lot_table_container, orient="horizontal", command=lot_tree.xview)
@@ -1917,19 +2045,6 @@ class ModernDataExtractorUI:
             lot_table_container.grid_rowconfigure(0, weight=1)
             lot_table_container.grid_columnconfigure(0, weight=1)
             
-            # デフォルトのスクロール動作を使用（カスタムスクロールを削除）
-            
-            # スタイル設定
-            lot_style = ttk.Style()
-            lot_style.configure("LotTreeview", 
-                               background="white",
-                               foreground="#374151",
-                               fieldbackground="white",
-                               font=("MS Gothic", 9))
-            lot_style.map("LotTreeview",
-                         background=[('selected', '#3B82F6')],
-                         foreground=[('selected', 'white')])
-            
             # 列の定義（画像で要求されているプロパティを含む）
             lot_columns = [
                 "出荷予定日", "品番", "品名", "客先", "出荷数", "在庫数", "在梱包数", "不足数",
@@ -1937,13 +2052,10 @@ class ModernDataExtractorUI:
             ]
             lot_tree["columns"] = lot_columns
             
-            # 列の設定
-            lot_column_widths = {
-                "出荷予定日": 100, "品番": 100, "品名": 200, "客先": 150,
-                "出荷数": 80, "在庫数": 80, "在梱包数": 100, "不足数": 80,
-                "生産ロットID": 120, "ロット数量": 100, "指示日": 100, "号機": 80,
-                "現在工程番号": 120, "現在工程名": 150, "現在工程二次処理": 150
-            }
+            # 列幅を自動計算（Excel出力時の全データを使用）
+            # current_assignment_dataが存在する場合はそれを使用、ない場合は表示用のassignment_dfを使用
+            width_df = self.current_assignment_data if self.current_assignment_data is not None and not self.current_assignment_data.empty else assignment_df
+            lot_column_widths = self.calculate_column_widths(width_df, lot_columns)
             
             # 右詰めにする数値列
             lot_numeric_columns = ["出荷数", "在庫数", "在梱包数", "不足数", "ロット数量"]
@@ -1952,9 +2064,10 @@ class ModernDataExtractorUI:
                 width = lot_column_widths.get(col, 120)
                 anchor = "e" if col in lot_numeric_columns else "w"
                 lot_tree.column(col, width=width, anchor=anchor)
-                lot_tree.heading(col, text=col)
+                lot_tree.heading(col, text=col, anchor="center")
             
             # データの挿入
+            row_index = 0
             for index, row in assignment_df.iterrows():
                 values = []
                 for col in lot_columns:
@@ -1975,7 +2088,14 @@ class ModernDataExtractorUI:
                     else:
                         values.append("")
                 
-                lot_tree.insert("", "end", values=values)
+                # 交互行色を適用
+                tag = "even" if row_index % 2 == 0 else "odd"
+                lot_tree.insert("", "end", values=values, tags=(tag,))
+                row_index += 1
+            
+            # タグの設定（交互行色）
+            lot_tree.tag_configure("even", background="#F9FAFB")
+            lot_tree.tag_configure("odd", background="#FFFFFF")
             
             # マウスホイールイベントのバインド
             def on_lot_mousewheel(event):
@@ -2142,26 +2262,22 @@ class ModernDataExtractorUI:
             # Treeviewの作成
             inspector_tree = ttk.Treeview(table_frame, columns=inspector_columns, show="headings", height=20)
             
-            # 列の設定
-            inspector_column_widths = {
-                "出荷予定日": 100, "品番": 100, "品名": 200, "客先": 150,
-                "生産ロットID": 120, "ロット数量": 80, "指示日": 100, "号機": 80,
-                "現在工程名": 150, "秒/個": 80, "検査時間": 80,
-                "検査員人数": 80, "分割検査時間": 100, "チーム情報": 200, 
-                "検査員1": 120, "検査員2": 120, "検査員3": 120, "検査員4": 120, "検査員5": 120
-            }
+            # スタイルを適用
+            self.configure_table_style(inspector_tree, "Inspector.Treeview")
+            
+            # 列幅を自動計算（Excel出力時の全データを使用）
+            # current_inspector_dataが存在する場合はそれを使用、ない場合は表示用のinspector_dfを使用
+            width_df = self.current_inspector_data if self.current_inspector_data is not None and not self.current_inspector_data.empty else inspector_df
+            inspector_column_widths = self.calculate_column_widths(width_df, inspector_columns)
             
             # 右詰めにする数値列
             inspector_numeric_columns = ["ロット数量", "秒/個", "検査時間", "検査員人数", "分割検査時間"]
             
             for col in inspector_columns:
-                inspector_tree.heading(col, text=col)
                 width = inspector_column_widths.get(col, 100)
-                inspector_tree.column(col, width=width, anchor="center")
-                
-                # 数値列は右詰め
-                if col in inspector_numeric_columns:
-                    inspector_tree.column(col, anchor="e")
+                anchor = "e" if col in inspector_numeric_columns else "w"
+                inspector_tree.heading(col, text=col, anchor="center")
+                inspector_tree.column(col, width=width, anchor=anchor)
             
             # スクロールバーの追加
             inspector_v_scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=inspector_tree.yview)
@@ -2177,6 +2293,7 @@ class ModernDataExtractorUI:
             table_frame.grid_columnconfigure(0, weight=1)
             
             # データの挿入
+            row_index = 0
             for _, row in inspector_df.iterrows():
                 values = []
                 for col in inspector_columns:
@@ -2208,7 +2325,15 @@ class ModernDataExtractorUI:
                         values.append(inspector_name)
                     else:
                         values.append(str(row[col]))
-                inspector_tree.insert("", "end", values=values)
+                
+                # 交互行色を適用
+                tag = "even" if row_index % 2 == 0 else "odd"
+                inspector_tree.insert("", "end", values=values, tags=(tag,))
+                row_index += 1
+            
+            # タグの設定（交互行色）
+            inspector_tree.tag_configure("even", background="#F9FAFB")
+            inspector_tree.tag_configure("odd", background="#FFFFFF")
             
             # マウスホイールイベントのバインド
             def on_inspector_mousewheel(event):
