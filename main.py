@@ -132,41 +132,38 @@ class ModernDataExtractorUI:
         try:
             # メインスクロールフレームにマウスホイールイベントをバインド
             def on_main_mousewheel(event):
+                # CTkScrollableFrameのスクロール速度を他のテーブルと同等にするため、スクロール量を14倍に設定
+                scroll_amount = int(-1 * (event.delta / 120)) * 14
                 # CTkScrollableFrameの正しいスクロールメソッドを使用
                 if hasattr(self.main_scroll_frame, 'yview_scroll'):
-                    self.main_scroll_frame.yview_scroll(int(-1 * (event.delta / 120)), "units")
+                    self.main_scroll_frame.yview_scroll(scroll_amount, "units")
                 else:
                     # CTkScrollableFrameの場合は内部のCanvasを直接操作
                     canvas = self.main_scroll_frame._parent_canvas
                     if canvas:
-                        canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+                        canvas.yview_scroll(scroll_amount, "units")
                 return "break"
             
             # 既存のバインドを解除してから新しいバインドを追加
             self.main_scroll_frame.unbind_all("<MouseWheel>")
             self.main_scroll_frame.bind("<MouseWheel>", on_main_mousewheel)
             
-            # 追加のスクロールイベントをバインド（より確実に動作するように）
-            def on_main_button4(event):
-                if hasattr(self.main_scroll_frame, 'yview_scroll'):
-                    self.main_scroll_frame.yview_scroll(-1, "units")
-                else:
-                    canvas = self.main_scroll_frame._parent_canvas
-                    if canvas:
-                        canvas.yview_scroll(-1, "units")
-                return "break"
+            # メインスクロールフレーム内のすべての子ウィジェットにもバインド（タイトル部分、ボタン部分など）
+            def bind_to_children(widget):
+                """再帰的に子ウィジェットにマウスホイールイベントをバインド"""
+                try:
+                    # テーブル以外のウィジェットにバインド
+                    if not isinstance(widget, (ttk.Treeview, ttk.Scrollbar)):
+                        widget.bind("<MouseWheel>", on_main_mousewheel)
+                    
+                    # 子ウィジェットを再帰的に処理
+                    for child in widget.winfo_children():
+                        bind_to_children(child)
+                except:
+                    pass
             
-            def on_main_button5(event):
-                if hasattr(self.main_scroll_frame, 'yview_scroll'):
-                    self.main_scroll_frame.yview_scroll(1, "units")
-                else:
-                    canvas = self.main_scroll_frame._parent_canvas
-                    if canvas:
-                        canvas.yview_scroll(1, "units")
-                return "break"
-            
-            self.main_scroll_frame.bind("<Button-4>", on_main_button4)
-            self.main_scroll_frame.bind("<Button-5>", on_main_button5)
+            # メインスクロールフレームの子ウィジェットにバインド
+            bind_to_children(self.main_scroll_frame)
             
         except Exception as e:
             logger.error(f"メインスクロールバインド中にエラーが発生しました: {str(e)}")
@@ -1630,15 +1627,20 @@ class ModernDataExtractorUI:
             
             data_tree.bind("<MouseWheel>", on_data_mousewheel)
             
-            # テーブルに入ったときと出たときのイベント
+            # テーブルに入ったときと出たときのイベント（精度向上のため、コンテナフレームにも追加）
+            # 注意: unbind_allは使わず、テーブル専用のスクロールを優先的に処理
             def on_data_enter(event):
-                self.main_scroll_frame.unbind_all("<MouseWheel>")
+                # テーブル内ではテーブルのスクロールを優先（メインスクロールは無効化しない）
+                pass
             
             def on_data_leave(event):
+                # テーブルから出たときはメインスクロールを再バインド（念のため）
                 self.bind_main_scroll()
             
             data_tree.bind("<Enter>", on_data_enter)
             data_tree.bind("<Leave>", on_data_leave)
+            table_container.bind("<Enter>", on_data_enter)
+            table_container.bind("<Leave>", on_data_leave)
             
             # テーブルの先頭にスクロール
             if data_tree.get_children():
@@ -2104,15 +2106,20 @@ class ModernDataExtractorUI:
             
             lot_tree.bind("<MouseWheel>", on_lot_mousewheel)
             
-            # テーブルに入ったときと出たときのイベント
+            # テーブルに入ったときと出たときのイベント（精度向上のため、コンテナフレームにも追加）
+            # 注意: unbind_allは使わず、テーブル専用のスクロールを優先的に処理
             def on_lot_enter(event):
-                self.main_scroll_frame.unbind_all("<MouseWheel>")
+                # テーブル内ではテーブルのスクロールを優先（メインスクロールは無効化しない）
+                pass
             
             def on_lot_leave(event):
+                # テーブルから出たときはメインスクロールを再バインド（念のため）
                 self.bind_main_scroll()
             
             lot_tree.bind("<Enter>", on_lot_enter)
             lot_tree.bind("<Leave>", on_lot_leave)
+            lot_table_container.bind("<Enter>", on_lot_enter)
+            lot_table_container.bind("<Leave>", on_lot_leave)
             
         except Exception as e:
             self.log_message(f"ロット割り当てテーブル作成中にエラーが発生しました: {str(e)}")
@@ -2342,15 +2349,20 @@ class ModernDataExtractorUI:
             
             inspector_tree.bind("<MouseWheel>", on_inspector_mousewheel)
             
-            # テーブルに入ったときと出たときのイベント
+            # テーブルに入ったときと出たときのイベント（精度向上のため、コンテナフレームにも追加）
+            # 注意: unbind_allは使わず、テーブル専用のスクロールを優先的に処理
             def on_inspector_enter(event):
-                self.main_scroll_frame.unbind_all("<MouseWheel>")
+                # テーブル内ではテーブルのスクロールを優先（メインスクロールは無効化しない）
+                pass
             
             def on_inspector_leave(event):
+                # テーブルから出たときはメインスクロールを再バインド（念のため）
                 self.bind_main_scroll()
             
             inspector_tree.bind("<Enter>", on_inspector_enter)
             inspector_tree.bind("<Leave>", on_inspector_leave)
+            table_frame.bind("<Enter>", on_inspector_enter)
+            table_frame.bind("<Leave>", on_inspector_leave)
             
             self.log_message(f"検査員割振りテーブルを表示しました: {len(inspector_df)}件")
             
@@ -2811,6 +2823,38 @@ class ModernDataExtractorUI:
             scroll_frame = ctk.CTkScrollableFrame(parent)
             scroll_frame.pack(fill="both", expand=True, padx=10, pady=10)
             
+            # マウスホイールイベントのバインド（詳細結果テーブル用）
+            def on_detail_mousewheel(event):
+                # CTkScrollableFrameのスクロール速度を他のテーブルと同等にするため、スクロール量を13倍に設定
+                scroll_amount = int(-1 * (event.delta / 120)) * 13
+                # CTkScrollableFrameの正しいスクロールメソッドを使用
+                if hasattr(scroll_frame, 'yview_scroll'):
+                    scroll_frame.yview_scroll(scroll_amount, "units")
+                else:
+                    # CTkScrollableFrameの場合は内部のCanvasを直接操作
+                    canvas = scroll_frame._parent_canvas
+                    if canvas:
+                        canvas.yview_scroll(scroll_amount, "units")
+                return "break"
+            
+            scroll_frame.bind("<MouseWheel>", on_detail_mousewheel)
+            
+            # ポップアップウィンドウ全体にもバインド（全画面でスクロール可能にする）
+            if hasattr(self, 'detail_popup') and self.detail_popup is not None:
+                self.detail_popup.bind("<MouseWheel>", on_detail_mousewheel)
+                # ポップアップ内のすべてのウィジェットにもバインド
+                def bind_detail_scroll_to_children(widget):
+                    """再帰的に子ウィジェットにマウスホイールイベントをバインド"""
+                    try:
+                        widget.bind("<MouseWheel>", on_detail_mousewheel)
+                        for child in widget.winfo_children():
+                            bind_detail_scroll_to_children(child)
+                    except:
+                        pass
+                
+                # ポップアップウィンドウの子ウィジェットにバインド
+                bind_detail_scroll_to_children(self.detail_popup)
+            
             # 検査員ごとにセクションを作成
             for inspector_name, lots in inspector_lots.items():
                 # 検査員セクション
@@ -2876,6 +2920,28 @@ class ModernDataExtractorUI:
                 # 列の重みと最小幅を設定（計算された最大幅を使用）
                 for j, header in enumerate(headers):
                     lot_frame.grid_columnconfigure(j, weight=0, minsize=column_widths.get(header, 100))
+                
+                # テーブルにマウスホイールイベントをバインド（メインテーブル用）
+                def on_lot_table_mousewheel(event, scroll_frame_ref=scroll_frame):
+                    # CTkScrollableFrameのスクロール速度を他のテーブルと同等にするため、スクロール量を13倍に設定
+                    scroll_amount = int(-1 * (event.delta / 120)) * 13
+                    # CTkScrollableFrameの正しいスクロールメソッドを使用
+                    if hasattr(scroll_frame_ref, 'yview_scroll'):
+                        scroll_frame_ref.yview_scroll(scroll_amount, "units")
+                    else:
+                        # CTkScrollableFrameの場合は内部のCanvasを直接操作
+                        canvas = scroll_frame_ref._parent_canvas
+                        if canvas:
+                            canvas.yview_scroll(scroll_amount, "units")
+                    return "break"
+                
+                # lot_frameとその中のすべてのウィジェットにマウスホイールイベントをバインド
+                lot_frame.bind("<MouseWheel>", on_lot_table_mousewheel)
+                inspector_section.bind("<MouseWheel>", on_lot_table_mousewheel)
+                
+                # テーブル内のすべてのラベルにもバインド
+                for widget in lot_frame.winfo_children():
+                    widget.bind("<MouseWheel>", on_lot_table_mousewheel)
                 
         except Exception as e:
             logger.error(f"ロット一覧作成中にエラーが発生しました: {str(e)}")

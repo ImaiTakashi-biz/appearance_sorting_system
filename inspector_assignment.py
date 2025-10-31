@@ -54,6 +54,11 @@ class InspectorAssignmentManager:
                 current_process_number = row.get('現在工程番号', '')
                 lot_quantity = row.get('ロット数量', 0)
                 
+                # ロット数量が0の場合はスキップ（検査員を割り当てない）
+                if lot_quantity == 0 or pd.isna(lot_quantity):
+                    self.log_message(f"ロット数量が0のため、品番 {product_number} の検査員割り当てをスキップします")
+                    continue
+                
                 # 製品マスタから該当する品番のデータを取得
                 product_master_rows = product_master_df[product_master_df['品番'] == product_number]
                 
@@ -194,6 +199,17 @@ class InspectorAssignmentManager:
                 inspection_time = row['検査時間']
                 product_number = row['品番']
                 process_number = row.get('現在工程番号', '')
+                lot_quantity = row.get('ロット数量', 0)
+                
+                # ロット数量が0の場合は検査員を割り当てない
+                if lot_quantity == 0 or pd.isna(lot_quantity) or inspection_time == 0 or pd.isna(inspection_time):
+                    self.log_message(f"ロット数量が0または検査時間が0のため、品番 {product_number} の検査員割り当てをスキップします")
+                    result_df.at[index, '検査員人数'] = 0
+                    result_df.at[index, '分割検査時間'] = 0.0
+                    for i in range(1, 6):
+                        result_df.at[index, f'検査員{i}'] = ''
+                    result_df.at[index, 'チーム情報'] = '数量0のため未割当'
+                    continue
                 
                 # 必要な検査員人数を計算（3時間を超える場合は複数人）
                 if inspection_time <= 3.0:
@@ -1722,6 +1738,124 @@ class InspectorAssignmentManager:
                         
                         self.log_message(f"偏り是正: {reassignment_count}件の再割当てを実行しました")
             
+            # フェーズ2.5: 偏り是正後の最終検証（勤務時間超過の再チェック）
+            self.log_message("全体最適化フェーズ2.5: 偏り是正後の最終検証を開始")
+            
+            # 履歴を再計算
+            self.inspector_daily_assignments = {}
+            self.inspector_work_hours = {}
+            self.inspector_product_hours = {}
+            
+            for index, row in result_df.iterrows():
+                product_number = row['品番']
+                divided_time = row.get('分割検査時間', 0.0)
+                
+                for i in range(1, 6):
+                    inspector_col = f'検査員{i}'
+                    if pd.notna(row.get(inspector_col)) and str(row[inspector_col]).strip() != '':
+                        inspector_name = str(row[inspector_col]).strip()
+                        if '(' in inspector_name:
+                            inspector_name = inspector_name.split('(')[0].strip()
+                        if not inspector_name:
+                            continue
+                        
+                        inspector_info = inspector_master_df[inspector_master_df['#氏名'] == inspector_name]
+                        if not inspector_info.empty:
+                            inspector_code = inspector_info.iloc[0]['#ID']
+                            
+                            if inspector_code not in self.inspector_daily_assignments:
+                                self.inspector_daily_assignments[inspector_code] = {}
+                            if current_date not in self.inspector_daily_assignments[inspector_code]:
+                                self.inspector_daily_assignments[inspector_code][current_date] = 0.0
+                            if inspector_code not in self.inspector_work_hours:
+                                self.inspector_work_hours[inspector_code] = 0.0
+                            if inspector_code not in self.inspector_product_hours:
+                                self.inspector_product_hours[inspector_code] = {}
+                            if product_number not in self.inspector_product_hours[inspector_code]:
+                                self.inspector_product_hours[inspector_code][product_number] = 0.0
+                            
+                            self.inspector_daily_assignments[inspector_code][current_date] += divided_time
+                            self.inspector_work_hours[inspector_code] += divided_time
+                            self.inspector_product_hours[inspector_code][product_number] += divided_time
+            
+            # 勤務時間超過を再チェック
+            phase2_5_violations = []
+            for index, row in result_df.iterrows():
+                product_number = row['品番']
+                divided_time = row.get('分割検査時間', 0.0)
+                
+                for i in range(1, 6):
+                    inspector_col = f'検査員{i}'
+                    if pd.notna(row.get(inspector_col)) and str(row[inspector_col]).strip() != '':
+                        inspector_name = str(row[inspector_col]).strip()
+                        if '(' in inspector_name:
+                            inspector_name = inspector_name.split('(')[0].strip()
+                        if not inspector_name:
+                            continue
+                        
+                        inspector_info = inspector_master_df[inspector_master_df['#氏名'] == inspector_name]
+                        if not inspector_info.empty:
+                            inspector_code = inspector_info.iloc[0]['#ID']
+                            daily_hours = self.inspector_daily_assignments.get(inspector_code, {}).get(current_date, 0.0)
+                            max_hours = inspector_max_hours.get(inspector_code, 8.0)
+                            product_hours = self.inspector_product_hours.get(inspector_code, {}).get(product_number, 0.0)
+                            
+                            # 勤務時間超過をチェック（厳密に）
+                            if daily_hours > max_hours - 0.05:
+                                phase2_5_violations.append((index, inspector_code, inspector_name, "勤務時間超過", daily_hours, max_hours))
+                                self.log_message(f"❌ フェーズ2.5検証: 勤務時間超過が検出されました - 検査員 '{inspector_name}' {daily_hours:.1f}h > {max_hours:.1f}h (ロット {index})")
+                            
+                            # 同一品番4時間超過をチェック
+                            if product_hours > 4.0:
+                                phase2_5_violations.append((index, inspector_code, inspector_name, "同一品番4時間超過", product_hours, 4.0))
+                                self.log_message(f"❌ フェーズ2.5検証: 同一品番4時間超過が検出されました - 検査員 '{inspector_name}' 品番 {product_number} {product_hours:.1f}h > 4.0h (ロット {index})")
+            
+            if phase2_5_violations:
+                self.log_message(f"⚠️ 警告: フェーズ2.5検証で {len(phase2_5_violations)}件の違反が検出されました。該当ロットを未割当にします")
+                for violation in phase2_5_violations:
+                    index = violation[0]
+                    self.clear_assignment(result_df, index)
+                    self.log_message(f"⚠️ ロットインデックス {index} を未割当にしました（{violation[3]}）")
+                
+                # 未割当後の履歴を再計算
+                self.inspector_daily_assignments = {}
+                self.inspector_work_hours = {}
+                self.inspector_product_hours = {}
+                
+                for index, row in result_df.iterrows():
+                    product_number = row['品番']
+                    divided_time = row.get('分割検査時間', 0.0)
+                    
+                    for i in range(1, 6):
+                        inspector_col = f'検査員{i}'
+                        if pd.notna(row.get(inspector_col)) and str(row[inspector_col]).strip() != '':
+                            inspector_name = str(row[inspector_col]).strip()
+                            if '(' in inspector_name:
+                                inspector_name = inspector_name.split('(')[0].strip()
+                            if not inspector_name:
+                                continue
+                            
+                            inspector_info = inspector_master_df[inspector_master_df['#氏名'] == inspector_name]
+                            if not inspector_info.empty:
+                                inspector_code = inspector_info.iloc[0]['#ID']
+                                
+                                if inspector_code not in self.inspector_daily_assignments:
+                                    self.inspector_daily_assignments[inspector_code] = {}
+                                if current_date not in self.inspector_daily_assignments[inspector_code]:
+                                    self.inspector_daily_assignments[inspector_code][current_date] = 0.0
+                                if inspector_code not in self.inspector_work_hours:
+                                    self.inspector_work_hours[inspector_code] = 0.0
+                                if inspector_code not in self.inspector_product_hours:
+                                    self.inspector_product_hours[inspector_code] = {}
+                                if product_number not in self.inspector_product_hours[inspector_code]:
+                                    self.inspector_product_hours[inspector_code][product_number] = 0.0
+                                
+                                self.inspector_daily_assignments[inspector_code][current_date] += divided_time
+                                self.inspector_work_hours[inspector_code] += divided_time
+                                self.inspector_product_hours[inspector_code][product_number] += divided_time
+            else:
+                self.log_message("✅ フェーズ2.5検証: 全てのルール違反が解消されました")
+            
             # フェーズ3: 未割当ロットの再処理（出荷予定日順、新規品優先）
             self.log_message("全体最適化フェーズ3: 未割当ロットの再処理を開始")
             
@@ -1768,6 +1902,12 @@ class InspectorAssignmentManager:
                     product_number = row['品番']
                     inspection_time = row.get('検査時間', 0.0)
                     process_number = row.get('現在工程番号', '')
+                    lot_quantity = row.get('ロット数量', 0)
+                    
+                    # ロット数量が0の場合は検査員を割り当てない
+                    if lot_quantity == 0 or pd.isna(lot_quantity) or inspection_time == 0 or pd.isna(inspection_time):
+                        self.log_message(f"未割当ロット再処理: ロット数量が0または検査時間が0のため、品番 {product_number} の検査員割り当てをスキップします")
+                        continue
                     
                     # 必要人数を計算
                     if inspection_time <= 3.0:
@@ -1886,6 +2026,124 @@ class InspectorAssignmentManager:
                 self.log_message("未割当ロットの再処理が完了しました")
             else:
                 self.log_message("未割当ロットはありませんでした")
+            
+            # フェーズ3.5: 未割当ロット再処理後の最終検証（勤務時間超過の再チェック）
+            self.log_message("全体最適化フェーズ3.5: 未割当ロット再処理後の最終検証を開始")
+            
+            # 履歴を再計算
+            self.inspector_daily_assignments = {}
+            self.inspector_work_hours = {}
+            self.inspector_product_hours = {}
+            
+            for index, row in result_df.iterrows():
+                product_number = row['品番']
+                divided_time = row.get('分割検査時間', 0.0)
+                
+                for i in range(1, 6):
+                    inspector_col = f'検査員{i}'
+                    if pd.notna(row.get(inspector_col)) and str(row[inspector_col]).strip() != '':
+                        inspector_name = str(row[inspector_col]).strip()
+                        if '(' in inspector_name:
+                            inspector_name = inspector_name.split('(')[0].strip()
+                        if not inspector_name:
+                            continue
+                        
+                        inspector_info = inspector_master_df[inspector_master_df['#氏名'] == inspector_name]
+                        if not inspector_info.empty:
+                            inspector_code = inspector_info.iloc[0]['#ID']
+                            
+                            if inspector_code not in self.inspector_daily_assignments:
+                                self.inspector_daily_assignments[inspector_code] = {}
+                            if current_date not in self.inspector_daily_assignments[inspector_code]:
+                                self.inspector_daily_assignments[inspector_code][current_date] = 0.0
+                            if inspector_code not in self.inspector_work_hours:
+                                self.inspector_work_hours[inspector_code] = 0.0
+                            if inspector_code not in self.inspector_product_hours:
+                                self.inspector_product_hours[inspector_code] = {}
+                            if product_number not in self.inspector_product_hours[inspector_code]:
+                                self.inspector_product_hours[inspector_code][product_number] = 0.0
+                            
+                            self.inspector_daily_assignments[inspector_code][current_date] += divided_time
+                            self.inspector_work_hours[inspector_code] += divided_time
+                            self.inspector_product_hours[inspector_code][product_number] += divided_time
+            
+            # 勤務時間超過を再チェック
+            phase3_5_violations = []
+            for index, row in result_df.iterrows():
+                product_number = row['品番']
+                divided_time = row.get('分割検査時間', 0.0)
+                
+                for i in range(1, 6):
+                    inspector_col = f'検査員{i}'
+                    if pd.notna(row.get(inspector_col)) and str(row[inspector_col]).strip() != '':
+                        inspector_name = str(row[inspector_col]).strip()
+                        if '(' in inspector_name:
+                            inspector_name = inspector_name.split('(')[0].strip()
+                        if not inspector_name:
+                            continue
+                        
+                        inspector_info = inspector_master_df[inspector_master_df['#氏名'] == inspector_name]
+                        if not inspector_info.empty:
+                            inspector_code = inspector_info.iloc[0]['#ID']
+                            daily_hours = self.inspector_daily_assignments.get(inspector_code, {}).get(current_date, 0.0)
+                            max_hours = inspector_max_hours.get(inspector_code, 8.0)
+                            product_hours = self.inspector_product_hours.get(inspector_code, {}).get(product_number, 0.0)
+                            
+                            # 勤務時間超過をチェック（厳密に）
+                            if daily_hours > max_hours - 0.05:
+                                phase3_5_violations.append((index, inspector_code, inspector_name, "勤務時間超過", daily_hours, max_hours))
+                                self.log_message(f"❌ フェーズ3.5検証: 勤務時間超過が検出されました - 検査員 '{inspector_name}' {daily_hours:.1f}h > {max_hours:.1f}h (ロット {index})")
+                            
+                            # 同一品番4時間超過をチェック
+                            if product_hours > 4.0:
+                                phase3_5_violations.append((index, inspector_code, inspector_name, "同一品番4時間超過", product_hours, 4.0))
+                                self.log_message(f"❌ フェーズ3.5検証: 同一品番4時間超過が検出されました - 検査員 '{inspector_name}' 品番 {product_number} {product_hours:.1f}h > 4.0h (ロット {index})")
+            
+            if phase3_5_violations:
+                self.log_message(f"⚠️ 警告: フェーズ3.5検証で {len(phase3_5_violations)}件の違反が検出されました。該当ロットを未割当にします")
+                for violation in phase3_5_violations:
+                    index = violation[0]
+                    self.clear_assignment(result_df, index)
+                    self.log_message(f"⚠️ ロットインデックス {index} を未割当にしました（{violation[3]}）")
+                
+                # 未割当後の履歴を再計算
+                self.inspector_daily_assignments = {}
+                self.inspector_work_hours = {}
+                self.inspector_product_hours = {}
+                
+                for index, row in result_df.iterrows():
+                    product_number = row['品番']
+                    divided_time = row.get('分割検査時間', 0.0)
+                    
+                    for i in range(1, 6):
+                        inspector_col = f'検査員{i}'
+                        if pd.notna(row.get(inspector_col)) and str(row[inspector_col]).strip() != '':
+                            inspector_name = str(row[inspector_col]).strip()
+                            if '(' in inspector_name:
+                                inspector_name = inspector_name.split('(')[0].strip()
+                            if not inspector_name:
+                                continue
+                            
+                            inspector_info = inspector_master_df[inspector_master_df['#氏名'] == inspector_name]
+                            if not inspector_info.empty:
+                                inspector_code = inspector_info.iloc[0]['#ID']
+                                
+                                if inspector_code not in self.inspector_daily_assignments:
+                                    self.inspector_daily_assignments[inspector_code] = {}
+                                if current_date not in self.inspector_daily_assignments[inspector_code]:
+                                    self.inspector_daily_assignments[inspector_code][current_date] = 0.0
+                                if inspector_code not in self.inspector_work_hours:
+                                    self.inspector_work_hours[inspector_code] = 0.0
+                                if inspector_code not in self.inspector_product_hours:
+                                    self.inspector_product_hours[inspector_code] = {}
+                                if product_number not in self.inspector_product_hours[inspector_code]:
+                                    self.inspector_product_hours[inspector_code][product_number] = 0.0
+                                
+                                self.inspector_daily_assignments[inspector_code][current_date] += divided_time
+                                self.inspector_work_hours[inspector_code] += divided_time
+                                self.inspector_product_hours[inspector_code][product_number] += divided_time
+            else:
+                self.log_message("✅ フェーズ3.5検証: 全てのルール違反が解消されました")
             
             # 最適化後に全体のチーム情報を再計算（確実に一致させるため）
             self.log_message("全体最適化フェーズ4: チーム情報の再計算を開始")
