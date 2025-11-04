@@ -170,9 +170,30 @@ class ModernDataExtractorUI:
     
     def setup_logging(self):
         """ログ設定"""
-        # ログはコンソール出力のみ（exe化対応）
+        from pathlib import Path
+        from datetime import datetime
+        
         logger.remove()  # デフォルトのハンドラーを削除
-
+        
+        # ログディレクトリを作成
+        log_dir = Path("logs")
+        log_dir.mkdir(exist_ok=True)
+        
+        # ログファイルのパス（日付ごとにファイルを分ける）
+        log_file = log_dir / f"app_{datetime.now().strftime('%Y%m%d')}.log"
+        
+        # コンソール出力用のフィルタ関数
+        def console_filter(record):
+            """重要なログのみコンソールに出力"""
+            message = record["message"]
+            level = record["level"].name
+            # WARNING以上、または重要なマーカーを含むメッセージのみ
+            return (level in ["WARNING", "ERROR", "CRITICAL"] or 
+                   "⚠️" in message or 
+                   "❌" in message or 
+                   "📊" in message)
+        
+        # コンソール出力（重要なログのみ）
         def _safe_console_output(message: str) -> None:
             import sys
             try:
@@ -185,8 +206,24 @@ class ModernDataExtractorUI:
         logger.add(
             _safe_console_output,
             level="INFO",
-            format="{time:HH:mm:ss} | {level} | {message}"
+            format="{time:HH:mm:ss} | {level} | {message}",
+            filter=console_filter
         )
+        
+        # ファイル出力（すべてのログ）
+        logger.add(
+            log_file,
+            level="INFO",
+            format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {message}",
+            rotation="10 MB",  # 10MBごとにローテーション
+            retention="30 days",  # 30日間保持
+            encoding="utf-8",
+            backtrace=True,
+            diagnose=True
+        )
+        
+        logger.info(f"ログファイル: {log_file.absolute()}")
+        print(f"📝 ログファイル: {log_file.absolute()}")
     
     def load_config(self):
         """設定の読み込み"""
@@ -1261,9 +1298,17 @@ class ModernDataExtractorUI:
                 self.log_message("指定された列が見つかりません。全列を取得します。")
                 available_columns = actual_columns
             
-            # 利用可能な列のみでクエリを作成
+            # 利用可能な列のみでクエリを作成（SQL側で日付フィルタリングを実行して高速化）
             columns_str = ", ".join([f"[{col}]" for col in available_columns])
-            query = f"SELECT {columns_str} FROM [{self.config.access_table_name}]"
+            
+            # 出荷予定日でフィルタリングをSQL側で実行（高速化）
+            if '出荷予定日' in available_columns:
+                # Accessの日付形式に変換
+                start_date_str = pd.to_datetime(start_date).strftime('#%Y-%m-%d#')
+                end_date_str = pd.to_datetime(end_date).strftime('#%Y-%m-%d#')
+                query = f"SELECT {columns_str} FROM [{self.config.access_table_name}] WHERE [出荷予定日] >= {start_date_str} AND [出荷予定日] <= {end_date_str} ORDER BY [出荷予定日]"
+            else:
+                query = f"SELECT {columns_str} FROM [{self.config.access_table_name}]"
             
             # データの抽出
             self.update_progress(0.4, "データを抽出中...")
@@ -1299,17 +1344,9 @@ class ModernDataExtractorUI:
                 df['不足数'] = 0
                 self.log_message("不足数の計算に必要な列が見つかりませんでした")
             
-            # 出荷予定日でフィルタリング
+            # 出荷予定日をdatetime型に変換（既にSQL側でソート済み）
             if not df.empty and '出荷予定日' in df.columns:
-                # 日付列をdatetime型に変換
                 df['出荷予定日'] = pd.to_datetime(df['出荷予定日'], errors='coerce')
-                
-                # 期間でフィルタリング
-                mask = (df['出荷予定日'] >= pd.to_datetime(start_date)) & (df['出荷予定日'] <= pd.to_datetime(end_date))
-                df = df[mask]
-                
-                # 出荷予定日順でソート
-                df = df.sort_values('出荷予定日')
             
             if df is None or df.empty:
                 self.log_message("指定された期間にデータが見つかりませんでした")
@@ -1823,12 +1860,15 @@ class ModernDataExtractorUI:
                 initial_shortage = product_shortage['不足数'].iloc[0]
                 current_shortage = initial_shortage
                 
-                # ロットを順番に割り当て
-                for _, lot in product_lots.iterrows():
+                # ロットを順番に割り当て（itertuples()で高速化）
+                # 列名のインデックスマップを作成
+                lot_cols = {col: idx for idx, col in enumerate(product_lots.columns)}
+                
+                for lot in product_lots.itertuples(index=False):
                     if current_shortage >= 0:  # 不足数が0以上になったら終了
                         break
                     
-                    lot_quantity = int(lot['数量']) if pd.notna(lot['数量']) else 0
+                    lot_quantity = int(lot[lot_cols['数量']]) if pd.notna(lot[lot_cols['数量']]) else 0
                     
                     # 割り当て結果を記録
                     assignment_result = {
@@ -1841,12 +1881,12 @@ class ModernDataExtractorUI:
                         '在梱包数': int(product_shortage['梱包・完了'].iloc[0]),
                         '不足数': current_shortage,  # 現在の不足数（マイナス値）
                         'ロット数量': lot_quantity,  # ロット全体の数量を表示
-                        '指示日': lot.get('指示日', '') if pd.notna(lot.get('指示日', '')) else '',
-                        '号機': lot.get('号機', '') if pd.notna(lot.get('号機', '')) else '',
-                        '現在工程番号': lot.get('現在工程番号', '') if pd.notna(lot.get('現在工程番号', '')) else '',
-                        '現在工程名': lot.get('現在工程名', '') if pd.notna(lot.get('現在工程名', '')) else '',
-                        '現在工程二次処理': lot.get('現在工程二次処理', '') if pd.notna(lot.get('現在工程二次処理', '')) else '',
-                        '生産ロットID': lot.get('生産ロットID', '') if pd.notna(lot.get('生産ロットID', '')) else ''
+                        '指示日': lot[lot_cols.get('指示日', -1)] if '指示日' in lot_cols and pd.notna(lot[lot_cols['指示日']]) else '',
+                        '号機': lot[lot_cols.get('号機', -1)] if '号機' in lot_cols and pd.notna(lot[lot_cols['号機']]) else '',
+                        '現在工程番号': lot[lot_cols.get('現在工程番号', -1)] if '現在工程番号' in lot_cols and pd.notna(lot[lot_cols['現在工程番号']]) else '',
+                        '現在工程名': lot[lot_cols.get('現在工程名', -1)] if '現在工程名' in lot_cols and pd.notna(lot[lot_cols['現在工程名']]) else '',
+                        '現在工程二次処理': lot[lot_cols.get('現在工程二次処理', -1)] if '現在工程二次処理' in lot_cols and pd.notna(lot[lot_cols['現在工程二次処理']]) else '',
+                        '生産ロットID': lot[lot_cols.get('生産ロットID', -1)] if '生産ロットID' in lot_cols and pd.notna(lot[lot_cols['生産ロットID']]) else ''
                     }
                     assignment_results.append(assignment_result)
                     
@@ -1931,11 +1971,17 @@ class ModernDataExtractorUI:
             self.inspector_master_data = inspector_master_df
             self.skill_master_data = skill_master_df
             
-            # 検査員割振りテーブルを作成
-            inspector_df = self.inspector_manager.create_inspector_assignment_table(assignment_df, product_master_df)
+            # 検査員割振りテーブルを作成（製品マスタパスを渡す）
+            product_master_path = self.config.product_master_path if self.config else None
+            inspector_df = self.inspector_manager.create_inspector_assignment_table(assignment_df, product_master_df, product_master_path)
             if inspector_df is None:
                 self.log_message("検査員割振りテーブルの作成に失敗しました")
                 return
+            
+            # 製品マスタが更新された場合は再読み込み
+            if product_master_path and Path(product_master_path).exists():
+                # 再読み込みは次の処理で行うため、ここではログのみ
+                pass
             
             # 検査員を割り当て（スキル値付きで保存）
             inspector_df_with_skills = self.inspector_manager.assign_inspectors(inspector_df, inspector_master_df, skill_master_df, True)
@@ -2325,15 +2371,20 @@ class ModernDataExtractorUI:
             for _, row in inspector_df.iterrows():
                 values = []
                 for col in inspector_columns:
+                    # 列が存在しない場合は空文字を表示
+                    if col not in inspector_df.columns:
+                        values.append('')
+                        continue
+                    
                     if col == '出荷予定日' or col == '指示日':
                         try:
                             date_value = pd.to_datetime(row[col])
                             values.append(date_value.strftime('%Y/%m/%d'))
                         except:
-                            values.append(str(row[col]))
+                            values.append(str(row[col]) if pd.notna(row[col]) else '')
                     elif col.startswith('検査員'):
                         # 検査員名の表示制御
-                        inspector_name = str(row[col])
+                        inspector_name = str(row[col]) if pd.notna(row[col]) else ''
                         if not self.show_skill_values:
                             # スキル値を非表示にする場合、括弧内を削除
                             if '(' in inspector_name and ')' in inspector_name:
@@ -2352,7 +2403,7 @@ class ModernDataExtractorUI:
                                         pass
                         values.append(inspector_name)
                     else:
-                        values.append(str(row[col]))
+                        values.append(str(row[col]) if pd.notna(row[col]) else '')
                 
                 # 交互行色を適用
                 tag = "even" if row_index % 2 == 0 else "odd"
@@ -3019,8 +3070,9 @@ class ModernDataExtractorUI:
             if product_master_df is None:
                 return
             
-            # 検査員割振りテーブルを作成
-            inspector_df = self.inspector_manager.create_inspector_assignment_table(self.current_assignment_data, product_master_df)
+            # 検査員割振りテーブルを作成（製品マスタパスを渡す）
+            product_master_path = self.config.product_master_path if self.config else None
+            inspector_df = self.inspector_manager.create_inspector_assignment_table(self.current_assignment_data, product_master_df, product_master_path)
             if inspector_df is None:
                 return
             

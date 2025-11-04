@@ -54,7 +54,7 @@ class ExcelExporter:
             logger.error(f"ヘッダースタイル適用エラー: {str(e)}")
     
     def _adjust_column_widths(self, writer, sheet_name, df):
-        """列幅を自動調整"""
+        """列幅を自動調整（ベクトル化処理で高速化）"""
         try:
             worksheet = writer.sheets[sheet_name]
             
@@ -62,15 +62,20 @@ class ExcelExporter:
                 # ヘッダーの長さを考慮
                 header_length = len(str(column_title))
                 
-                # データの最大長を計算
-                max_data_length = 0
-                for value in df[column_title]:
-                    if pd.notna(value):
-                        data_length = len(str(value))
-                        # 日本語文字は2倍の幅として計算
-                        japanese_chars = sum(1 for char in str(value) if ord(char) > 127)
-                        data_length += japanese_chars
-                        max_data_length = max(max_data_length, data_length)
+                # データの最大長を計算（ベクトル化処理で高速化）
+                if df[column_title].notna().any():
+                    # 文字列に変換してベクトル処理
+                    column_str = df[column_title].astype(str)
+                    # 文字列長を計算
+                    str_lengths = column_str.str.len()
+                    # 日本語文字（ASCII以外）の数を計算
+                    japanese_chars = column_str.str.count(r'[^\x00-\x7F]')
+                    # 日本語文字は2倍の幅として計算
+                    total_lengths = str_lengths + japanese_chars
+                    # 最大長を取得
+                    max_data_length = int(total_lengths.max()) if len(total_lengths) > 0 else 0
+                else:
+                    max_data_length = 0
                 
                 # 列幅を計算（ヘッダーとデータの最大長を考慮）
                 column_width = max(header_length, max_data_length) + 2
@@ -364,6 +369,6 @@ class ExcelExporter:
             error_msg = f"Excelエクスポート中にエラーが発生しました: {str(e)}"
             logger.error(error_msg)
             messagebox.showerror("エクスポートエラー", error_msg)
-            return False# �g�p��:
+            return False# �g�p��:
 # exporter = ExcelExporter()
 # exporter.export_main_data_to_excel(...)
