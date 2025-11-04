@@ -1600,17 +1600,22 @@ class ModernDataExtractorUI:
                 
                 # 行のタグを決定（交互色 + マイナス値の場合は警告色）
                 tags = []
-                tag = "even" if row_index % 2 == 0 else "odd"
-                tags.append(tag)
                 
-                # 不足数がマイナスの場合は警告タグを追加
+                # 不足数がマイナスの場合は警告タグを追加（交互色は適用しない）
+                is_negative = False
                 if '不足数' in columns and pd.notna(row['不足数']):
                     try:
                         shortage = float(row['不足数'])
                         if shortage < 0:
                             tags.append("negative")
+                            is_negative = True
                     except:
                         pass
+                
+                # 不足数がマイナスでない場合のみ交互色を適用
+                if not is_negative:
+                    tag = "even" if row_index % 2 == 0 else "odd"
+                    tags.append(tag)
                 
                 # データを挿入
                 item_id = data_tree.insert("", "end", values=values, tags=tuple(tags))
