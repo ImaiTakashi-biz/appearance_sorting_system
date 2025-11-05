@@ -39,6 +39,9 @@ class DatabaseConfig:
             self.product_master_path = os.getenv("PRODUCT_MASTER_PATH")
             self.inspector_master_path = os.getenv("INSPECTOR_MASTER_PATH")
             self.skill_master_path = os.getenv("SKILL_MASTER_PATH")
+            self.inspection_target_csv_path = os.getenv("INSPECTION_TARGET_CSV_PATH")
+            self.google_sheets_url = os.getenv("GOOGLE_SHEETS_URL")
+            self.google_sheets_credentials_path = os.getenv("GOOGLE_SHEETS_CREDENTIALS_PATH")
 
             # 必須設定の確認
             if not self.access_file_path:
@@ -56,6 +59,9 @@ class DatabaseConfig:
             logger.info(f"製品マスタ: {self.product_master_path}")
             logger.info(f"検査員マスタ: {self.inspector_master_path}")
             logger.info(f"スキルマスタ: {self.skill_master_path}")
+            logger.info(f"検査対象CSV: {self.inspection_target_csv_path}")
+            logger.info(f"GoogleスプレッドシートURL: {self.google_sheets_url}")
+            logger.info(f"Google認証情報: {self.google_sheets_credentials_path}")
 
         except Exception as e:
             logger.error(f"設定の読み込みに失敗しました: {e}")

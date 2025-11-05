@@ -135,6 +135,7 @@ config.env
 .env
 .env.local
 .env.production
+*.json
 
 # Data files (機密情報を含む可能性)
 *.csv

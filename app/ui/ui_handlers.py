@@ -17,6 +17,7 @@ from app.config import DatabaseConfig
 import calendar
 import locale
 from app.export.excel_exporter_service import ExcelExporter
+from app.export.google_sheets_exporter_service import GoogleSheetsExporter
 from app.assignment.inspector_assignment_service import InspectorAssignmentManager
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
@@ -68,6 +69,9 @@ class ModernDataExtractorUI:
         # Excelエクスポーターの初期化
         self.excel_exporter = ExcelExporter()
         
+        # Googleスプレッドシートエクスポーターの初期化（設定読み込み後に更新）
+        self.google_sheets_exporter = None
+        
         # 検査員割当てマネージャーの初期化
         self.inspector_manager = InspectorAssignmentManager(log_callback=self.log_message)
         
@@ -87,6 +91,7 @@ class ModernDataExtractorUI:
         # マスタデータ保存用変数
         self.inspector_master_data = None
         self.skill_master_data = None
+        self.inspection_target_keywords = []  # 検査対象.csvのA列の文字列リスト
         
         # 現在表示中のテーブル
         self.current_display_table = None
@@ -231,6 +236,21 @@ class ModernDataExtractorUI:
             self.config = DatabaseConfig()
             if self.config.validate_config():
                 logger.info("設定の読み込みが完了しました")
+                
+                # Googleスプレッドシートエクスポーターを初期化
+                if self.config.google_sheets_url and self.config.google_sheets_credentials_path:
+                    try:
+                        self.google_sheets_exporter = GoogleSheetsExporter(
+                            sheets_url=self.config.google_sheets_url,
+                            credentials_path=self.config.google_sheets_credentials_path
+                        )
+                        self.log_message("Googleスプレッドシートエクスポーターを初期化しました")
+                    except Exception as e:
+                        self.log_message(f"警告: Googleスプレッドシートエクスポーターの初期化に失敗しました: {str(e)}")
+                        self.google_sheets_exporter = None
+                else:
+                    self.log_message("Googleスプレッドシートの設定がありません。スプレッドシートへの自動出力は無効です。")
+                    self.google_sheets_exporter = None
             else:
                 logger.error("設定の検証に失敗しました")
         except Exception as e:
@@ -1043,6 +1063,20 @@ class ModernDataExtractorUI:
             corner_radius=6
         )
         self.exit_button.pack(side="right")
+        
+        # Googleスプレッドシート出力ボタン
+        self.google_sheets_button = ctk.CTkButton(
+            buttons_frame,
+            text="Googleスプレッドシートへ出力",
+            command=self.export_to_google_sheets,
+            font=ctk.CTkFont(family="Yu Gothic", size=12),
+            height=35,
+            width=200,
+            fg_color="#10B981",
+            hover_color="#059669",
+            corner_radius=6
+        )
+        self.google_sheets_button.pack(side="right", padx=(0, 20))
     
     def create_progress_section(self, parent):
         """進捗セクションの作成"""
@@ -1276,6 +1310,10 @@ class ModernDataExtractorUI:
             connection = pyodbc.connect(connection_string)
             
             self.log_message("データベース接続が完了しました")
+            
+            # 検査対象.csvを読み込む
+            self.update_progress(0.05, "検査対象CSVを読み込み中...")
+            self.inspection_target_keywords = self.load_inspection_target_csv()
             
             # まずテーブル構造を確認
             self.log_message("テーブル構造を確認中...")
@@ -1803,6 +1841,23 @@ class ModernDataExtractorUI:
             if "現在工程名" in available_columns:
                 where_conditions.append("現在工程名 NOT LIKE '%完了%'")
                 where_conditions.append("現在工程名 NOT LIKE '%梱包%'")
+                
+                # 検査対象.csvのキーワードでフィルタリング
+                if self.inspection_target_keywords:
+                    # キーワードのいずれかが現在工程名に含まれる条件を追加
+                    keyword_conditions = []
+                    for keyword in self.inspection_target_keywords:
+                        # SQLインジェクション対策: キーワードをエスケープ
+                        escaped_keyword = keyword.replace("'", "''").replace("%", "[%]").replace("_", "[_]")
+                        keyword_conditions.append(f"現在工程名 LIKE '%{escaped_keyword}%'")
+                    
+                    if keyword_conditions:
+                        # OR条件でキーワードのいずれかに一致する条件を追加
+                        keyword_filter = "(" + " OR ".join(keyword_conditions) + ")"
+                        where_conditions.append(keyword_filter)
+                        self.log_message(f"検査対象キーワードでフィルタリング: {len(self.inspection_target_keywords)}件のキーワード")
+                else:
+                    self.log_message("検査対象キーワードが設定されていません。全てのロットを対象とします。")
             
             where_clause = " AND ".join(where_conditions)
             
@@ -2306,7 +2361,7 @@ class ModernDataExtractorUI:
                 fg_color="#6B7280",
                 hover_color="#4B5563"
             )
-            self.skill_toggle_button.pack(side="right", padx=(0, 15))
+            self.skill_toggle_button.pack(side="right")
             
             # 詳細表示切り替えボタン
             detail_button_text = "詳細非表示" if self.show_graph else "詳細表示"
@@ -2320,7 +2375,7 @@ class ModernDataExtractorUI:
                 fg_color="#10B981",
                 hover_color="#059669"
             )
-            self.graph_toggle_button.pack(side="right")
+            self.graph_toggle_button.pack(side="right", padx=(0, 25))
             
             # テーブルフレーム
             table_frame = tk.Frame(inspector_frame)
@@ -3025,6 +3080,67 @@ class ModernDataExtractorUI:
             )
             error_label.pack(expand=True)
     
+    def export_to_google_sheets(self):
+        """Googleスプレッドシートに手動で出力"""
+        try:
+            # 検査員割振りデータが存在するか確認
+            if self.current_inspector_data is None or self.current_inspector_data.empty:
+                messagebox.showwarning(
+                    "警告",
+                    "出力する検査員割振りデータがありません。\n先にデータ抽出と検査員割振りを実行してください。"
+                )
+                return
+            
+            # Googleスプレッドシートエクスポーターが初期化されているか確認
+            if not self.google_sheets_exporter:
+                messagebox.showerror(
+                    "エラー",
+                    "Googleスプレッドシートエクスポーターが初期化されていません。\n"
+                    "config.envにGOOGLE_SHEETS_URLとGOOGLE_SHEETS_CREDENTIALS_PATHが設定されているか確認してください。"
+                )
+                return
+            
+            # 確認ダイアログを表示
+            response = messagebox.askyesno(
+                "確認",
+                "Googleスプレッドシートに出力しますか？\n\n"
+                f"出力件数: {len(self.current_inspector_data)}件\n\n"
+                "※既存のデータは上書きされます。"
+            )
+            
+            if not response:
+                return
+            
+            # スキル値付きのデータを使用（検査員名のみを抽出して出力）
+            inspector_df = self.original_inspector_data if hasattr(self, 'original_inspector_data') and self.original_inspector_data is not None else self.current_inspector_data
+            
+            self.log_message("Googleスプレッドシートへの出力を開始します")
+            success = self.google_sheets_exporter.export_inspector_assignment_to_sheets(
+                inspector_df,
+                log_callback=self.log_message
+            )
+            
+            if success:
+                messagebox.showinfo(
+                    "完了",
+                    f"Googleスプレッドシートへの出力が完了しました。\n\n"
+                    f"出力件数: {len(self.current_inspector_data)}件"
+                )
+                self.log_message("Googleスプレッドシートへの出力が完了しました")
+            else:
+                messagebox.showerror(
+                    "エラー",
+                    "Googleスプレッドシートへの出力に失敗しました。\n"
+                    "ログを確認してください。"
+                )
+                self.log_message("警告: Googleスプレッドシートへの出力に失敗しました")
+                
+        except Exception as e:
+            error_msg = f"Googleスプレッドシートへの出力中にエラーが発生しました: {str(e)}"
+            self.log_message(error_msg)
+            logger.error(error_msg)
+            messagebox.showerror("エラー", error_msg)
+    
     def quit_application(self):
         """アプリケーションを完全に終了する"""
         try:
@@ -3269,6 +3385,43 @@ class ModernDataExtractorUI:
             self.log_message(error_msg)
             logger.error(error_msg)
             return None
+    
+    def load_inspection_target_csv(self):
+        """検査対象.csvファイルを読み込み、A列の文字列リストを取得"""
+        try:
+            if not self.config:
+                self.log_message("設定が読み込まれていません")
+                return []
+            
+            file_path = self.config.inspection_target_csv_path
+            
+            # パスが設定されていない場合は空リストを返す（フィルタリングなし）
+            if not file_path:
+                self.log_message("検査対象CSVファイルのパスが設定されていません。全てのロットを対象とします。")
+                return []
+            
+            if not os.path.exists(file_path):
+                self.log_message(f"検査対象CSVファイルが見つかりません: {file_path}。全てのロットを対象とします。")
+                return []
+            
+            # CSVファイルを読み込み（A列のみ）
+            df = pd.read_csv(file_path, encoding='utf-8-sig', header=None, usecols=[0])
+            
+            # A列の値を取得（空のセルやNaNを除外）
+            keywords = df.iloc[:, 0].dropna().astype(str).str.strip()
+            keywords = keywords[keywords != ''].tolist()
+            
+            self.log_message(f"検査対象CSVを読み込みました: {len(keywords)}件のキーワード")
+            self.log_message(f"検査対象キーワード: {keywords}")
+            
+            return keywords
+            
+        except Exception as e:
+            error_msg = f"検査対象CSVの読み込みに失敗しました: {str(e)}"
+            self.log_message(error_msg)
+            logger.error(error_msg)
+            # エラー時も空リストを返して処理を継続
+            return []
     
     
     
