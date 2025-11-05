@@ -230,21 +230,34 @@ class InspectorAssignmentManager:
             product_cols = {col: idx for idx, col in enumerate(product_master_df.columns)}
             
             # 製品マスタを品番と工程番号でインデックス化（高速検索用）
+            # スキルマスタと同様のロジック: 工程番号が空のものも保存
             product_master_dict = {}
             for row in product_master_df.itertuples(index=False):
-                product_num = row[product_cols['品番']]
+                product_num = str(row[product_cols['品番']]).strip() if pd.notna(row[product_cols['品番']]) else None
+                if product_num is None:
+                    continue
+                    
                 process_num = row[product_cols.get('工程番号', -1)] if '工程番号' in product_cols else None
                 inspection_time = row[product_cols['検査時間']]
                 
                 if product_num not in product_master_dict:
                     product_master_dict[product_num] = {}
                 
-                # 工程番号が一致するものを優先的に保存
-                if process_num is not None and pd.notna(process_num) and str(process_num).strip() != '':
-                    product_master_dict[product_num][str(process_num)] = inspection_time
-                # デフォルト値としても保存（工程番号なしの場合）
-                if 'default' not in product_master_dict[product_num]:
-                    product_master_dict[product_num]['default'] = inspection_time
+                # 工程番号を正規化（数値型と文字列型の両方に対応）
+                if process_num is not None and pd.notna(process_num):
+                    # 数値型の場合は整数に変換してから文字列化、文字列型の場合はそのまま使用
+                    if isinstance(process_num, (int, float)):
+                        process_key = str(int(process_num))
+                    else:
+                        process_key = str(process_num).strip()
+                    
+                    if process_key != '':
+                        product_master_dict[product_num][process_key] = inspection_time
+                        self.log_message(f"製品マスタ登録: 品番={product_num}, 工程番号={process_key}, 検査時間={inspection_time}", debug=True)
+                else:
+                    # 工程番号が空の場合は、空文字列キーとして保存（スキルマスタと同様）
+                    product_master_dict[product_num][''] = inspection_time
+                    self.log_message(f"製品マスタ登録: 品番={product_num}, 工程番号=(空), 検査時間={inspection_time}", debug=True)
             
             inspector_results = []
             new_products_to_add = []  # 製品マスタに追加する品番のリスト
@@ -257,39 +270,69 @@ class InspectorAssignmentManager:
                 lot_quantity = row[assignment_cols['ロット数量']]
                 shipping_date = row[assignment_cols.get('出荷予定日', -1)] if '出荷予定日' in assignment_cols else None
                 
-                # 製品マスタから検査時間を取得（存在しない場合はデフォルト値を使用）
+                # 製品マスタから検査時間を取得（スキルマスタと同様のロジック）
                 inspection_time_per_unit = None
                 
-                if product_number in product_master_dict:
-                    product_dict = product_master_dict[product_number]
-                    
-                    # 工程番号が一致する検査時間を取得
-                    if current_process_number is not None and pd.notna(current_process_number) and str(current_process_number).strip() != '':
-                        inspection_time_per_unit = product_dict.get(str(current_process_number))
-                    
-                    # 工程番号が一致しない場合は、デフォルト値を取得
-                    if inspection_time_per_unit is None or pd.isna(inspection_time_per_unit):
-                        inspection_time_per_unit = product_dict.get('default')
+                # 品番を正規化（文字列型に統一）
+                product_number_normalized = str(product_number).strip() if pd.notna(product_number) else None
                 
-                # 製品マスタに存在しない場合は、製品マスタに追加する情報を記録
-                if product_number not in product_master_dict:
+                if product_number_normalized and product_number_normalized in product_master_dict:
+                    product_dict = product_master_dict[product_number_normalized]
+                    
+                    # スキルマスタと同様の検索ロジック
+                    # 1. 現在工程番号が空欄の場合は、工程フィルタをスキップして工程番号が空の行を検索
+                    if current_process_number is None or (pd.notna(current_process_number) and str(current_process_number).strip() == ''):
+                        # 工程番号が空の行を検索
+                        inspection_time_per_unit = product_dict.get('')
+                        if inspection_time_per_unit is not None:
+                            self.log_message(f"製品マスタ検索成功: 品番={product_number_normalized}, 工程番号=(空), 検査時間={inspection_time_per_unit}", debug=True)
+                        else:
+                            self.log_message(f"⚠️ 製品マスタ検索失敗: 品番={product_number_normalized}, 工程番号=(空) が見つかりません。利用可能な工程番号: {list(product_dict.keys())}")
+                    else:
+                        # 2. 工程番号を正規化して検索
+                        if isinstance(current_process_number, (int, float)):
+                            process_key = str(int(current_process_number))
+                        else:
+                            process_key = str(current_process_number).strip()
+                        
+                        if process_key != '':
+                            # まず工程番号が一致するものを検索
+                            inspection_time_per_unit = product_dict.get(process_key)
+                            if inspection_time_per_unit is not None:
+                                self.log_message(f"製品マスタ検索成功: 品番={product_number_normalized}, 工程番号={process_key}, 検査時間={inspection_time_per_unit}", debug=True)
+                            else:
+                                # 工程番号が一致しない場合、工程番号が空の行を検索（スキルマスタと同様）
+                                inspection_time_per_unit = product_dict.get('')
+                                if inspection_time_per_unit is not None:
+                                    self.log_message(f"製品マスタ検索成功: 品番={product_number_normalized}, 工程番号={process_key} が見つからず、工程番号=(空) の検査時間を使用, 検査時間={inspection_time_per_unit}", debug=True)
+                                else:
+                                    self.log_message(f"⚠️ 製品マスタ検索失敗: 品番={product_number_normalized}, 工程番号={process_key} および工程番号=(空) が見つかりません。利用可能な工程番号: {list(product_dict.keys())}")
+                    
+                    # 検索結果が取得できない場合
+                    if inspection_time_per_unit is None or pd.isna(inspection_time_per_unit):
+                        available_processes = list(product_dict.keys())
+                        self.log_message(f"⚠️ 品番 '{product_number_normalized}' (工程番号: {current_process_number if current_process_number else 'なし'}) に一致する検査時間が見つかりません。利用可能な工程番号: {available_processes}")
+                
+                # 製品マスタに存在しない場合は、新規品扱いとして製品マスタに追加する情報を記録
+                if product_number_normalized not in product_master_dict:
                     # デフォルト値として15秒/個を使用（製品マスタに追加するため）
                     inspection_time_per_unit = 15.0  # 15秒/個
                     
                     # 製品マスタに追加する情報を記録（重複チェック）
-                    if not any(p['品番'] == product_number for p in new_products_to_add):
+                    if not any(p['品番'] == product_number_normalized for p in new_products_to_add):
                         new_products_to_add.append({
-                            '品番': product_number,
+                            '品番': product_number_normalized,
                             '品名': product_name if product_name != -1 and pd.notna(product_name) else '',
                             '工程番号': current_process_number if current_process_number is not None and pd.notna(current_process_number) else '',
                             '検査時間': 15.0,
                             '自動追加': True
                         })
-                        self.log_message(f"ℹ️ 品番 '{product_number}' が製品マスタに存在しません。製品マスタに追加予定です (出荷予定日: {shipping_date}, ロット数量: {lot_quantity})")
+                        self.log_message(f"ℹ️ 品番 '{product_number_normalized}' が製品マスタに存在しません。製品マスタに追加予定です (工程番号: {current_process_number if current_process_number else 'なし'}, 出荷予定日: {shipping_date}, ロット数量: {lot_quantity})")
                 elif inspection_time_per_unit is None or pd.isna(inspection_time_per_unit):
-                    # 製品マスタに存在するが検査時間が取得できない場合
+                    # 製品マスタに存在するが、工程番号が一致する検査時間が取得できない場合
                     inspection_time_per_unit = 15.0  # 15秒/個
-                    self.log_message(f"ℹ️ 品番 '{product_number}' (工程番号: {current_process_number if current_process_number else 'なし'}) の検査時間が取得できません。デフォルト検査時間(15秒/個)を使用します (出荷予定日: {shipping_date}, ロット数量: {lot_quantity})")
+                    available_keys = list(product_dict.keys()) if product_number_normalized in product_master_dict else []
+                    self.log_message(f"⚠️ 品番 '{product_number_normalized}' (工程番号: {current_process_number if current_process_number else 'なし'}) の検査時間が取得できません。デフォルト検査時間(15秒/個)を使用します。利用可能な工程番号: {available_keys} (出荷予定日: {shipping_date}, ロット数量: {lot_quantity})")
                 
                 # 検査時間を計算（秒 × ロット数量）
                 total_inspection_time_seconds = inspection_time_per_unit * lot_quantity
@@ -510,14 +553,21 @@ class InspectorAssignmentManager:
                     base_candidates = []
                 available_inspectors = copy.deepcopy(base_candidates)
                 
-                # 必要な検査員人数を計算（3時間を超える場合は複数人）
-                if inspection_time <= 3.0:
+                # 必要な検査員人数を計算
+                # 特例: 一ロットで検査員が5名以上必要になる場合、5名に制限し3時間の条件を無視
+                if inspection_time <= 0:
                     required_inspectors = 1
                 else:
-                    required_inspectors = max(2, int(inspection_time / 3.0) + 1)
+                    # 通常の計算（3時間で割る）
+                    calculated_inspectors = max(1, int(inspection_time / 3.0) + 1)
+                    # 5名以上になる場合は5名に制限（特例）
+                    required_inspectors = min(5, calculated_inspectors)
                 
                 # デバッグログ出力
-                self.log_message(f"品番 {product_number}: 検査時間 {inspection_time:.1f}h → 必要人数 {required_inspectors}人", debug=True)
+                if calculated_inspectors > 5:
+                    self.log_message(f"品番 {product_number}: 検査時間 {inspection_time:.1f}h → 必要人数 {required_inspectors}人（通常計算では{calculated_inspectors}名必要だが、特例により5名に制限）", debug=True)
+                else:
+                    self.log_message(f"品番 {product_number}: 検査時間 {inspection_time:.1f}h → 必要人数 {required_inspectors}人", debug=True)
                 
                 # 新規品かどうかを判定（スキルマスタに登録がない場合）
                 is_new_product = False
@@ -576,8 +626,9 @@ class InspectorAssignmentManager:
                 
                 # 改善ポイント: 非対称分配＋部分割当の実装
                 # 検査員の残勤務時間に応じた非対称分配（貪欲法）を実行
+                # 特例: 一ロットで検査員が5名以上必要になる場合、5名に制限
                 assigned_inspectors, remaining_time, assigned_time_sum = self.assign_inspectors_asymmetric(
-                    available_inspectors, inspection_time, inspector_master_df, product_number, is_new_product
+                    available_inspectors, inspection_time, inspector_master_df, product_number, is_new_product, max_inspectors=required_inspectors
                 )
                 
                 # デバッグログ出力
@@ -638,10 +689,10 @@ class InspectorAssignmentManager:
                 
                 # 結果を設定
                 result_df.at[index, '検査員人数'] = len(assigned_inspectors)
-                # 改善ポイント: 非対称分配のため、平均分割時間を計算（表示用）
+                # 分割検査時間の計算: 検査時間 ÷ 実際の分割した検査人数
                 if len(assigned_inspectors) > 0:
-                    avg_divided_time = assigned_time_sum / len(assigned_inspectors)
-                    result_df.at[index, '分割検査時間'] = round(avg_divided_time, 1)
+                    divided_time = inspection_time / len(assigned_inspectors)
+                    result_df.at[index, '分割検査時間'] = round(divided_time, 1)
                 else:
                     result_df.at[index, '分割検査時間'] = 0.0
                 # inspectorが辞書でない場合の対処
@@ -1131,7 +1182,7 @@ class InspectorAssignmentManager:
             self.log_message(f"新製品チームメンバー取得中にエラーが発生しました: {str(e)}")
             return []
     
-    def assign_inspectors_asymmetric(self, available_inspectors, required_hours, inspector_master_df, product_number, is_new_product=False):
+    def assign_inspectors_asymmetric(self, available_inspectors, required_hours, inspector_master_df, product_number, is_new_product=False, max_inspectors=None):
         """
         改善ポイント: 非対称分配＋部分割当の実装
         
@@ -1144,6 +1195,7 @@ class InspectorAssignmentManager:
             inspector_master_df: 検査員マスタ
             product_number: 品番
             is_new_product: 新規品フラグ
+            max_inspectors: 最大検査員数（特例: 5名制限など）
             
         Returns:
             (assigned_inspectors, remaining_hours, assigned_time_sum)
@@ -1218,8 +1270,14 @@ class InspectorAssignmentManager:
             ))
             
             # 貪欲に割り当て
+            # 特例: 一ロットで検査員が5名以上必要になる場合、5名に制限
             for candidate in candidates_with_capacity:
                 if remaining <= 0:
+                    break
+                
+                # 最大検査員数の制限をチェック
+                if max_inspectors is not None and len(assignments) >= max_inspectors:
+                    self.log_message(f"非対称分配: 最大検査員数 {max_inspectors}名に達したため、割り当てを停止します（残り時間: {remaining:.1f}h）", debug=True)
                     break
                 
                 cap = candidate['_remaining_capacity']
@@ -1248,6 +1306,11 @@ class InspectorAssignmentManager:
     def select_inspectors(self, available_inspectors, required_count, divided_time, inspector_master_df, product_number, is_new_product=False, relax_work_hours=False):
         """検査員を選択する（スキル組み合わせ考慮・勤務時間考慮・公平な割り当て方式）"""
         try:
+            # 特例: 一ロットで検査員が5名以上必要になる場合、5名に制限
+            if required_count > 5:
+                self.log_message(f"品番 {product_number}: 要求人数 {required_count}名が5名を超えるため、5名に制限します", debug=True)
+                required_count = 5
+            
             if not available_inspectors:
                 if is_new_product:
                     self.log_message(f"新規品 {product_number}: 新製品チームメンバーが利用可能な検査員がいません")
@@ -1331,6 +1394,11 @@ class InspectorAssignmentManager:
     def select_inspectors_with_skill_combination(self, available_inspectors, required_count, divided_time, current_time, current_date, inspector_master_df):
         """スキル組み合わせを考慮した検査員選択"""
         try:
+            # 特例: 一ロットで検査員が5名以上必要になる場合、5名に制限
+            if required_count > 5:
+                self.log_message(f"スキル組み合わせ選択: 要求人数 {required_count}名が5名を超えるため、5名に制限します", debug=True)
+                required_count = 5
+            
             # スキルレベル別に検査員を分類
             skill_groups = {
                 1: [],
@@ -1459,7 +1527,9 @@ class InspectorAssignmentManager:
                         all_inspectors_with_priority.append((priority, insp))
                 
                 all_inspectors_with_priority.sort(key=lambda x: x[0])
-                selected_inspectors = [insp for _, insp in all_inspectors_with_priority[:required_count]]
+                # 特例: 一ロットで検査員が5名以上必要になる場合、5名に制限
+                max_count = min(5, required_count)
+                selected_inspectors = [insp for _, insp in all_inspectors_with_priority[:max_count]]
             
             # 選択された検査員の履歴を更新
             for insp in selected_inspectors:
@@ -2010,6 +2080,29 @@ class InspectorAssignmentManager:
             current_date = pd.Timestamp.now().date()
             
             # result_dfから実際の割り当てを読み取って、履歴を再計算（正確な状態を把握）
+            # まず、分割検査時間を実際の検査員数で再計算
+            result_cols_pre = {col: idx for idx, col in enumerate(result_df.columns)}
+            for row_idx, row in enumerate(result_df.itertuples(index=False)):
+                index = result_df.index[row_idx]
+                inspection_time = row[result_cols_pre.get('検査時間', -1)] if '検査時間' in result_cols_pre else 0.0
+                if inspection_time == -1 or inspection_time == 0:
+                    continue
+                
+                # 実際に割り当てられた検査員数をカウント
+                actual_inspector_count = 0
+                for i in range(1, 6):
+                    inspector_col = f'検査員{i}'
+                    inspector_col_idx = result_cols_pre.get(inspector_col, -1)
+                    if inspector_col_idx != -1:
+                        inspector_name = row[inspector_col_idx]
+                        if pd.notna(inspector_name) and str(inspector_name).strip() != '':
+                            actual_inspector_count += 1
+                
+                # 分割検査時間を再計算: 検査時間 ÷ 実際の分割した検査人数
+                if actual_inspector_count > 0:
+                    actual_divided_time = inspection_time / actual_inspector_count
+                    result_df.at[index, '分割検査時間'] = round(actual_divided_time, 1)
+            
             self.inspector_daily_assignments = {}
             self.inspector_work_hours = {}
             self.inspector_product_hours = {}
@@ -2328,6 +2421,29 @@ class InspectorAssignmentManager:
                         
                         self.log_message(f"再是正結果: {re_resolved_count}件是正、{len(unresolved_violations) - re_resolved_count}件未割当")
                     result_df = result_df_sorted
+                    # 分割検査時間を実際の検査員数で再計算
+                    sorted_cols_recalc_pre = {col: idx for idx, col in enumerate(result_df_sorted.columns)}
+                    for row_idx, row in enumerate(result_df_sorted.itertuples(index=False)):
+                        index = result_df_sorted.index[row_idx]
+                        inspection_time = row[sorted_cols_recalc_pre.get('検査時間', -1)] if '検査時間' in sorted_cols_recalc_pre else 0.0
+                        if inspection_time == -1 or inspection_time == 0:
+                            continue
+                        
+                        # 実際に割り当てられた検査員数をカウント
+                        actual_inspector_count = 0
+                        for i in range(1, 6):
+                            inspector_col = f'検査員{i}'
+                            inspector_col_idx = sorted_cols_recalc_pre.get(inspector_col, -1)
+                            if inspector_col_idx != -1:
+                                inspector_name = row[inspector_col_idx]
+                                if pd.notna(inspector_name) and str(inspector_name).strip() != '':
+                                    actual_inspector_count += 1
+                        
+                        # 分割検査時間を再計算: 検査時間 ÷ 実際の分割した検査人数
+                        if actual_inspector_count > 0:
+                            actual_divided_time = inspection_time / actual_inspector_count
+                            result_df_sorted.at[index, '分割検査時間'] = round(actual_divided_time, 1)
+                    
                     # 履歴を再計算してから次へ
                     self.inspector_daily_assignments = {}
                     self.inspector_work_hours = {}
@@ -2596,10 +2712,14 @@ class InspectorAssignmentManager:
                         new_product_team = self.get_new_product_team_inspectors(inspector_master_df)
                         if new_product_team:
                             # 必要な検査員人数を計算
-                            if inspection_time <= 3.0:
+                            # 特例: 一ロットで検査員が5名以上必要になる場合、5名に制限し3時間の条件を無視
+                            if inspection_time <= 0:
                                 required_inspectors = 1
                             else:
-                                required_inspectors = max(2, int(inspection_time / 3.0) + 1)
+                                # 通常の計算（3時間で割る）
+                                calculated_inspectors = max(1, int(inspection_time / 3.0) + 1)
+                                # 5名以上になる場合は5名に制限（特例）
+                                required_inspectors = min(5, calculated_inspectors)
                             divided_time = inspection_time / required_inspectors
                             
                             # 新製品チームから検査員を選択
@@ -2611,7 +2731,9 @@ class InspectorAssignmentManager:
                             if assigned_inspectors:
                                 # 割り当てを設定
                                 result_df.at[index, '検査員人数'] = len(assigned_inspectors)
-                                result_df.at[index, '分割検査時間'] = divided_time
+                                # 分割検査時間の計算: 検査時間 ÷ 実際の分割した検査人数
+                                actual_divided_time = inspection_time / len(assigned_inspectors)
+                                result_df.at[index, '分割検査時間'] = round(actual_divided_time, 1)
                                 for i, inspector in enumerate(assigned_inspectors, 1):
                                     if i <= 5:
                                         result_df.at[index, f'検査員{i}'] = inspector.get('氏名', '')
@@ -3211,7 +3333,9 @@ class InspectorAssignmentManager:
                                 if assigned_inspectors:
                                     # 割り当てを設定
                                     result_df.at[index, '検査員人数'] = len(assigned_inspectors)
-                                    result_df.at[index, '分割検査時間'] = divided_time
+                                    # 分割検査時間の計算: 検査時間 ÷ 実際の分割した検査人数
+                                    actual_divided_time = inspection_time / len(assigned_inspectors)
+                                    result_df.at[index, '分割検査時間'] = round(actual_divided_time, 1)
                                     for i, inspector in enumerate(assigned_inspectors, 1):
                                         if i <= 5:
                                             if show_skill_values:
@@ -3532,7 +3656,9 @@ class InspectorAssignmentManager:
                     if assigned_inspectors:
                         # 割り当て成功
                         result_df.at[original_index, '検査員人数'] = len(assigned_inspectors)
-                        result_df.at[original_index, '分割検査時間'] = round(divided_time, 1)
+                        # 分割検査時間の計算: 検査時間 ÷ 実際の分割した検査人数
+                        actual_divided_time = inspection_time / len(assigned_inspectors)
+                        result_df.at[original_index, '分割検査時間'] = round(actual_divided_time, 1)
                         result_df.at[original_index, 'remaining_work_hours'] = 0.0
                         result_df.at[original_index, 'assignability_status'] = 'fully_assigned'
                         
@@ -3859,7 +3985,9 @@ class InspectorAssignmentManager:
                                 if assigned_inspectors:
                                     # 割り当てを設定
                                     result_df.at[index, '検査員人数'] = len(assigned_inspectors)
-                                    result_df.at[index, '分割検査時間'] = divided_time
+                                    # 分割検査時間の計算: 検査時間 ÷ 実際の分割した検査人数
+                                    actual_divided_time = inspection_time / len(assigned_inspectors)
+                                    result_df.at[index, '分割検査時間'] = round(actual_divided_time, 1)
                                     for i, inspector in enumerate(assigned_inspectors, 1):
                                         if i <= 5:
                                             if show_skill_values:
@@ -4249,8 +4377,10 @@ class InspectorAssignmentManager:
             
             elif len(current_inspectors) == 1:
                 # 1人だけの場合、増員するか他の人に置き換え
-                # ただし、検査時間が3時間未満の場合は増員しない（1人で対応すべき）
-                if inspection_time < 3.0:
+                # 検査員5名まで増員可能（3時間の条件は無視）
+                # 検査時間が短い場合でも、必要に応じて増員を試みる
+                # ただし、既に5名の場合は置き換えのみ
+                if len(current_inspectors) >= 5:
                     # 置き換え処理（増員ではなく）
                     process_number = row.get('現在工程番号', '')
                     # スキルマスタに登録があるか確認
@@ -4359,20 +4489,22 @@ class InspectorAssignmentManager:
                         self.log_message(f"置き換え: '{inspector_name}' → '{replacement_inspector['氏名']}' (品番: {product_number}, 検査時間: {inspection_time:.1f}h, 出荷予定日: {row['出荷予定日']})")
                         return True
                 else:
-                    # 検査時間が3時間以上の場合は増員を試みる
-                    process_number = row.get('現在工程番号', '')
-                    # スキルマスタに登録があるか確認
-                    skill_rows = skill_master_df[skill_master_df.iloc[:, 0] == product_number]
-                    is_new_product = skill_rows.empty
-                    shipping_date = row.get('出荷予定日', None)
-                    available_inspectors = self.get_available_inspectors(
-                        product_number, process_number, skill_master_df, inspector_master_df,
-                        shipping_date=shipping_date, allow_new_team_fallback=is_new_product
-                    )
-                    # 新規品の場合は新製品チームも取得
-                    if not available_inspectors and is_new_product:
-                        self.log_message(f"新規品 {product_number}: 増員用に新製品チームを取得します")
-                        available_inspectors = self.get_new_product_team_inspectors(inspector_master_df)
+                    # 検査員5名まで増員を試みる（3時間の条件は無視）
+                    # 現在の検査員が5名未満の場合のみ増員を試みる
+                    if len(current_inspectors) < 5:
+                        process_number = row.get('現在工程番号', '')
+                        # スキルマスタに登録があるか確認
+                        skill_rows = skill_master_df[skill_master_df.iloc[:, 0] == product_number]
+                        is_new_product = skill_rows.empty
+                        shipping_date = row.get('出荷予定日', None)
+                        available_inspectors = self.get_available_inspectors(
+                            product_number, process_number, skill_master_df, inspector_master_df,
+                            shipping_date=shipping_date, allow_new_team_fallback=is_new_product
+                        )
+                        # 新規品の場合は新製品チームも取得
+                        if not available_inspectors and is_new_product:
+                            self.log_message(f"新規品 {product_number}: 増員用に新製品チームを取得します")
+                            available_inspectors = self.get_new_product_team_inspectors(inspector_master_df)
                     
                     # 既に割り当てられている検査員を除外
                     current_codes = [inspector_code]
@@ -4429,6 +4561,9 @@ class InspectorAssignmentManager:
                         result_df.at[index, f'検査員{new_count}'] = addition_name
                         result_df.at[index, '検査員人数'] = new_count
                         
+                        # 分割検査時間の計算: 検査時間 ÷ 実際の分割した検査人数
+                        actual_divided_time = inspection_time / new_count
+                        
                         # 新しい検査員に時間を追加
                         new_code = addition_inspector['コード']
                         if new_code not in self.inspector_daily_assignments:
@@ -4436,18 +4571,22 @@ class InspectorAssignmentManager:
                         if current_date not in self.inspector_daily_assignments[new_code]:
                             self.inspector_daily_assignments[new_code][current_date] = 0.0
                         
-                        # 元の検査員の時間を半分に（2人で分担）
+                        # 元の検査員の時間を新しい分割時間に調整
                         old_daily = self.inspector_daily_assignments.get(inspector_code, {}).get(current_date, 0.0)
-                        self.inspector_daily_assignments[inspector_code][current_date] = old_daily - divided_time / 2
-                        self.inspector_work_hours[inspector_code] = max(0.0, self.inspector_work_hours.get(inspector_code, 0.0) - divided_time / 2)
+                        old_divided_time = inspection_time / (new_count - 1)  # 増員前の人数
+                        new_divided_time = actual_divided_time  # 増員後の分割時間
+                        
+                        # 元の検査員の時間を調整（新しい分割時間に合わせる）
+                        adjustment = old_divided_time - new_divided_time
+                        self.inspector_daily_assignments[inspector_code][current_date] = old_daily - adjustment
+                        self.inspector_work_hours[inspector_code] = max(0.0, self.inspector_work_hours.get(inspector_code, 0.0) - adjustment)
                         
                         # 品番別累計時間も更新
                         if inspector_code in self.inspector_product_hours:
                             if product_number in self.inspector_product_hours[inspector_code]:
-                                self.inspector_product_hours[inspector_code][product_number] = max(0.0, self.inspector_product_hours[inspector_code][product_number] - divided_time / 2)
+                                self.inspector_product_hours[inspector_code][product_number] = max(0.0, self.inspector_product_hours[inspector_code][product_number] - adjustment)
                         
                         # 新しい検査員に時間を追加
-                        new_divided_time = divided_time / 2
                         self.inspector_daily_assignments[new_code][current_date] += new_divided_time
                         if new_code not in self.inspector_work_hours:
                             self.inspector_work_hours[new_code] = 0.0
@@ -4460,7 +4599,7 @@ class InspectorAssignmentManager:
                             self.inspector_product_hours[new_code].get(product_number, 0.0) + new_divided_time
                         )
                         
-                        result_df.at[index, '分割検査時間'] = round(new_divided_time, 1)
+                        result_df.at[index, '分割検査時間'] = round(actual_divided_time, 1)
                         
                         # チーム情報を更新
                         self.update_team_info(result_df, index, inspector_master_df, show_skill_values)

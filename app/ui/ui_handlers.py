@@ -8,8 +8,9 @@ import tkinter as tk
 from tkinter import messagebox, filedialog, ttk
 import pandas as pd
 import pyodbc
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
 from pathlib import Path
 from loguru import logger
@@ -92,6 +93,11 @@ class ModernDataExtractorUI:
         self.inspector_master_data = None
         self.skill_master_data = None
         self.inspection_target_keywords = []  # 検査対象.csvのA列の文字列リスト
+        
+        # マスタデータキャッシュ機能
+        self.master_cache = {}
+        self.cache_timestamps = {}
+        self.cache_ttl = timedelta(minutes=5)  # 5分間キャッシュ
         
         # 現在表示中のテーブル
         self.current_display_table = None
@@ -1305,23 +1311,24 @@ class ModernDataExtractorUI:
             self.log_message(f"抽出期間: {start_date} ～ {end_date}")
             
             # データベース接続
-            self.update_progress(0.1, "データベースに接続中...")
+            self.update_progress(0.02, "データベースに接続中...")
             connection_string = self.config.get_connection_string()
             connection = pyodbc.connect(connection_string)
-            
             self.log_message("データベース接続が完了しました")
             
-            # 検査対象.csvを読み込む
+            # 検査対象.csvを読み込む（キャッシュ機能を使用）
             self.update_progress(0.05, "検査対象CSVを読み込み中...")
-            self.inspection_target_keywords = self.load_inspection_target_csv()
+            self.inspection_target_keywords = self.load_inspection_target_csv_cached()
             
-            # まずテーブル構造を確認
+            # テーブル構造を確認
+            self.update_progress(0.08, "テーブル構造を確認中...")
             self.log_message("テーブル構造を確認中...")
             columns_query = f"SELECT TOP 1 * FROM [{self.config.access_table_name}]"
             sample_df = pd.read_sql(columns_query, connection)
             
             if sample_df.empty:
                 self.log_message("テーブルにデータが見つかりません")
+                self.update_progress(1.0, "完了（データなし）")
                 return
             
             # 実際の列名を取得
@@ -1349,14 +1356,16 @@ class ModernDataExtractorUI:
                 query = f"SELECT {columns_str} FROM [{self.config.access_table_name}]"
             
             # データの抽出
-            self.update_progress(0.4, "データを抽出中...")
+            self.update_progress(0.15, "データを抽出中...")
             df = pd.read_sql(query, connection)
+            self.log_message(f"データ抽出完了: {len(df)}件")
             
             # t_現品票履歴から梱包工程の数量を取得
-            self.update_progress(0.5, "梱包工程データを取得中...")
+            self.update_progress(0.35, "梱包工程データを取得中...")
             packaging_data = self.get_packaging_quantities(connection, df)
             
             # 梱包数量をメインデータに結合
+            self.update_progress(0.45, "データを処理中...")
             if not packaging_data.empty and '品番' in df.columns:
                 df = df.merge(packaging_data, on='品番', how='left')
                 # 梱包数量が存在しない場合は0を設定
@@ -1370,6 +1379,7 @@ class ModernDataExtractorUI:
             df['梱包・完了'] = pd.to_numeric(df['梱包・完了'], errors='coerce').fillna(0).astype(int)
             
             # 不足数を計算: (在庫数+梱包・完了)-出荷数
+            self.update_progress(0.55, "不足数を計算中...")
             if all(col in df.columns for col in ['出荷数', '在庫数', '梱包・完了']):
                 # 数値列を数値型に変換（梱包・完了は既に変換済み）
                 df['出荷数'] = pd.to_numeric(df['出荷数'], errors='coerce').fillna(0)
@@ -1393,19 +1403,12 @@ class ModernDataExtractorUI:
             
             self.log_message(f"抽出完了: {len(df)}件のレコード")
             
-            # データをアプリ上に表示
-            self.update_progress(0.7, "データを表示中...")
-            
-            # データをテキスト形式で表示
-            # データは選択式表示のため、ここでは表示しない
-            # self.display_data(df)
-            
             # データを保存（エクスポート用）
             self.current_main_data = df
             
             # 不足数がマイナスの品番に対してロット割り当てを実行
-            self.update_progress(0.9, "ロット割り当て処理中...")
-            self.process_lot_assignment(connection, df)
+            self.update_progress(0.65, "ロット割り当て処理中...")
+            self.process_lot_assignment(connection, df, start_progress=0.65)
             
             # 完了
             self.update_progress(1.0, "データ抽出が完了しました")
@@ -1960,10 +1963,11 @@ class ModernDataExtractorUI:
             self.log_message(f"ロット割り当て中にエラーが発生しました: {str(e)}")
             return pd.DataFrame()
     
-    def process_lot_assignment(self, connection, main_df):
+    def process_lot_assignment(self, connection, main_df, start_progress=0.65):
         """ロット割り当て処理のメイン処理"""
         try:
             # 不足数がマイナスのデータを抽出
+            self.update_progress(start_progress + 0.05, "不足データを抽出中...")
             shortage_df = main_df[main_df['不足数'] < 0].copy()
             
             if shortage_df.empty:
@@ -1973,6 +1977,7 @@ class ModernDataExtractorUI:
             self.log_message(f"不足数がマイナスのデータ: {len(shortage_df)}件")
             
             # 利用可能なロットを取得
+            self.update_progress(start_progress + 0.10, "利用可能なロットを取得中...")
             lots_df = self.get_available_lots_for_shortage(connection, shortage_df)
             
             if lots_df.empty:
@@ -1980,6 +1985,7 @@ class ModernDataExtractorUI:
                 return
             
             # ロット割り当てを実行
+            self.update_progress(start_progress + 0.15, "ロットを割り当て中...")
             assignment_df = self.assign_lots_to_shortage(shortage_df, lots_df)
             
             if not assignment_df.empty:
@@ -1989,35 +1995,53 @@ class ModernDataExtractorUI:
                 # ロット割り当てデータを保存（エクスポート用）
                 self.current_assignment_data = assignment_df
                 
-                # 検査員割振り処理を実行
-                self.process_inspector_assignment(assignment_df)
+                # 検査員割振り処理を実行（進捗は連続させる）
+                # ロット割り当て: 0.65-0.85 (0.2の範囲)
+                # 検査員割振り: 0.85-1.0 (0.15の範囲)
+                self.process_inspector_assignment(assignment_df, start_progress=0.85)
             else:
                 self.log_message("ロット割り当て結果がありません")
                 
         except Exception as e:
             self.log_message(f"ロット割り当て処理中にエラーが発生しました: {str(e)}")
     
-    def process_inspector_assignment(self, assignment_df):
+    def process_inspector_assignment(self, assignment_df, start_progress=0.1):
         """検査員割振り処理を実行"""
         try:
             if assignment_df.empty:
                 self.log_message("ロット割り当て結果がありません")
                 return
             
-            # 製品マスタファイルを読み込み
-            product_master_df = self.load_product_master()
+            # マスタファイルを並列で読み込み（高速化）
+            # 進捗範囲を調整：start_progressから終了まで（マスタ読み込み用）
+            progress_base = start_progress
+            # start_progressに応じて進捗範囲を動的に調整
+            # 目標: マスタ読み込み完了後、0.95-0.97の範囲に到達
+            if start_progress >= 0.85:
+                # 0.85以降から始まる場合: 0.85→0.92（0.07の範囲）
+                progress_range_master = 0.07
+            elif start_progress >= 0.1:
+                # 0.1以降から始まる場合: start_progress→0.9（残りの範囲）
+                progress_range_master = 0.9 - start_progress
+            else:
+                # 通常: 0.1→0.9（0.8の範囲）
+                progress_range_master = 0.8
+            
+            self.update_progress(progress_base, "マスタファイルを読み込み中...")
+            masters = self.load_masters_parallel(progress_base=progress_base, progress_range=progress_range_master)
+            
+            product_master_df = masters.get('product')
+            inspector_master_df = masters.get('inspector')
+            skill_master_df = masters.get('skill')
+            
             if product_master_df is None:
                 self.log_message("製品マスタの読み込みに失敗しました")
                 return
             
-            # 検査員マスタファイルを読み込み
-            inspector_master_df = self.load_inspector_master()
             if inspector_master_df is None:
                 self.log_message("検査員マスタの読み込みに失敗しました")
                 return
             
-            # スキルマスタファイルを読み込み
-            skill_master_df = self.load_skill_master()
             if skill_master_df is None:
                 self.log_message("スキルマスタの読み込みに失敗しました")
                 return
@@ -2027,6 +2051,14 @@ class ModernDataExtractorUI:
             self.skill_master_data = skill_master_df
             
             # 検査員割振りテーブルを作成（製品マスタパスを渡す）
+            # マスタ読み込み完了後の進捗を計算
+            master_end_progress = progress_base + progress_range_master
+            # テーブル作成と割り当ての進捗範囲を調整（残りを1.0まで）
+            remaining_progress = 1.0 - master_end_progress
+            table_progress = master_end_progress + (remaining_progress * 0.3)  # 残りの30%
+            assign_progress = master_end_progress + (remaining_progress * 0.7)  # 残りの70%
+            
+            self.update_progress(table_progress, "検査員割振りテーブルを作成中...")
             product_master_path = self.config.product_master_path if self.config else None
             inspector_df = self.inspector_manager.create_inspector_assignment_table(assignment_df, product_master_df, product_master_path)
             if inspector_df is None:
@@ -2039,6 +2071,7 @@ class ModernDataExtractorUI:
                 pass
             
             # 検査員を割り当て（スキル値付きで保存）
+            self.update_progress(assign_progress, "検査員を割り当て中...")
             inspector_df_with_skills = self.inspector_manager.assign_inspectors(inspector_df, inspector_master_df, skill_master_df, True)
             
             # 現在の表示状態に応じてデータを設定
@@ -2057,6 +2090,7 @@ class ModernDataExtractorUI:
             self.current_inspector_data = inspector_df
             self.original_inspector_data = inspector_df_with_skills.copy()  # スキル値付きの元データを保持
             
+            self.update_progress(1.0, "検査員割振り処理が完了しました")
             self.log_message(f"検査員割振り処理が完了しました: {len(inspector_df)}件")
             
         except Exception as e:
@@ -2264,6 +2298,322 @@ class ModernDataExtractorUI:
         
         self.root.mainloop()
     
+    def load_masters_parallel(self, progress_base=0.1, progress_range=0.8):
+        """マスタファイルを並列で読み込む（高速化、エラー時は順次処理にフォールバック）"""
+        try:
+            self.log_message("マスタファイルの並列読み込みを開始します...")
+            # 進捗は呼び出し元で設定済みのため、ここでは更新しない
+            
+            # 独立したラッパー関数（インスタンス変数を事前に取得）
+            product_path = self.config.product_master_path if self.config else None
+            inspector_path = self.config.inspector_master_path if self.config else None
+            skill_path = self.config.skill_master_path if self.config else None
+            inspection_target_path = self.config.inspection_target_csv_path if self.config else None
+            
+            def load_product():
+                """製品マスタ読み込み（独立関数）"""
+                try:
+                    return self.load_product_master_cached()
+                except Exception as e:
+                    logger.error(f"製品マスタの読み込みエラー: {str(e)}", exc_info=True)
+                    return None
+            
+            def load_inspector():
+                """検査員マスタ読み込み（独立関数）"""
+                try:
+                    return self.load_inspector_master_cached()
+                except Exception as e:
+                    logger.error(f"検査員マスタの読み込みエラー: {str(e)}", exc_info=True)
+                    return None
+            
+            def load_skill():
+                """スキルマスタ読み込み（独立関数）"""
+                try:
+                    return self.load_skill_master_cached()
+                except Exception as e:
+                    logger.error(f"スキルマスタの読み込みエラー: {str(e)}", exc_info=True)
+                    return None
+            
+            def load_inspection_target():
+                """検査対象CSV読み込み（独立関数）"""
+                try:
+                    return self.load_inspection_target_csv_cached()
+                except Exception as e:
+                    logger.error(f"検査対象CSVの読み込みエラー: {str(e)}", exc_info=True)
+                    return None
+            
+            try:
+                with ThreadPoolExecutor(max_workers=4) as executor:
+                    # 並列実行タスクを定義
+                    futures = {
+                        'product': executor.submit(load_product),
+                        'inspector': executor.submit(load_inspector),
+                        'skill': executor.submit(load_skill),
+                        'inspection_target': executor.submit(load_inspection_target)
+                    }
+                    
+                    results = {}
+                    total_files = len(futures)
+                    completed_files = 0
+                    # 進捗範囲は引数で受け取る（デフォルト: 0.1から0.9まで）
+                    
+                    for key, future in as_completed(futures):
+                        try:
+                            result = future.result(timeout=60)  # タイムアウトを設定
+                            results[key] = result
+                            completed_files += 1
+                            
+                            # 進捗を更新（各ファイル完了時に段階的に更新）
+                            progress = progress_base + (progress_range * completed_files / total_files)
+                            file_name_map = {
+                                'product': '製品マスタ',
+                                'inspector': '検査員マスタ',
+                                'skill': 'スキルマスタ',
+                                'inspection_target': '検査対象CSV'
+                            }
+                            file_name = file_name_map.get(key, key)
+                            
+                            if result is not None:
+                                self.log_message(f"{file_name}の読み込みが完了しました")
+                                # 進捗更新を最後の1回のみに最適化（パフォーマンス向上）
+                                if completed_files == total_files:
+                                    self.update_progress(progress, f"{file_name}の読み込み完了")
+                            else:
+                                self.log_message(f"{file_name}の読み込みに失敗しました")
+                                # 進捗更新を最後の1回のみに最適化
+                                if completed_files == total_files:
+                                    self.update_progress(progress, f"{file_name}の読み込み失敗")
+                        except Exception as e:
+                            completed_files += 1
+                            progress = progress_base + (progress_range * completed_files / total_files)
+                            error_msg = f"{key}マスタの読み込み中にエラーが発生しました: {str(e)}"
+                            self.log_message(error_msg)
+                            logger.error(error_msg, exc_info=True)
+                            results[key] = None
+                            # 進捗更新を最後の1回のみに最適化
+                            if completed_files == total_files:
+                                self.update_progress(progress, f"{key}マスタの読み込みエラー")
+                    
+                    end_progress = progress_base + progress_range
+                    self.update_progress(end_progress, "マスタファイルの並列読み込みが完了しました")
+                    self.log_message("マスタファイルの並列読み込みが完了しました")
+                    return results
+            except Exception as parallel_error:
+                # 並列処理でエラーが発生した場合は順次処理にフォールバック
+                error_msg = f"並列処理でエラーが発生しました。順次処理に切り替えます: {str(parallel_error)}"
+                self.log_message(error_msg)
+                logger.warning(error_msg, exc_info=True)
+                self.update_progress(progress_base, "順次処理に切り替え中...")
+                return self.load_masters_sequential(progress_base=progress_base, progress_range=progress_range)
+                
+        except Exception as e:
+            error_msg = f"マスタファイルの読み込み中にエラーが発生しました: {str(e)}"
+            self.log_message(error_msg)
+            logger.error(error_msg, exc_info=True)
+            self.update_progress(progress_base, "順次処理に切り替え中...")
+            # 順次処理にフォールバック
+            return self.load_masters_sequential(progress_base=progress_base, progress_range=progress_range)
+    
+    def load_masters_sequential(self, progress_base=0.1, progress_range=0.8):
+        """マスタファイルを順次で読み込む（フォールバック用）"""
+        try:
+            self.log_message("マスタファイルの順次読み込みを開始します...")
+            # 進捗は呼び出し元で設定済みのため、開始時は更新しない
+            
+            results = {}
+            total_files = 4
+            completed_files = 0
+            # 進捗範囲は引数で受け取る（デフォルト: 0.1から0.9まで）
+            
+            # 製品マスタ
+            try:
+                self.update_progress(progress_base + (progress_range * completed_files / total_files), 
+                                   "製品マスタを読み込み中...")
+                results['product'] = self.load_product_master_cached()
+                completed_files += 1
+                if results['product'] is not None:
+                    self.log_message("製品マスタの読み込みが完了しました")
+                    self.update_progress(progress_base + (progress_range * completed_files / total_files), 
+                                       f"製品マスタの読み込み完了 ({completed_files}/{total_files})")
+                else:
+                    self.update_progress(progress_base + (progress_range * completed_files / total_files), 
+                                       f"製品マスタの読み込み失敗 ({completed_files}/{total_files})")
+            except Exception as e:
+                completed_files += 1
+                logger.error(f"製品マスタの読み込みエラー: {str(e)}", exc_info=True)
+                results['product'] = None
+                self.update_progress(progress_base + (progress_range * completed_files / total_files), 
+                                   f"製品マスタの読み込みエラー ({completed_files}/{total_files})")
+            
+            # 検査員マスタ
+            try:
+                self.update_progress(progress_base + (progress_range * completed_files / total_files), 
+                                   "検査員マスタを読み込み中...")
+                results['inspector'] = self.load_inspector_master_cached()
+                completed_files += 1
+                if results['inspector'] is not None:
+                    self.log_message("検査員マスタの読み込みが完了しました")
+                    self.update_progress(progress_base + (progress_range * completed_files / total_files), 
+                                       f"検査員マスタの読み込み完了 ({completed_files}/{total_files})")
+                else:
+                    self.update_progress(progress_base + (progress_range * completed_files / total_files), 
+                                       f"検査員マスタの読み込み失敗 ({completed_files}/{total_files})")
+            except Exception as e:
+                completed_files += 1
+                logger.error(f"検査員マスタの読み込みエラー: {str(e)}", exc_info=True)
+                results['inspector'] = None
+                self.update_progress(progress_base + (progress_range * completed_files / total_files), 
+                                   f"検査員マスタの読み込みエラー ({completed_files}/{total_files})")
+            
+            # スキルマスタ
+            try:
+                self.update_progress(progress_base + (progress_range * completed_files / total_files), 
+                                   "スキルマスタを読み込み中...")
+                results['skill'] = self.load_skill_master_cached()
+                completed_files += 1
+                if results['skill'] is not None:
+                    self.log_message("スキルマスタの読み込みが完了しました")
+                    self.update_progress(progress_base + (progress_range * completed_files / total_files), 
+                                       f"スキルマスタの読み込み完了 ({completed_files}/{total_files})")
+                else:
+                    self.update_progress(progress_base + (progress_range * completed_files / total_files), 
+                                       f"スキルマスタの読み込み失敗 ({completed_files}/{total_files})")
+            except Exception as e:
+                completed_files += 1
+                logger.error(f"スキルマスタの読み込みエラー: {str(e)}", exc_info=True)
+                results['skill'] = None
+                self.update_progress(progress_base + (progress_range * completed_files / total_files), 
+                                   f"スキルマスタの読み込みエラー ({completed_files}/{total_files})")
+            
+            # 検査対象CSV
+            try:
+                self.update_progress(progress_base + (progress_range * completed_files / total_files), 
+                                   "検査対象CSVを読み込み中...")
+                results['inspection_target'] = self.load_inspection_target_csv_cached()
+                completed_files += 1
+                if results['inspection_target'] is not None:
+                    self.log_message("検査対象CSVの読み込みが完了しました")
+                    self.update_progress(progress_base + (progress_range * completed_files / total_files), 
+                                       f"検査対象CSVの読み込み完了 ({completed_files}/{total_files})")
+                else:
+                    self.update_progress(progress_base + (progress_range * completed_files / total_files), 
+                                       f"検査対象CSVの読み込み失敗 ({completed_files}/{total_files})")
+            except Exception as e:
+                completed_files += 1
+                logger.error(f"検査対象CSVの読み込みエラー: {str(e)}", exc_info=True)
+                results['inspection_target'] = None
+                self.update_progress(progress_base + (progress_range * completed_files / total_files), 
+                                   f"検査対象CSVの読み込みエラー ({completed_files}/{total_files})")
+            
+            end_progress = progress_base + progress_range
+            self.update_progress(end_progress, "マスタファイルの順次読み込みが完了しました")
+            self.log_message("マスタファイルの順次読み込みが完了しました")
+            return results
+            
+        except Exception as e:
+            error_msg = f"マスタファイルの順次読み込み中にエラーが発生しました: {str(e)}"
+            self.log_message(error_msg)
+            logger.error(error_msg, exc_info=True)
+            return {
+                'product': None,
+                'inspector': None,
+                'skill': None,
+                'inspection_target': None
+            }
+    
+    def load_product_master_cached(self):
+        """キャッシュ付き製品マスタ読み込み"""
+        cache_key = 'product_master'
+        
+        # キャッシュチェック（スレッドセーフな方法で）
+        try:
+            if cache_key in self.master_cache:
+                if datetime.now() - self.cache_timestamps[cache_key] < self.cache_ttl:
+                    logger.info("製品マスタをキャッシュから読み込みました")
+                    return self.master_cache[cache_key]
+        except Exception:
+            pass  # キャッシュチェックでエラーが発生した場合は通常読み込みに進む
+        
+        # キャッシュミスの場合は通常読み込み
+        df = self.load_product_master()
+        if df is not None:
+            try:
+                self.master_cache[cache_key] = df
+                self.cache_timestamps[cache_key] = datetime.now()
+            except Exception:
+                pass  # キャッシュ保存でエラーが発生しても続行
+        
+        return df
+    
+    def load_inspector_master_cached(self):
+        """キャッシュ付き検査員マスタ読み込み"""
+        cache_key = 'inspector_master'
+        
+        # キャッシュチェック（高速化: 簡潔なチェック）
+        try:
+            if cache_key in self.master_cache and cache_key in self.cache_timestamps:
+                if datetime.now() - self.cache_timestamps[cache_key] < self.cache_ttl:
+                    return self.master_cache[cache_key]
+        except (KeyError, AttributeError):
+            pass  # キャッシュチェックでエラーが発生した場合は通常読み込みに進む
+        
+        # キャッシュミスの場合は通常読み込み
+        df = self.load_inspector_master()
+        if df is not None:
+            try:
+                self.master_cache[cache_key] = df
+                self.cache_timestamps[cache_key] = datetime.now()
+            except Exception:
+                pass  # キャッシュ保存でエラーが発生しても続行
+        
+        return df
+    
+    def load_skill_master_cached(self):
+        """キャッシュ付きスキルマスタ読み込み"""
+        cache_key = 'skill_master'
+        
+        # キャッシュチェック（高速化: 簡潔なチェック）
+        try:
+            if cache_key in self.master_cache and cache_key in self.cache_timestamps:
+                if datetime.now() - self.cache_timestamps[cache_key] < self.cache_ttl:
+                    return self.master_cache[cache_key]
+        except (KeyError, AttributeError):
+            pass  # キャッシュチェックでエラーが発生した場合は通常読み込みに進む
+        
+        # キャッシュミスの場合は通常読み込み
+        df = self.load_skill_master()
+        if df is not None:
+            try:
+                self.master_cache[cache_key] = df
+                self.cache_timestamps[cache_key] = datetime.now()
+            except Exception:
+                pass  # キャッシュ保存でエラーが発生しても続行
+        
+        return df
+    
+    def load_inspection_target_csv_cached(self):
+        """キャッシュ付き検査対象CSV読み込み"""
+        cache_key = 'inspection_target_csv'
+        
+        # キャッシュチェック（高速化: 簡潔なチェック）
+        try:
+            if cache_key in self.master_cache and cache_key in self.cache_timestamps:
+                if datetime.now() - self.cache_timestamps[cache_key] < self.cache_ttl:
+                    return self.master_cache[cache_key]
+        except (KeyError, AttributeError):
+            pass  # キャッシュチェックでエラーが発生した場合は通常読み込みに進む
+        
+        # キャッシュミスの場合は通常読み込み
+        keywords = self.load_inspection_target_csv()
+        if keywords:
+            try:
+                self.master_cache[cache_key] = keywords
+                self.cache_timestamps[cache_key] = datetime.now()
+            except Exception:
+                pass  # キャッシュ保存でエラーが発生しても続行
+        
+        return keywords
+    
     def load_product_master(self):
         """製品マスタファイルを読み込む"""
         try:
@@ -2284,8 +2634,9 @@ class ModernDataExtractorUI:
                 if not file_path:
                     return None
             
-            # Excelファイルを読み込み
-            df = pd.read_excel(file_path)
+            # Excelファイルを読み込み（最適化: engine指定のみ、型推測を高速化）
+            # usecolsやdtype指定はエラー処理のオーバーヘッドがあるため、シンプルに読み込む
+            df = pd.read_excel(file_path, engine='openpyxl')
             
             # 列名を確認
             self.log_message(f"製品マスタの列: {df.columns.tolist()}")
@@ -3273,8 +3624,14 @@ class ModernDataExtractorUI:
                 self.log_message(f"検査員マスタファイルが見つかりません: {file_path}")
                 return None
             
-            # CSVファイルを読み込み（ヘッダーなし）
-            df = pd.read_csv(file_path, encoding='utf-8-sig', header=None)
+            # CSVファイルを読み込み（ヘッダーなし、最適化）
+            # dtype指定はエラー処理のオーバーヘッドがあるため、シンプルに読み込む
+            df = pd.read_csv(
+                file_path,
+                encoding='utf-8-sig',
+                header=None,
+                low_memory=False  # メモリ使用量を増やして高速化
+            )
             
             # 列名を確認
             self.log_message(f"検査員マスタの元の列数: {len(df.columns)}")
@@ -3362,8 +3719,13 @@ class ModernDataExtractorUI:
                 self.log_message(f"スキルマスタファイルが見つかりません: {file_path}")
                 return None
             
-            # CSVファイルを読み込み（ヘッダーなし）
-            df = pd.read_csv(file_path, encoding='utf-8-sig', header=None)
+            # CSVファイルを読み込み（ヘッダーなし、最適化）
+            df = pd.read_csv(
+                file_path,
+                encoding='utf-8-sig',
+                header=None,
+                low_memory=False  # メモリ使用量を増やして高速化
+            )
             
             # 列名を確認
             self.log_message(f"スキルマスタの元の列数: {len(df.columns)}")
@@ -3404,8 +3766,14 @@ class ModernDataExtractorUI:
                 self.log_message(f"検査対象CSVファイルが見つかりません: {file_path}。全てのロットを対象とします。")
                 return []
             
-            # CSVファイルを読み込み（A列のみ）
-            df = pd.read_csv(file_path, encoding='utf-8-sig', header=None, usecols=[0])
+            # CSVファイルを読み込み（A列のみ、最適化）
+            df = pd.read_csv(
+                file_path,
+                encoding='utf-8-sig',
+                header=None,
+                usecols=[0],  # A列のみ読み込む
+                low_memory=False
+            )
             
             # A列の値を取得（空のセルやNaNを除外）
             keywords = df.iloc[:, 0].dropna().astype(str).str.strip()
