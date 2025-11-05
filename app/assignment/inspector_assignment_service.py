@@ -64,6 +64,13 @@ class InspectorAssignmentManager:
         # 改善ポイント: 検査員ごとの担当品番種類数を追跡（品番切替ペナルティ用）
         # 形式: { inspector_code: set(product_numbers) }
         self.inspector_product_variety = {}
+        # 改善ポイント: 警告の重複出力を防ぐためのセット
+        # 形式: {(警告タイプ, キー)} - 同じ警告を1回だけ出力
+        self.logged_warnings = set()
+        # 新製品チーム列の確認ログを1回だけ出力するためのフラグ
+        self.new_product_team_logged = False
+        # 新製品チームメンバー数のログを1回だけ出力するためのフラグ
+        self._new_product_team_count_logged = False
     
     def log_message(self, message, debug=False, level='info'):
         """
@@ -937,14 +944,36 @@ class InspectorAssignmentManager:
                                     
                                     # 勤務時間が0以下の場合は候補から除外
                                     if max_daily_hours <= 0:
-                                        self.log_message(f"警告: 検査員 '{inspector_data['#氏名']}' の勤務時間が0時間以下です (開始: {start_time}, 終了: {end_time}) - 候補から除外")
+                                        # 重複警告を防ぐ
+                                        warning_key = (f"勤務時間0時間_一般", inspector_data['#氏名'])
+                                        if warning_key not in self.logged_warnings:
+                                            self.log_message(
+                                                f"警告: 検査員 '{inspector_data['#氏名']}' の勤務時間が0時間以下です "
+                                                f"(開始: {start_time}, 終了: {end_time}) - 候補から除外",
+                                                level='warning'
+                                            )
+                                            self.logged_warnings.add(warning_key)
                                         continue
                                         
                                 except Exception as e:
-                                    self.log_message(f"警告: 検査員 '{inspector_data['#氏名']}' の勤務時間計算に失敗: {e} - 候補から除外")
+                                    # 重複警告を防ぐ
+                                    warning_key = (f"勤務時間計算失敗_一般", inspector_data['#氏名'])
+                                    if warning_key not in self.logged_warnings:
+                                        self.log_message(
+                                            f"警告: 検査員 '{inspector_data['#氏名']}' の勤務時間計算に失敗: {e} - 候補から除外",
+                                            level='warning'
+                                        )
+                                        self.logged_warnings.add(warning_key)
                                     continue
                             else:
-                                self.log_message(f"警告: 検査員 '{inspector_data['#氏名']}' の時刻情報が不正です - 候補から除外")
+                                # 重複警告を防ぐ
+                                warning_key = (f"時刻情報不正_一般", inspector_data['#氏名'])
+                                if warning_key not in self.logged_warnings:
+                                    self.log_message(
+                                        f"警告: 検査員 '{inspector_data['#氏名']}' の時刻情報が不正です - 候補から除外",
+                                        level='warning'
+                                    )
+                                    self.logged_warnings.add(warning_key)
                                 continue
                             
                             available_inspectors.append({
@@ -997,23 +1026,28 @@ class InspectorAssignmentManager:
         try:
             new_product_team_inspectors = []
             
-            # デバッグ: 新製品チーム列の内容を確認
-            self.log_message("=== 新製品チーム列の確認 ===")
-            if len(inspector_master_df.columns) > 7:
-                team_column = inspector_master_df.iloc[:, 7]
-                self.log_message(f"新製品チーム列の値: {team_column.unique()}")
-                for idx, value in team_column.items():
-                    if pd.notna(value) and str(value).strip() != '':
-                        self.log_message(f"行 {idx}: {value}")
-            else:
-                self.log_message("新製品チーム列が存在しません")
-            self.log_message("=============================")
+            # デバッグ: 新製品チーム列の内容を確認（最初の1回だけ）
+            if not self.new_product_team_logged:
+                self.log_message("=== 新製品チーム列の確認 ===", debug=True)
+                if len(inspector_master_df.columns) > 7:
+                    team_column = inspector_master_df.iloc[:, 7]
+                    self.log_message(f"新製品チーム列の値: {team_column.unique()}", debug=True)
+                    for idx, value in team_column.items():
+                        if pd.notna(value) and str(value).strip() != '':
+                            self.log_message(f"行 {idx}: {value}", debug=True)
+                else:
+                    self.log_message("新製品チーム列が存在しません", debug=True)
+                self.log_message("=============================", debug=True)
+                self.new_product_team_logged = True
             
             # 検査員マスタのH列（新製品チーム）が"★"のメンバーを取得
             new_product_team_rows = inspector_master_df[inspector_master_df.iloc[:, 7] == '★']
             
             if new_product_team_rows.empty:
-                self.log_message("新製品チームのメンバーが見つかりません")
+                warning_key = "new_product_team_empty"
+                if warning_key not in self.logged_warnings:
+                    self.log_message("新製品チームのメンバーが見つかりません")
+                    self.logged_warnings.add(warning_key)
                 return []
             
             for _, inspector_row in new_product_team_rows.iterrows():
@@ -1043,14 +1077,34 @@ class InspectorAssignmentManager:
                         
                         # 勤務時間が0以下の場合は候補から除外
                         if max_daily_hours <= 0:
-                            self.log_message(f"警告: 新製品チームメンバー '{inspector_row['#氏名']}' の勤務時間が0時間以下です (開始: {start_time}, 終了: {end_time}) - 候補から除外")
+                            # 重複警告を防ぐ
+                            warning_key = (f"勤務時間0時間_新製品チーム", inspector_row['#氏名'])
+                            if warning_key not in self.logged_warnings:
+                                self.log_message(
+                                    f"警告: 新製品チームメンバー '{inspector_row['#氏名']}' の勤務時間が0時間以下です "
+                                    f"(開始: {start_time}, 終了: {end_time}) - 候補から除外",
+                                    level='warning'
+                                )
+                                self.logged_warnings.add(warning_key)
                             continue
                             
                     except Exception as e:
-                        self.log_message(f"警告: 新製品チームメンバー '{inspector_row['#氏名']}' の勤務時間計算に失敗: {e} - 候補から除外")
+                        warning_key = (f"勤務時間計算失敗_新製品チーム", inspector_row['#氏名'])
+                        if warning_key not in self.logged_warnings:
+                            self.log_message(
+                                f"警告: 新製品チームメンバー '{inspector_row['#氏名']}' の勤務時間計算に失敗: {e} - 候補から除外",
+                                level='warning'
+                            )
+                            self.logged_warnings.add(warning_key)
                         continue
                 else:
-                    self.log_message(f"警告: 新製品チームメンバー '{inspector_row['#氏名']}' の時刻情報が不正です - 候補から除外")
+                    warning_key = (f"時刻情報不正_新製品チーム", inspector_row['#氏名'])
+                    if warning_key not in self.logged_warnings:
+                        self.log_message(
+                            f"警告: 新製品チームメンバー '{inspector_row['#氏名']}' の時刻情報が不正です - 候補から除外",
+                            level='warning'
+                        )
+                        self.logged_warnings.add(warning_key)
                     continue
                 
                 new_product_team_inspectors.append({
@@ -1060,9 +1114,17 @@ class InspectorAssignmentManager:
                     'コード': inspector_row['#ID'],
                     'is_new_team': True  # 新規品チームフラグ
                 })
-                self.log_message(f"新製品チームメンバー '{inspector_row['#氏名']}' (コード: {inspector_row['#ID']}) を追加")
+                # 追加ログもdebugレベルに変更
+                self.log_message(
+                    f"新製品チームメンバー '{inspector_row['#氏名']}' (コード: {inspector_row['#ID']}) を追加",
+                    debug=True
+                )
             
-            self.log_message(f"新製品チームメンバー: {len(new_product_team_inspectors)}人")
+            # メンバー数は最初の1回だけ出力
+            if not self._new_product_team_count_logged:
+                self.log_message(f"新製品チームメンバー: {len(new_product_team_inspectors)}人")
+                self._new_product_team_count_logged = True
+            
             return new_product_team_inspectors
             
         except Exception as e:
@@ -1641,22 +1703,43 @@ class InspectorAssignmentManager:
                                     f"(調整後: {max_daily_hours:.1f}h)"
                                 )
                             if max_daily_hours <= 0:
-                                self.log_message(
-                                    f"警告: 検査員 '{inspector['氏名']}' の調整後勤務時間が0時間以下です - 除外します"
-                                )
+                                # 重複警告を防ぐ
+                                warning_key = (f"調整後勤務時間0時間", inspector['氏名'])
+                                if warning_key not in self.logged_warnings:
+                                    self.log_message(
+                                        f"警告: 検査員 '{inspector['氏名']}' の調整後勤務時間が0時間以下です - 除外します",
+                                        level='warning'
+                                    )
+                                    self.logged_warnings.add(warning_key)
                                 continue
                         except Exception as exc:
-                            self.log_message(
-                                f"警告: 検査員 '{inspector['氏名']}' の勤務時間計算に失敗: {exc} - デフォルト8時間を使用"
-                            )
+                            # 重複警告を防ぐ
+                            warning_key = (f"勤務時間計算失敗_デフォルト", inspector['氏名'])
+                            if warning_key not in self.logged_warnings:
+                                self.log_message(
+                                    f"警告: 検査員 '{inspector['氏名']}' の勤務時間計算に失敗: {exc} - デフォルト8時間を使用",
+                                    level='warning'
+                                )
+                                self.logged_warnings.add(warning_key)
                     else:
-                        self.log_message(
-                            f"警告: 検査員 '{inspector['氏名']}' の時刻情報が不正です (開始: {start_time}, 終了: {end_time}) - デフォルト8時間を使用"
-                        )
+                        # 重複警告を防ぐ
+                        warning_key = (f"時刻情報不正_デフォルト", inspector['氏名'])
+                        if warning_key not in self.logged_warnings:
+                            self.log_message(
+                                f"警告: 検査員 '{inspector['氏名']}' の時刻情報が不正です "
+                                f"(開始: {start_time}, 終了: {end_time}) - デフォルト8時間を使用",
+                                level='warning'
+                            )
+                            self.logged_warnings.add(warning_key)
                 else:
-                    self.log_message(
-                        f"警告: 検査員 '{inspector['氏名']}' が検査員マスタに見つかりません - デフォルト8時間を使用"
-                    )
+                    # 重複警告を防ぐ
+                    warning_key = (f"マスタに見つからない", inspector['氏名'])
+                    if warning_key not in self.logged_warnings:
+                        self.log_message(
+                            f"警告: 検査員 '{inspector['氏名']}' が検査員マスタに見つかりません - デフォルト8時間を使用",
+                            level='warning'
+                        )
+                        self.logged_warnings.add(warning_key)
 
                 # 改善ポイント: 定数を使用
                 # 勤務時間チェック（WORK_HOURS_BUFFERの余裕を確保）
