@@ -369,6 +369,7 @@ def get_cleaning_instructions_from_sheets(exporter, sheet_name):
         # H列 = 8列目 = インデックス7
         # I列 = 9列目 = インデックス8
         # L列 = 12列目 = インデックス11
+        # W列 = 23列目 = インデックス22
         # AB列 = 28列目 = インデックス27
         
         # リスト内包表記で高速化
@@ -388,6 +389,7 @@ def get_cleaning_instructions_from_sheets(exporter, sheet_name):
                 "客先名": str(row[7]).strip() if len(row) > 7 and row[7] else "",
                 "品番": str(row[8]).strip() if len(row) > 8 and row[8] else "",
                 "品名": str(row[11]).strip() if len(row) > 11 and row[11] else "",
+                "数量": str(row[22]).strip() if len(row) > 22 and row[22] else "",
                 "行番号": row_index,
                 "AB列": ab_value
             })
@@ -660,6 +662,7 @@ def main():
                 print(f"  品名: {item['品名']}")
                 print(f"  客先名: {item['客先名']}")
                 print(f"  号機: {item['号機']}")
+                print(f"  数量: {item['数量']}")
                 print(f"  行番号: {item['行番号']}, AB列: {item['AB列']}")
         
     except Exception as e:
