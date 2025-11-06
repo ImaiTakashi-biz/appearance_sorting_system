@@ -244,9 +244,11 @@ class GoogleSheetsExporter:
                         for val in inspector_df[col_name]:
                             if pd.notna(val) and val != '' and str(val) != 'nan':
                                 try:
-                                    # スラッシュ区切り（YYYY/MM/DD）形式で書き込む
+                                    # 日付をyyyy/mm/dd形式に変換
                                     date_value = pd.to_datetime(val)
-                                    data.append(date_value.strftime('%Y/%m/%d'))
+                                    # 確実にyyyy/mm/dd形式（ゼロ埋め）で書き込む
+                                    formatted_date = date_value.strftime('%Y/%m/%d')
+                                    data.append(formatted_date)
                                 except Exception:
                                     # 日付変換に失敗した場合は空文字
                                     data.append('')
