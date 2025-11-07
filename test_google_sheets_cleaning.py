@@ -12,6 +12,11 @@ import pyodbc
 from datetime import datetime, timedelta
 from pathlib import Path
 
+# 正規表現パターンの事前コンパイル（高速化）
+_MACHINE_PATTERN = re.compile(r'([A-Z]-\d+)')
+_DATE_PATTERN = re.compile(r'(\d{1,2}/\d{1,2})')
+_LOT_PATTERN = re.compile(r'(\d+)\s*ロット')
+
 # pandasの警告を抑制（最初に実行）
 warnings.filterwarnings('ignore', category=UserWarning)
 warnings.filterwarnings('ignore', message='.*SQLAlchemy.*')
@@ -33,7 +38,7 @@ import pandas as pd
 
 def parse_remarks(remarks):
     """
-    詳細・備考から号機、開始日付、日数を抽出
+    詳細・備考から号機、開始日付、日数を抽出（高速化版：事前コンパイル済み正規表現を使用）
     
     Args:
         remarks: 詳細・備考の文字列（例: "E-11　10/26～　9ロット"）
@@ -46,21 +51,18 @@ def parse_remarks(remarks):
     
     result = {}
     
-    # 号機の抽出（アルファベットを含む文字列、例: E-11, D-9, F-12）
-    machine_pattern = r'([A-Z]-\d+)'
-    machine_match = re.search(machine_pattern, remarks)
+    # 号機の抽出（事前コンパイル済みパターンを使用）
+    machine_match = _MACHINE_PATTERN.search(remarks)
     if machine_match:
         result['machine'] = machine_match.group(1)
     
-    # 日付の抽出（MM/DD形式、例: 10/26）
-    date_pattern = r'(\d{1,2}/\d{1,2})'
-    date_match = re.search(date_pattern, remarks)
+    # 日付の抽出（事前コンパイル済みパターンを使用）
+    date_match = _DATE_PATTERN.search(remarks)
     if date_match:
         result['start_date'] = date_match.group(1)
     
-    # ロット数の抽出（数字+ロット、例: 9ロット）
-    lot_pattern = r'(\d+)\s*ロット'
-    lot_match = re.search(lot_pattern, remarks)
+    # ロット数の抽出（事前コンパイル済みパターンを使用）
+    lot_match = _LOT_PATTERN.search(remarks)
     if lot_match:
         result['days'] = int(lot_match.group(1))
     
@@ -122,7 +124,7 @@ def _get_table_structure(connection):
         # 取得したい列のリスト
         desired_columns = [
             "品番", "品名", "客先", "数量", "ロット数量", "指示日", "号機", 
-            "現在工程番号", "現在工程名", "現在工程二次処理", "生産ロットID"
+            "現在工程番号", "現在工程名", "現在工程二次処理", "生産ロットID", "材料識別"
         ]
         
         # テーブルに存在する列のみを抽出
@@ -154,6 +156,7 @@ def _get_table_structure(connection):
 def get_lots_from_access(connection, instruction_date=None, machine=None, date_list=None):
     """
     t_現品票履歴からロットを取得（高速化版）
+    材料識別が5のレコードのみを対象とする
     
     Args:
         connection: Accessデータベース接続
@@ -186,10 +189,14 @@ def get_lots_from_access(connection, instruction_date=None, machine=None, date_l
         
         # 日付リストでフィルタリング（範囲検索を優先）
         elif date_list and "指示日" in available_columns and len(date_list) > 0:
-            # 日付リストをソート
-            sorted_dates = sorted([pd.to_datetime(d) for d in date_list])
-            start_date = sorted_dates[0]
-            end_date = sorted_dates[-1]
+            # 日付リストをソート（文字列形式のまま比較して高速化）
+            sorted_dates_str = sorted(date_list)
+            start_date_str = sorted_dates_str[0]
+            end_date_str = sorted_dates_str[-1]
+            
+            # 日付オブジェクトに変換（範囲計算のため）
+            start_date = pd.to_datetime(start_date_str)
+            end_date = pd.to_datetime(end_date_str)
             
             # 連続した日付範囲の場合はBETWEENを使用（高速化）
             expected_days = len(date_list)
@@ -203,11 +210,8 @@ def get_lots_from_access(connection, instruction_date=None, machine=None, date_l
             else:
                 # 連続していない場合はIN句を使用（ただし最大50件まで）
                 if len(date_list) <= 50:
-                    date_conditions = []
-                    for date in date_list:
-                        date_obj = pd.to_datetime(date)
-                        date_str = date_obj.strftime('#%Y-%m-%d#')
-                        date_conditions.append(f"[指示日] = {date_str}")
+                    # 文字列形式のまま使用して変換を削減
+                    date_conditions = [f"[指示日] = #{date_str}#" for date_str in date_list]
                     if date_conditions:
                         where_conditions.append(f"({' OR '.join(date_conditions)})")
                 else:
@@ -222,6 +226,10 @@ def get_lots_from_access(connection, instruction_date=None, machine=None, date_l
             # SQLインジェクション対策
             escaped_machine = machine.replace("'", "''")
             where_conditions.insert(0, f"[号機] = '{escaped_machine}'")  # 先頭に配置してインデックスを活用
+        
+        # 材料識別でフィルタリング（5のみを対象）
+        if "材料識別" in available_columns:
+            where_conditions.append("[材料識別] = 5")
         
         if not where_conditions:
             logger.warning("フィルタ条件が設定されていません")
@@ -254,6 +262,7 @@ def get_lots_from_access(connection, instruction_date=None, machine=None, date_l
 def get_lots_from_access_batch(connection, requests):
     """
     複数のリクエストをバッチ処理でまとめて取得（高速化版）
+    材料識別が5のレコードのみを対象とする
     
     Args:
         connection: Accessデータベース接続
@@ -290,9 +299,10 @@ def get_lots_from_access_batch(connection, requests):
             if req.get("date_list"):
                 date_list = req["date_list"]
                 if len(date_list) > 0:
-                    sorted_dates = sorted([pd.to_datetime(d) for d in date_list])
-                    start_date = sorted_dates[0]
-                    end_date = sorted_dates[-1]
+                    # 文字列形式のままソートして高速化
+                    sorted_dates_str = sorted(date_list)
+                    start_date = pd.to_datetime(sorted_dates_str[0])
+                    end_date = pd.to_datetime(sorted_dates_str[-1])
                     start_str = start_date.strftime('#%Y-%m-%d#')
                     end_str = end_date.strftime('#%Y-%m-%d#')
                     conditions.append(f"[指示日] >= {start_str} AND [指示日] <= {end_str}")
@@ -309,6 +319,10 @@ def get_lots_from_access_batch(connection, requests):
             return pd.DataFrame()
         
         where_clause = " OR ".join(all_conditions)
+        
+        # 材料識別でフィルタリング（5のみを対象）
+        if "材料識別" in available_columns:
+            where_clause = f"({where_clause}) AND [材料識別] = 5"
         
         # バッチクエリを実行
         query = f"""
@@ -333,7 +347,9 @@ def get_lots_from_access_batch(connection, requests):
 
 def get_cleaning_instructions_from_sheets(exporter, sheet_name):
     """
-    洗浄指示シートから指定範囲のデータを取得（AB列が1または2の行）
+    洗浄指示シートから指定範囲のデータを取得
+    - AB列が1の場合：無条件で対象
+    - AB列が2または3の場合：AA列が5なら対象
     
     Args:
         exporter: GoogleSheetsExporterインスタンス
@@ -370,28 +386,49 @@ def get_cleaning_instructions_from_sheets(exporter, sheet_name):
         # I列 = 9列目 = インデックス8
         # L列 = 12列目 = インデックス11
         # W列 = 23列目 = インデックス22
+        # AA列 = 27列目 = インデックス26
         # AB列 = 28列目 = インデックス27
         
         # リスト内包表記で高速化
         result_data = []
+        # 事前に条件判定用のヘルパー関数を定義（高速化）
+        def get_cell_value(row, idx, default=""):
+            """セル値を安全に取得（高速化版）"""
+            if len(row) > idx and row[idx]:
+                val = row[idx]
+                return val.strip() if isinstance(val, str) else str(val).strip()
+            return default
+        
         for row_index, row in enumerate(range_data, start=43):
             if not row or len(row) < 28:
                 continue
             
-            # AB列が1または2の場合のみ処理
-            ab_value = str(row[27]).strip() if len(row) > 27 and row[27] else ""
-            if ab_value not in ['1', '2']:
+            # AB列とAA列の値を取得（高速化）
+            ab_value = get_cell_value(row, 27)
+            aa_value = get_cell_value(row, 26)
+            
+            # 条件判定（早期リターンで高速化）
+            # AB列が1の場合：無条件で対象
+            if ab_value == '1':
+                pass  # 処理を続行
+            # AB列が2または3の場合：AA列が5なら対象
+            elif ab_value in ('2', '3'):  # tupleの方が高速
+                if aa_value != '5':
+                    continue  # 条件を満たさない場合はスキップ
+            else:
+                # AB列が1, 2, 3以外の場合はスキップ
                 continue
             
             # 必要な列の値を取得（一度に取得して高速化）
             result_data.append({
-                "号機": str(row[5]).strip() if len(row) > 5 and row[5] else "",
-                "客先名": str(row[7]).strip() if len(row) > 7 and row[7] else "",
-                "品番": str(row[8]).strip() if len(row) > 8 and row[8] else "",
-                "品名": str(row[11]).strip() if len(row) > 11 and row[11] else "",
-                "数量": str(row[22]).strip() if len(row) > 22 and row[22] else "",
+                "号機": get_cell_value(row, 5),
+                "客先名": get_cell_value(row, 7),
+                "品番": get_cell_value(row, 8),
+                "品名": get_cell_value(row, 11),
+                "数量": get_cell_value(row, 22),
                 "行番号": row_index,
-                "AB列": ab_value
+                "AB列": ab_value,
+                "AA列": aa_value
             })
         
         # logger.debug(f"シート「{sheet_name}」から {len(result_data)}件のデータを取得しました")
@@ -441,24 +478,34 @@ def get_today_requests_from_sheets(exporter, sheet_name="依頼一覧"):
         
         # 今日の日付と一致する行をフィルタリング（高速化）
         today_rows = []
+        # 事前に今日の日付をdatetimeオブジェクトに変換（一度だけ）
+        today_dt = datetime.now()
+        
         for row in all_values:
             if not row or not row[0]:
                 continue
             
-            date_str = str(row[0]).strip()
+            date_val = row[0]
+            # 文字列変換を最小限に（既に文字列の場合はそのまま使用）
+            if isinstance(date_val, str):
+                date_str = date_val.strip()
+            else:
+                date_str = str(date_val).strip()
+            
+            # 直接一致チェック（最も高速）
             if date_str == today:
-                # 直接一致する場合（最も高速）
                 row_data = row[:11] if len(row) >= 11 else row + [''] * (11 - len(row))
                 today_rows.append(row_data)
-            else:
-                # 日付解析を試行（エラー時はスキップ）
-                try:
-                    parsed_date = pd.to_datetime(date_str, errors='coerce')
-                    if pd.notna(parsed_date) and parsed_date.strftime('%Y/%m/%d') == today:
-                        row_data = row[:11] if len(row) >= 11 else row + [''] * (11 - len(row))
-                        today_rows.append(row_data)
-                except Exception:
-                    continue
+                continue
+            
+            # 日付解析を試行（エラー時はスキップ）
+            try:
+                parsed_date = pd.to_datetime(date_str, errors='coerce', format='%Y/%m/%d')
+                if pd.notna(parsed_date) and parsed_date.date() == today_dt.date():
+                    row_data = row[:11] if len(row) >= 11 else row + [''] * (11 - len(row))
+                    today_rows.append(row_data)
+            except Exception:
+                continue
         
         # logger.debug(f"シート「{sheet_name}」から今日（{today}）のデータを{len(today_rows)}件取得しました")
         return today_rows
@@ -539,22 +586,35 @@ def main():
         batch_requests = []
         row_info_list = []
         
+        # 列名のインデックスを事前に取得（高速化）
+        col_idx_map = {name: idx for idx, name in enumerate(column_names)}
+        idx_指示日 = col_idx_map.get("指示日", -1)
+        idx_号機 = col_idx_map.get("号機", -1)
+        idx_詳細備考 = col_idx_map.get("詳細・備考", -1)
+        
         for i, row in enumerate(today_data, 1):
-            row_dict = dict(zip(column_names, row))
-            
-            # 指示日と号機を取得
-            instruction_date = row_dict.get("指示日", "").strip()
-            machine = row_dict.get("号機", "").strip()
-            remarks = row_dict.get("詳細・備考", "").strip()
+            # インデックスで直接アクセス（dict作成を避けて高速化）
+            instruction_date = row[idx_指示日].strip() if idx_指示日 >= 0 and len(row) > idx_指示日 and row[idx_指示日] else ""
+            machine = row[idx_号機].strip() if idx_号機 >= 0 and len(row) > idx_号機 and row[idx_号機] else ""
+            remarks = row[idx_詳細備考].strip() if idx_詳細備考 >= 0 and len(row) > idx_詳細備考 and row[idx_詳細備考] else ""
             
             request = {}
             
             # 指示日と号機が両方ある場合
             if instruction_date and machine:
                 try:
-                    instruction_date_obj = pd.to_datetime(instruction_date)
-                    request["instruction_date"] = instruction_date_obj.strftime('%Y-%m-%d')
-                    request["machine"] = machine
+                    # 日付形式を直接変換（高速化）
+                    # YYYY/MM/DD形式を想定
+                    if '/' in instruction_date:
+                        parts = instruction_date.split('/')
+                        if len(parts) == 3:
+                            request["instruction_date"] = f"{parts[0]}-{parts[1].zfill(2)}-{parts[2].zfill(2)}"
+                            request["machine"] = machine
+                    else:
+                        # その他の形式の場合はpd.to_datetimeを使用
+                        instruction_date_obj = pd.to_datetime(instruction_date)
+                        request["instruction_date"] = instruction_date_obj.strftime('%Y-%m-%d')
+                        request["machine"] = machine
                 except Exception:
                     pass
             
@@ -568,9 +628,10 @@ def main():
             
             if request:
                 batch_requests.append(request)
+                # row_dictは必要時のみ作成（メモリ節約）
                 row_info_list.append({
                     "index": i,
-                    "row_dict": row_dict,
+                    "row": row,  # 元のrowを保存（必要時のみdict化）
                     "request": request
                 })
         
@@ -628,18 +689,33 @@ def main():
             print(f"ロット取得完了: {len(final_lots_df)}件（ユニーク: {unique_lots}件） - {total_elapsed:.2f}秒")
             print(f"{'='*80}")
             
-            # ロット情報を表示
-            for idx, lot in final_lots_df.iterrows():
-                lot_id = lot.get('生産ロットID', '')
-                product_number = lot.get('品番', '')
-                product_name = lot.get('品名', '')
-                customer = lot.get('客先', '')
-                instruction_date = lot.get('指示日', '')
-                machine = lot.get('号機', '')
-                quantity = lot.get('ロット数量', lot.get('数量', ''))
-                process = lot.get('現在工程名', '')
+            # ロット情報を表示（iterrows()を避けて高速化）
+            # 列名のインデックスを事前に取得（高速化）
+            col_idx = {col: idx for idx, col in enumerate(final_lots_df.columns)}
+            get_col = lambda col: col_idx.get(col, -1)
+            
+            idx_生産ロットID = get_col('生産ロットID')
+            idx_品番 = get_col('品番')
+            idx_品名 = get_col('品名')
+            idx_客先 = get_col('客先')
+            idx_指示日 = get_col('指示日')
+            idx_号機 = get_col('号機')
+            idx_ロット数量 = get_col('ロット数量')
+            idx_数量 = get_col('数量')
+            idx_現在工程名 = get_col('現在工程名')
+            
+            # itertuples()の方がiterrows()より約10倍高速（列インデックスでアクセス）
+            for idx, lot_tuple in enumerate(final_lots_df.itertuples(index=False), 1):
+                lot_id = lot_tuple[idx_生産ロットID] if idx_生産ロットID >= 0 else ''
+                product_number = lot_tuple[idx_品番] if idx_品番 >= 0 else ''
+                product_name = lot_tuple[idx_品名] if idx_品名 >= 0 else ''
+                customer = lot_tuple[idx_客先] if idx_客先 >= 0 else ''
+                instruction_date = lot_tuple[idx_指示日] if idx_指示日 >= 0 else ''
+                machine = lot_tuple[idx_号機] if idx_号機 >= 0 else ''
+                quantity = lot_tuple[idx_ロット数量] if idx_ロット数量 >= 0 else (lot_tuple[idx_数量] if idx_数量 >= 0 else '')
+                process = lot_tuple[idx_現在工程名] if idx_現在工程名 >= 0 else ''
                 
-                print(f"\n【ロット {idx+1}】")
+                print(f"\n【ロット {idx}】")
                 print(f"  生産ロットID: {lot_id}")
                 print(f"  品番: {product_number}")
                 print(f"  品名: {product_name}")
@@ -663,7 +739,7 @@ def main():
                 print(f"  客先名: {item['客先名']}")
                 print(f"  号機: {item['号機']}")
                 print(f"  数量: {item['数量']}")
-                print(f"  行番号: {item['行番号']}, AB列: {item['AB列']}")
+                print(f"  行番号: {item['行番号']}, AA列: {item['AA列']}, AB列: {item['AB列']}")
         
     except Exception as e:
         logger.error(f"エラーが発生しました: {str(e)}")
