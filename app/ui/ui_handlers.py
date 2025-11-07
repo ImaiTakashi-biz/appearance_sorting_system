@@ -20,6 +20,7 @@ import locale
 from app.export.excel_exporter_service import ExcelExporter
 from app.export.google_sheets_exporter_service import GoogleSheetsExporter
 from app.assignment.inspector_assignment_service import InspectorAssignmentManager
+from app.services.cleaning_request_service import get_cleaning_lots
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import matplotlib.font_manager as fm
@@ -1905,51 +1906,75 @@ class ModernDataExtractorUI:
             
             # 品番ごとに処理
             for product_number in shortage_df['品番'].unique():
-                product_shortage = shortage_df[shortage_df['品番'] == product_number]
-                product_lots = lots_df[lots_df['品番'] == product_number].copy()
-                
-                if product_lots.empty:
+                try:
+                    product_shortage = shortage_df[shortage_df['品番'] == product_number]
+                    product_lots = lots_df[lots_df['品番'] == product_number].copy()
+                    
+                    if product_lots.empty:
+                        continue
+                    
+                    # 指示日順でソート（型を統一してからソート）
+                    if '指示日' in product_lots.columns:
+                        # 指示日を文字列に統一してからソート（None/NaNは最後に）
+                        product_lots = product_lots.copy()
+                        product_lots['_指示日_ソート用'] = product_lots['指示日'].apply(
+                            lambda x: str(x) if pd.notna(x) else ''
+                        )
+                        product_lots = product_lots.sort_values('_指示日_ソート用', na_position='last')
+                        product_lots = product_lots.drop(columns=['_指示日_ソート用'])
+                    else:
+                        # 指示日列がない場合はそのまま
+                        pass
+                    
+                    # 品番ごとの不足数を取得（マイナス値のまま）
+                    initial_shortage = product_shortage['不足数'].iloc[0]
+                    current_shortage = initial_shortage
+                    
+                    # ロットを順番に割り当て（itertuples()で高速化）
+                    # 列名のインデックスマップを作成
+                    lot_cols = {col: idx for idx, col in enumerate(product_lots.columns)}
+                    
+                    for lot in product_lots.itertuples(index=False):
+                        if current_shortage >= 0:  # 不足数が0以上になったら終了
+                            break
+                        
+                        lot_quantity = int(lot[lot_cols['数量']]) if pd.notna(lot[lot_cols['数量']]) else 0
+                        
+                        # 出荷予定日の決定：ロットに設定されている場合はそれを使用（洗浄二次処理依頼のロット用）
+                        # ロットに「出荷予定日」列があり、値が設定されている場合はそれを使用
+                        if '出荷予定日' in lot_cols and pd.notna(lot[lot_cols['出荷予定日']]):
+                            shipping_date = lot[lot_cols['出荷予定日']]
+                        else:
+                            # ロットに設定がない場合は、不足データの出荷予定日を使用
+                            shipping_date = product_shortage['出荷予定日'].iloc[0]
+                        
+                        # 割り当て結果を記録
+                        assignment_result = {
+                            '出荷予定日': shipping_date,
+                            '品番': product_number,
+                            '品名': product_shortage['品名'].iloc[0],
+                            '客先': product_shortage['客先'].iloc[0],
+                            '出荷数': int(product_shortage['出荷数'].iloc[0]),
+                            '在庫数': int(product_shortage['在庫数'].iloc[0]),
+                            '在梱包数': int(product_shortage['梱包・完了'].iloc[0]),
+                            '不足数': current_shortage,  # 現在の不足数（マイナス値）
+                            'ロット数量': lot_quantity,  # ロット全体の数量を表示
+                            '指示日': lot[lot_cols.get('指示日', -1)] if '指示日' in lot_cols and pd.notna(lot[lot_cols['指示日']]) else '',
+                            '号機': lot[lot_cols.get('号機', -1)] if '号機' in lot_cols and pd.notna(lot[lot_cols['号機']]) else '',
+                            '現在工程番号': lot[lot_cols.get('現在工程番号', -1)] if '現在工程番号' in lot_cols and pd.notna(lot[lot_cols['現在工程番号']]) else '',
+                            '現在工程名': lot[lot_cols.get('現在工程名', -1)] if '現在工程名' in lot_cols and pd.notna(lot[lot_cols['現在工程名']]) else '',
+                            '現在工程二次処理': lot[lot_cols.get('現在工程二次処理', -1)] if '現在工程二次処理' in lot_cols and pd.notna(lot[lot_cols['現在工程二次処理']]) else '',
+                            '生産ロットID': lot[lot_cols.get('生産ロットID', -1)] if '生産ロットID' in lot_cols and pd.notna(lot[lot_cols['生産ロットID']]) else ''
+                        }
+                        assignment_results.append(assignment_result)
+                        
+                        # 次のロットの不足数を計算（ロット数量を加算）
+                        current_shortage += lot_quantity
+                        
+                except Exception as e:
+                    # 個別の品番でエラーが発生しても、他の品番の処理を継続
+                    self.log_message(f"品番 {product_number} のロット割り当て中にエラーが発生しました: {str(e)}")
                     continue
-                
-                # 指示日順でソート
-                product_lots = product_lots.sort_values('指示日')
-                
-                # 品番ごとの不足数を取得（マイナス値のまま）
-                initial_shortage = product_shortage['不足数'].iloc[0]
-                current_shortage = initial_shortage
-                
-                # ロットを順番に割り当て（itertuples()で高速化）
-                # 列名のインデックスマップを作成
-                lot_cols = {col: idx for idx, col in enumerate(product_lots.columns)}
-                
-                for lot in product_lots.itertuples(index=False):
-                    if current_shortage >= 0:  # 不足数が0以上になったら終了
-                        break
-                    
-                    lot_quantity = int(lot[lot_cols['数量']]) if pd.notna(lot[lot_cols['数量']]) else 0
-                    
-                    # 割り当て結果を記録
-                    assignment_result = {
-                        '出荷予定日': product_shortage['出荷予定日'].iloc[0],
-                        '品番': product_number,
-                        '品名': product_shortage['品名'].iloc[0],
-                        '客先': product_shortage['客先'].iloc[0],
-                        '出荷数': int(product_shortage['出荷数'].iloc[0]),
-                        '在庫数': int(product_shortage['在庫数'].iloc[0]),
-                        '在梱包数': int(product_shortage['梱包・完了'].iloc[0]),
-                        '不足数': current_shortage,  # 現在の不足数（マイナス値）
-                        'ロット数量': lot_quantity,  # ロット全体の数量を表示
-                        '指示日': lot[lot_cols.get('指示日', -1)] if '指示日' in lot_cols and pd.notna(lot[lot_cols['指示日']]) else '',
-                        '号機': lot[lot_cols.get('号機', -1)] if '号機' in lot_cols and pd.notna(lot[lot_cols['号機']]) else '',
-                        '現在工程番号': lot[lot_cols.get('現在工程番号', -1)] if '現在工程番号' in lot_cols and pd.notna(lot[lot_cols['現在工程番号']]) else '',
-                        '現在工程名': lot[lot_cols.get('現在工程名', -1)] if '現在工程名' in lot_cols and pd.notna(lot[lot_cols['現在工程名']]) else '',
-                        '現在工程二次処理': lot[lot_cols.get('現在工程二次処理', -1)] if '現在工程二次処理' in lot_cols and pd.notna(lot[lot_cols['現在工程二次処理']]) else '',
-                        '生産ロットID': lot[lot_cols.get('生産ロットID', -1)] if '生産ロットID' in lot_cols and pd.notna(lot[lot_cols['生産ロットID']]) else ''
-                    }
-                    assignment_results.append(assignment_result)
-                    
-                    # 次のロットの不足数を計算（ロット数量を加算）
-                    current_shortage += lot_quantity
             
             if assignment_results:
                 result_df = pd.DataFrame(assignment_results)
@@ -1976,9 +2001,134 @@ class ModernDataExtractorUI:
             
             self.log_message(f"不足数がマイナスのデータ: {len(shortage_df)}件")
             
-            # 利用可能なロットを取得
+            # 通常の在庫ロットを取得
             self.update_progress(start_progress + 0.10, "利用可能なロットを取得中...")
             lots_df = self.get_available_lots_for_shortage(connection, shortage_df)
+            
+            # 洗浄二次処理依頼からロットを取得（追加で取得）
+            cleaning_lots_df = pd.DataFrame()
+            if (self.config.google_sheets_url_cleaning and 
+                self.config.google_sheets_url_cleaning_instructions and 
+                self.config.google_sheets_credentials_path):
+                try:
+                    self.update_progress(start_progress + 0.12, "洗浄二次処理依頼からロットを取得中...")
+                    cleaning_lots_df = get_cleaning_lots(
+                        connection,
+                        self.config.google_sheets_url_cleaning,
+                        self.config.google_sheets_url_cleaning_instructions,
+                        self.config.google_sheets_credentials_path,
+                        log_callback=self.log_message
+                    )
+                    if not cleaning_lots_df.empty:
+                        self.log_message(f"洗浄二次処理依頼から {len(cleaning_lots_df)}件のロットを取得しました")
+                except Exception as e:
+                    self.log_message(f"洗浄二次処理依頼からのロット取得中にエラーが発生しました: {str(e)}")
+            
+            # 洗浄二次処理依頼のロットを統合
+            # 注意: 通常の在庫ロットの情報（出荷予定日を含む）は一切変更しない
+            if not cleaning_lots_df.empty:
+                # 洗浄関連のロットのみに出荷予定日を設定（通常の在庫ロットには影響しない）
+                if '出荷予定日' not in cleaning_lots_df.columns:
+                    cleaning_lots_df['出荷予定日'] = "当日洗浄上がり品"
+                else:
+                    # 洗浄関連のロットのみに出荷予定日を設定
+                    cleaning_lots_df['出荷予定日'] = "当日洗浄上がり品"
+                
+                if lots_df.empty:
+                    lots_df = cleaning_lots_df
+                    self.log_message(f"洗浄二次処理依頼のロット {len(cleaning_lots_df)}件を振分け対象として設定しました")
+                else:
+                    # 統合前の通常ロット数を記録
+                    normal_lots_count = len(lots_df)
+                    
+                    # 統合前に、通常の在庫ロットの生産ロットIDと出荷予定日を記録（出荷予定日を保護するため）
+                    normal_lot_ids = set()
+                    normal_lot_shipping_dates = {}
+                    if '生産ロットID' in lots_df.columns:
+                        normal_lot_ids = set(lots_df['生産ロットID'].dropna())
+                        # 通常の在庫ロットの出荷予定日を記録（存在する場合）
+                        if '出荷予定日' in lots_df.columns:
+                            # iterrows()を避けて高速化
+                            lot_id_col = lots_df['生産ロットID']
+                            shipping_date_col = lots_df['出荷予定日']
+                            for lot_id in normal_lot_ids:
+                                mask = lot_id_col == lot_id
+                                if mask.any():
+                                    shipping_date = shipping_date_col[mask].iloc[0]
+                                    normal_lot_shipping_dates[lot_id] = shipping_date
+                    
+                    # 既存のロットと統合（重複を避ける）
+                    if '生産ロットID' in lots_df.columns and '生産ロットID' in cleaning_lots_df.columns:
+                        # 既存のロットIDを除外
+                        existing_lot_ids = set(lots_df['生産ロットID'].dropna())
+                        cleaning_lots_df_filtered = cleaning_lots_df[
+                            ~cleaning_lots_df['生産ロットID'].isin(existing_lot_ids)
+                        ]
+                        if not cleaning_lots_df_filtered.empty:
+                            # 洗浄二次処理依頼から取得したロットの生産ロットIDを記録（出荷予定日を保護するため）
+                            cleaning_lot_ids = set(cleaning_lots_df_filtered['生産ロットID'].dropna())
+                            
+                            # 統合（通常の在庫ロットの出荷予定日は変更しない）
+                            lots_df = pd.concat([lots_df, cleaning_lots_df_filtered], ignore_index=True)
+                            
+                            # 統合後、通常の在庫ロットの出荷予定日を復元
+                            if '出荷予定日' in lots_df.columns and '生産ロットID' in lots_df.columns:
+                                # 通常の在庫ロットの出荷予定日を復元（記録した値またはNone）
+                                normal_lots_mask = lots_df['生産ロットID'].isin(normal_lot_ids)
+                                if normal_lots_mask.any():
+                                    # 記録した出荷予定日を一括で復元
+                                    for lot_id, shipping_date in normal_lot_shipping_dates.items():
+                                        lot_mask = (lots_df['生産ロットID'] == lot_id) & normal_lots_mask
+                                        if lot_mask.any():
+                                            lots_df.loc[lot_mask, '出荷予定日'] = shipping_date
+                                    
+                                    # 記録がない通常の在庫ロットの出荷予定日をNoneに設定
+                                    recorded_lot_ids = set(normal_lot_shipping_dates.keys())
+                                    unrecorded_mask = normal_lots_mask & ~lots_df['生産ロットID'].isin(recorded_lot_ids)
+                                    if unrecorded_mask.any():
+                                        lots_df.loc[unrecorded_mask, '出荷予定日'] = None
+                                
+                                # 洗浄二次処理依頼から取得したロットの出荷予定日を「当日洗浄上がり品」に確実に設定
+                                cleaning_lots_mask = lots_df['生産ロットID'].isin(cleaning_lot_ids)
+                                if cleaning_lots_mask.any():
+                                    lots_df.loc[cleaning_lots_mask, '出荷予定日'] = "当日洗浄上がり品"
+                            
+                            self.log_message(f"洗浄二次処理依頼のロット {len(cleaning_lots_df_filtered)}件を統合しました（通常ロット: {normal_lots_count}件、合計: {len(lots_df)}件）")
+                        else:
+                            self.log_message(f"洗浄二次処理依頼のロットは全て重複していたため追加しませんでした（通常ロット: {normal_lots_count}件）")
+                    else:
+                        # 洗浄二次処理依頼から取得したロットの生産ロットIDを記録（出荷予定日を保護するため）
+                        cleaning_lot_ids = set()
+                        if '生産ロットID' in cleaning_lots_df.columns:
+                            cleaning_lot_ids = set(cleaning_lots_df['生産ロットID'].dropna())
+                        
+                        # 統合（通常の在庫ロットの出荷予定日は変更しない）
+                        lots_df = pd.concat([lots_df, cleaning_lots_df], ignore_index=True)
+                        
+                        # 統合後、通常の在庫ロットの出荷予定日を復元
+                        if '出荷予定日' in lots_df.columns and '生産ロットID' in lots_df.columns and normal_lot_ids:
+                            # 通常の在庫ロットの出荷予定日を復元（記録した値またはNone）
+                            normal_lots_mask = lots_df['生産ロットID'].isin(normal_lot_ids)
+                            if normal_lots_mask.any():
+                                # 記録した出荷予定日を一括で復元
+                                for lot_id, shipping_date in normal_lot_shipping_dates.items():
+                                    lot_mask = (lots_df['生産ロットID'] == lot_id) & normal_lots_mask
+                                    if lot_mask.any():
+                                        lots_df.loc[lot_mask, '出荷予定日'] = shipping_date
+                                
+                                # 記録がない通常の在庫ロットの出荷予定日をNoneに設定
+                                recorded_lot_ids = set(normal_lot_shipping_dates.keys())
+                                unrecorded_mask = normal_lots_mask & ~lots_df['生産ロットID'].isin(recorded_lot_ids)
+                                if unrecorded_mask.any():
+                                    lots_df.loc[unrecorded_mask, '出荷予定日'] = None
+                        
+                        # 洗浄二次処理依頼から取得したロットの出荷予定日を「当日洗浄上がり品」に確実に設定
+                        if '出荷予定日' in lots_df.columns and '生産ロットID' in lots_df.columns and cleaning_lot_ids:
+                            cleaning_lots_mask = lots_df['生産ロットID'].isin(cleaning_lot_ids)
+                            if cleaning_lots_mask.any():
+                                lots_df.loc[cleaning_lots_mask, '出荷予定日'] = "当日洗浄上がり品"
+                        
+                        self.log_message(f"洗浄二次処理依頼のロット {len(cleaning_lots_df)}件を統合しました（通常ロット: {normal_lots_count}件、合計: {len(lots_df)}件）")
             
             if lots_df.empty:
                 self.log_message("利用可能なロットが見つかりませんでした")
@@ -1987,6 +2137,108 @@ class ModernDataExtractorUI:
             # ロット割り当てを実行
             self.update_progress(start_progress + 0.15, "ロットを割り当て中...")
             assignment_df = self.assign_lots_to_shortage(shortage_df, lots_df)
+            
+            # 洗浄二次処理依頼のロットを追加（不足数がマイナスの品番と一致するものも含む）
+            if not cleaning_lots_df.empty:
+                # 不足数がマイナスの品番リストを取得
+                shortage_product_numbers = set(shortage_df['品番'].unique())
+                
+                # 洗浄二次処理依頼のロットで、不足数がマイナスの品番と一致しないものを抽出
+                cleaning_lots_not_in_shortage = cleaning_lots_df[
+                    ~cleaning_lots_df['品番'].isin(shortage_product_numbers)
+                ].copy()
+                
+                # 洗浄二次処理依頼のロットで、不足数がマイナスの品番と一致するものを抽出
+                # assign_lots_to_shortageで処理されなかったロットを追加するため
+                cleaning_lots_in_shortage = cleaning_lots_df[
+                    cleaning_lots_df['品番'].isin(shortage_product_numbers)
+                ].copy()
+                
+                # assign_lots_to_shortageで既に割り当てられたロットIDを取得
+                assigned_lot_ids = set()
+                if not assignment_df.empty and '生産ロットID' in assignment_df.columns:
+                    assigned_lot_ids = set(assignment_df['生産ロットID'].dropna().unique())
+                
+                # 不足数がマイナスの品番と一致するが、まだ割り当てられていないロットを抽出
+                cleaning_lots_in_shortage_not_assigned = cleaning_lots_in_shortage[
+                    ~cleaning_lots_in_shortage['生産ロットID'].isin(assigned_lot_ids)
+                ].copy()
+                
+                # 不足数がマイナスの品番と一致しないものと、一致するが未割当のものを統合
+                all_additional_cleaning_lots = pd.DataFrame()
+                if not cleaning_lots_not_in_shortage.empty and not cleaning_lots_in_shortage_not_assigned.empty:
+                    all_additional_cleaning_lots = pd.concat([
+                        cleaning_lots_not_in_shortage,
+                        cleaning_lots_in_shortage_not_assigned
+                    ], ignore_index=True)
+                elif not cleaning_lots_not_in_shortage.empty:
+                    all_additional_cleaning_lots = cleaning_lots_not_in_shortage
+                elif not cleaning_lots_in_shortage_not_assigned.empty:
+                    all_additional_cleaning_lots = cleaning_lots_in_shortage_not_assigned
+                
+                if not all_additional_cleaning_lots.empty:
+                    # 洗浄二次処理依頼から取得したロットの出荷予定日を「当日洗浄上がり品」に確実に設定
+                    if '出荷予定日' in all_additional_cleaning_lots.columns:
+                        all_additional_cleaning_lots['出荷予定日'] = "当日洗浄上がり品"
+                    else:
+                        all_additional_cleaning_lots['出荷予定日'] = "当日洗浄上がり品"
+                    
+                    # これらのロットを独立したロットとして追加
+                    additional_assignments = []
+                    for _, lot_row in all_additional_cleaning_lots.iterrows():
+                        # 品番がmain_dfに存在するか確認
+                        product_in_main = main_df[main_df['品番'] == lot_row['品番']]
+                        if not product_in_main.empty:
+                            # main_dfから該当品番の最初の行を取得
+                            main_row = product_in_main.iloc[0]
+                            additional_assignment = {
+                                '出荷予定日': "当日洗浄上がり品",  # 洗浄二次処理依頼から取得したロットは常に「当日洗浄上がり品」
+                                '品番': lot_row['品番'],
+                                '品名': lot_row.get('品名', main_row.get('品名', '')),
+                                '客先': lot_row.get('客先', main_row.get('客先', '')),
+                                '出荷数': int(main_row.get('出荷数', 0)),
+                                '在庫数': int(main_row.get('在庫数', 0)),
+                                '在梱包数': int(main_row.get('梱包・完了', 0)),
+                                '不足数': 0,  # 不足数がマイナスでない場合は0
+                                'ロット数量': int(lot_row.get('数量', lot_row.get('ロット数量', 0))),
+                                '指示日': lot_row.get('指示日', ''),
+                                '号機': lot_row.get('号機', ''),
+                                '現在工程番号': lot_row.get('現在工程番号', ''),
+                                '現在工程名': lot_row.get('現在工程名', ''),
+                                '現在工程二次処理': lot_row.get('現在工程二次処理', ''),
+                                '生産ロットID': lot_row.get('生産ロットID', '')
+                            }
+                            additional_assignments.append(additional_assignment)
+                        else:
+                            # main_dfに存在しない場合は、ロットの情報のみを使用
+                            additional_assignment = {
+                                '出荷予定日': "当日洗浄上がり品",  # 洗浄二次処理依頼から取得したロットは常に「当日洗浄上がり品」
+                                '品番': lot_row['品番'],
+                                '品名': lot_row.get('品名', ''),
+                                '客先': lot_row.get('客先', ''),
+                                '出荷数': 0,
+                                '在庫数': 0,
+                                '在梱包数': 0,
+                                '不足数': 0,
+                                'ロット数量': int(lot_row.get('数量', lot_row.get('ロット数量', 0))),
+                                '指示日': lot_row.get('指示日', ''),
+                                '号機': lot_row.get('号機', ''),
+                                '現在工程番号': lot_row.get('現在工程番号', ''),
+                                '現在工程名': lot_row.get('現在工程名', ''),
+                                '現在工程二次処理': lot_row.get('現在工程二次処理', ''),
+                                '生産ロットID': lot_row.get('生産ロットID', '')
+                            }
+                            additional_assignments.append(additional_assignment)
+                    
+                    if additional_assignments:
+                        additional_df = pd.DataFrame(additional_assignments)
+                        if assignment_df.empty:
+                            assignment_df = additional_df
+                        else:
+                            assignment_df = pd.concat([assignment_df, additional_df], ignore_index=True)
+                        not_in_shortage_count = len(cleaning_lots_not_in_shortage) if not cleaning_lots_not_in_shortage.empty else 0
+                        in_shortage_not_assigned_count = len(cleaning_lots_in_shortage_not_assigned) if not cleaning_lots_in_shortage_not_assigned.empty else 0
+                        self.log_message(f"洗浄二次処理依頼のロット {len(additional_df)}件を追加しました（不足数マイナス以外: {not_in_shortage_count}件、不足数マイナスで未割当: {in_shortage_not_assigned_count}件）")
             
             if not assignment_df.empty:
                 # ロット割り当て結果は選択式表示のため、ここでは表示しない
@@ -2102,8 +2354,22 @@ class ModernDataExtractorUI:
             if assignment_df.empty:
                 return assignment_df
             
-            # 出荷予定日昇順、同一品番は指示日古い順でソート
-            assignment_df = assignment_df.sort_values(['出荷予定日', '品番', '指示日']).reset_index(drop=True)
+            # 出荷予定日昇順、同一品番は指示日古い順でソート（型を統一してからソート）
+            # 出荷予定日を文字列に統一してからソート（None/NaNは最後に）
+            assignment_df = assignment_df.copy()
+            assignment_df['_出荷予定日_ソート用'] = assignment_df['出荷予定日'].apply(
+                lambda x: str(x) if pd.notna(x) else ''
+            )
+            # 指示日も文字列に統一
+            if '指示日' in assignment_df.columns:
+                assignment_df['_指示日_ソート用'] = assignment_df['指示日'].apply(
+                    lambda x: str(x) if pd.notna(x) else ''
+                )
+                assignment_df = assignment_df.sort_values(['_出荷予定日_ソート用', '品番', '_指示日_ソート用'], na_position='last').reset_index(drop=True)
+                assignment_df = assignment_df.drop(columns=['_出荷予定日_ソート用', '_指示日_ソート用'])
+            else:
+                assignment_df = assignment_df.sort_values(['_出荷予定日_ソート用', '品番'], na_position='last').reset_index(drop=True)
+                assignment_df = assignment_df.drop(columns=['_出荷予定日_ソート用'])
             
             # 不足数を再計算
             current_product = None
@@ -2289,14 +2555,31 @@ class ModernDataExtractorUI:
     
     def run(self):
         """アプリケーションの実行"""
-        self.log_message("出荷検査データ抽出システムを起動しました")
-        self.log_message("設定を確認してください")
-        
-        # 設定情報の表示
-        if self.config and self.config.validate_config():
-            pass  # 設定は正常に読み込まれている
-        
-        self.root.mainloop()
+        try:
+            self.log_message("出荷検査データ抽出システムを起動しました")
+            self.log_message("設定を確認してください")
+            
+            # 設定情報の表示
+            if self.config and self.config.validate_config():
+                pass  # 設定は正常に読み込まれている
+            
+            # mainloopを実行
+            self.root.mainloop()
+            
+        except KeyboardInterrupt:
+            # Ctrl+Cで中断された場合の処理
+            logger.info("アプリケーションが中断されました（KeyboardInterrupt）")
+            self.quit_application()
+        except Exception as e:
+            logger.error(f"アプリケーション実行中にエラーが発生しました: {e}", exc_info=True)
+            try:
+                self.quit_application()
+            except:
+                import os
+                os._exit(1)
+        finally:
+            # リソースのクリーンアップ
+            self.cleanup_resources()
     
     def load_masters_parallel(self, progress_base=0.1, progress_range=0.8):
         """マスタファイルを並列で読み込む（高速化、エラー時は順次処理にフォールバック）"""
@@ -3492,37 +3775,70 @@ class ModernDataExtractorUI:
             logger.error(error_msg)
             messagebox.showerror("エラー", error_msg)
     
+    def cleanup_resources(self):
+        """リソースのクリーンアップ"""
+        try:
+            logger.info("リソースをクリーンアップしています...")
+            
+            # カレンダーウィンドウを閉じる
+            if hasattr(self, 'calendar_window') and self.calendar_window is not None:
+                try:
+                    self.calendar_window.destroy()
+                except:
+                    pass
+                self.calendar_window = None
+            
+            # グラフフレームを破棄
+            if hasattr(self, 'graph_frame') and self.graph_frame is not None:
+                try:
+                    self.graph_frame.destroy()
+                except:
+                    pass
+                self.graph_frame = None
+            
+            # matplotlibのリソースをクリーンアップ
+            try:
+                import matplotlib.pyplot as plt
+                plt.close('all')
+            except:
+                pass
+            
+            logger.info("リソースのクリーンアップが完了しました")
+            
+        except Exception as e:
+            logger.error(f"リソースクリーンアップ中にエラーが発生しました: {e}")
+    
     def quit_application(self):
         """アプリケーションを完全に終了する"""
         try:
             # ログ出力
             logger.info("アプリケーションを終了しています...")
             
-            # カレンダーウィンドウを閉じる
-            if hasattr(self, 'calendar_window') and self.calendar_window is not None:
-                self.calendar_window.destroy()
-                self.calendar_window = None
-            
-            # グラフフレームを破棄
-            if hasattr(self, 'graph_frame') and self.graph_frame is not None:
-                self.graph_frame.destroy()
-                self.graph_frame = None
+            # リソースのクリーンアップ
+            self.cleanup_resources()
             
             # メインウィンドウを破棄
-            if hasattr(self, 'root'):
-                self.root.quit()  # mainloopを終了
-                self.root.destroy()  # ウィンドウを破棄
+            if hasattr(self, 'root') and self.root is not None:
+                try:
+                    # mainloopを終了
+                    self.root.quit()
+                    # ウィンドウを破棄
+                    self.root.destroy()
+                except:
+                    pass
             
-            # プロセスを強制終了（最後の手段）
-            import os
-            import sys
-            os._exit(0)
+            logger.info("アプリケーションを正常に終了しました")
             
         except Exception as e:
             logger.error(f"アプリケーション終了中にエラーが発生しました: {e}")
-            # エラーが発生しても強制終了
-            import os
-            os._exit(0)
+            # エラーが発生した場合のみ強制終了
+            try:
+                if hasattr(self, 'root') and self.root is not None:
+                    self.root.quit()
+                    self.root.destroy()
+            except:
+                import os
+                os._exit(0)
     
     
     def start_inspector_assignment(self):

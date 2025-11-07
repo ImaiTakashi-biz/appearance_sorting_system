@@ -194,8 +194,9 @@ class GoogleSheetsExporter:
                 worksheet = spreadsheet.add_worksheet(title="振分表", rows=300, cols=100)
             
             # クリアする範囲を定義
+            # 注意: A4:A200は削除対象外（保持する必要があるデータ）
             clear_ranges = [
-                "A4:J200",
+                "B4:J200",  # A列を除外（A4:A200を保持）
                 "M4:BB200",
                 "A205:A244",
                 "M205:Q244"
@@ -209,6 +210,14 @@ class GoogleSheetsExporter:
                     log(f"警告: 範囲 {range_str} のクリアに失敗しました: {str(e)}")
             
             log("データを書き込み中...")
+            
+            # デバッグ: 出荷予定日列の値を確認
+            if '出荷予定日' in inspector_df.columns:
+                cleaning_count = inspector_df['出荷予定日'].astype(str).str.contains('当日洗浄', na=False).sum()
+                log(f"デバッグ: 出荷予定日列に当日洗浄品が含まれる行数: {cleaning_count}")
+                if cleaning_count > 0:
+                    cleaning_values = inspector_df[inspector_df['出荷予定日'].astype(str).str.contains('当日洗浄', na=False)]['出荷予定日'].unique()
+                    log(f"デバッグ: 当日洗浄品の値の例: {list(cleaning_values[:5])}")
             
             # データを書き込む
             # 列のマッピング
@@ -235,25 +244,62 @@ class GoogleSheetsExporter:
             
             for col_name, start_cell in column_mapping.items():
                 if col_name in inspector_df.columns:
-                    # データを取得
-                    data = inspector_df[col_name].fillna('').astype(str).tolist()
-                    
                     # 日付列のフォーマット（スラッシュ区切りで書き込む）
                     if col_name in ['出荷予定日', '指示日']:
                         data = []
-                        for val in inspector_df[col_name]:
-                            if pd.notna(val) and val != '' and str(val) != 'nan':
+                        for idx, val in enumerate(inspector_df[col_name]):
+                            # NaTや空の値をチェック（fillnaを使わずに直接処理）
+                            if pd.isna(val) or val == '' or str(val) == 'nan':
+                                data.append('')
+                            else:
+                                # 値を文字列に変換（型に関わらず）
+                                val_str = str(val).strip()  # 前後の空白を除去
+                                
+                                # 出荷予定日列で「当日洗浄上がり品」の場合は「当日洗浄品」と表示
+                                # 文字列型か、または文字列表現が「当日洗浄上がり品」の場合をチェック
+                                if col_name == '出荷予定日':
+                                    # 文字列として比較（型に関わらず、より確実に判定）
+                                    # 元の値が文字列型か、または文字列表現に「当日洗浄」が含まれるかチェック
+                                    is_cleaning_product = False
+                                    
+                                    # 方法1: 文字列として直接比較
+                                    if (val_str == "当日洗浄上がり品" or 
+                                        val_str == "当日洗浄品"):
+                                        is_cleaning_product = True
+                                    
+                                    # 方法2: 文字列に「当日洗浄」が含まれるかチェック
+                                    if not is_cleaning_product and "当日洗浄" in val_str:
+                                        is_cleaning_product = True
+                                    
+                                    # 方法3: 元の値が文字列型で、かつ「当日洗浄」が含まれるかチェック
+                                    if not is_cleaning_product and isinstance(val, str) and "当日洗浄" in val:
+                                        is_cleaning_product = True
+                                    
+                                    if is_cleaning_product:
+                                        data.append("当日洗浄品")
+                                        if log_callback:
+                                            log_callback(f"デバッグ: 当日洗浄品を検出しました（行{idx+1}）。値: {repr(val)}, 型: {type(val).__name__}, 文字列: {repr(val_str)}")
+                                        continue  # 次のループへ
+                                
+                                # 日付として変換を試みる（当日洗浄品でない場合のみ）
                                 try:
                                     # 日付をyyyy/mm/dd形式に変換
-                                    date_value = pd.to_datetime(val)
-                                    # 確実にyyyy/mm/dd形式（ゼロ埋め）で書き込む
-                                    formatted_date = date_value.strftime('%Y/%m/%d')
-                                    data.append(formatted_date)
-                                except Exception:
-                                    # 日付変換に失敗した場合は空文字
-                                    data.append('')
-                            else:
-                                data.append('')
+                                    date_value = pd.to_datetime(val, errors='raise')
+                                    # NaT（Not a Time）の場合は空文字を追加
+                                    if pd.isna(date_value):
+                                        data.append('')
+                                    else:
+                                        # 確実にyyyy/mm/dd形式（ゼロ埋め）で書き込む
+                                        formatted_date = date_value.strftime('%Y/%m/%d')
+                                        data.append(formatted_date)
+                                except (ValueError, TypeError, Exception) as e:
+                                    # 日付変換に失敗した場合は元の値をそのまま使用
+                                    if log_callback:
+                                        log_callback(f"デバッグ: 日付変換失敗（行{idx+1}）。値: {repr(val)}, 型: {type(val).__name__}, エラー: {str(e)}")
+                                    data.append(val_str)
+                    else:
+                        # 日付列以外は通常の処理
+                        data = inspector_df[col_name].fillna('').astype(str).tolist()
                     
                     # 検査員列の処理（スキル値の除去）
                     if col_name.startswith('検査員'):

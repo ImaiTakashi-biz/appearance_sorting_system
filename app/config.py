@@ -42,6 +42,8 @@ class DatabaseConfig:
             self.inspection_target_csv_path = os.getenv("INSPECTION_TARGET_CSV_PATH")
             self.google_sheets_url = os.getenv("GOOGLE_SHEETS_URL")
             self.google_sheets_credentials_path = os.getenv("GOOGLE_SHEETS_CREDENTIALS_PATH")
+            self.google_sheets_url_cleaning = os.getenv("GOOGLE_SHEETS_URL_CLEANING")
+            self.google_sheets_url_cleaning_instructions = os.getenv("GOOGLE_SHEETS_URL_CLEANING_INSTRUCTIONS")
 
             # 必須設定の確認
             if not self.access_file_path:
@@ -62,6 +64,8 @@ class DatabaseConfig:
             logger.info(f"検査対象CSV: {self.inspection_target_csv_path}")
             logger.info(f"GoogleスプレッドシートURL: {self.google_sheets_url}")
             logger.info(f"Google認証情報: {self.google_sheets_credentials_path}")
+            logger.info(f"洗浄二次処理依頼URL: {self.google_sheets_url_cleaning}")
+            logger.info(f"洗浄指示URL: {self.google_sheets_url_cleaning_instructions}")
 
         except Exception as e:
             logger.error(f"設定の読み込みに失敗しました: {e}")

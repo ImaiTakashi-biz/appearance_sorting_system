@@ -674,7 +674,58 @@ def main():
                     row_info["lots_df"] = filtered_df
                     if not filtered_df.empty:
                         all_lots.append(filtered_df)
+        
+        # 洗浄指示からもロットを取得（接続を閉じる前に実行）
+        if cleaning_instructions:
+            print(f"\n洗浄指示からロットを取得中... ({len(cleaning_instructions)}件の指示)")
             
+            # 洗浄指示の号機と品番の組み合わせを収集
+            instruction_combinations = []
+            for instruction in cleaning_instructions:
+                machine = instruction.get("号機", "").strip()
+                product_number = instruction.get("品番", "").strip()
+                
+                if machine and product_number:
+                    instruction_combinations.append({
+                        "machine": machine,
+                        "product_number": product_number
+                    })
+            
+            if instruction_combinations:
+                # 号機のリストを取得（重複除去）
+                unique_machines = list(set([combo["machine"] for combo in instruction_combinations]))
+                
+                # 号機でバッチ検索
+                machine_requests = [{"machine": machine} for machine in unique_machines]
+                instruction_lots_df = get_lots_from_access_batch(connection, machine_requests)
+                
+                if not instruction_lots_df.empty:
+                    # 号機と品番の組み合わせで正確にフィルタリング
+                    filtered_lots = []
+                    
+                    for combo in instruction_combinations:
+                        machine = combo["machine"]
+                        product_number = combo["product_number"]
+                        
+                        # 号機と品番の両方でフィルタリング
+                        mask = (
+                            (instruction_lots_df['号機'] == machine) &
+                            (instruction_lots_df['品番'] == product_number)
+                        )
+                        filtered = instruction_lots_df[mask].copy()
+                        
+                        if not filtered.empty:
+                            filtered_lots.append(filtered)
+                    
+                    if filtered_lots:
+                        instruction_lots_df = pd.concat(filtered_lots, ignore_index=True)
+                        # 重複を除去
+                        if '生産ロットID' in instruction_lots_df.columns:
+                            instruction_lots_df = instruction_lots_df.drop_duplicates(subset=['生産ロットID'], keep='first')
+                        
+                        all_lots.append(instruction_lots_df)
+                        print(f"洗浄指示から {len(instruction_lots_df)}件のロットを取得しました（号機・品番の組み合わせでフィルタリング済み）")
+        
         total_elapsed = time.time() - total_start_time
         
         # 接続を閉じる
@@ -683,6 +734,11 @@ def main():
         # ロット情報を表示
         if all_lots:
             final_lots_df = pd.concat(all_lots, ignore_index=True)
+            
+            # 重複を除去（生産ロットIDが同じ場合は1件のみ残す）
+            if '生産ロットID' in final_lots_df.columns:
+                final_lots_df = final_lots_df.drop_duplicates(subset=['生産ロットID'], keep='first')
+            
             unique_lots = final_lots_df['生産ロットID'].nunique() if '生産ロットID' in final_lots_df.columns else 0
             
             print(f"\n{'='*80}")

@@ -281,13 +281,29 @@ class InspectorAssignmentManager:
                     
                     # スキルマスタと同様の検索ロジック
                     # 1. 現在工程番号が空欄の場合は、工程フィルタをスキップして工程番号が空の行を検索
+                    # 洗浄指示から取得したロットの場合、工程番号が複数ある場合は数字が若い方から処理
                     if current_process_number is None or (pd.notna(current_process_number) and str(current_process_number).strip() == ''):
                         # 工程番号が空の行を検索
                         inspection_time_per_unit = product_dict.get('')
                         if inspection_time_per_unit is not None:
                             self.log_message(f"製品マスタ検索成功: 品番={product_number_normalized}, 工程番号=(空), 検査時間={inspection_time_per_unit}", debug=True)
                         else:
-                            self.log_message(f"⚠️ 製品マスタ検索失敗: 品番={product_number_normalized}, 工程番号=(空) が見つかりません。利用可能な工程番号: {list(product_dict.keys())}")
+                            # 工程番号が空の行が見つからない場合、工程番号が複数ある場合は数字が若い方から選択
+                            process_keys = [k for k in product_dict.keys() if k != '']  # 空文字列を除外
+                            if process_keys:
+                                # 工程番号を数値としてソート（数字が若い方から）
+                                def sort_key(k):
+                                    try:
+                                        return int(k)
+                                    except (ValueError, TypeError):
+                                        return float('inf')  # 数値に変換できない場合は最後に
+                                
+                                sorted_keys = sorted(process_keys, key=sort_key)
+                                selected_key = sorted_keys[0]  # 数字が最も若い工程番号を選択
+                                inspection_time_per_unit = product_dict.get(selected_key)
+                                self.log_message(f"製品マスタ検索成功: 品番={product_number_normalized}, 工程番号=(空)が見つからず、数字が若い工程番号={selected_key}を選択, 検査時間={inspection_time_per_unit}", debug=True)
+                            else:
+                                self.log_message(f"⚠️ 製品マスタ検索失敗: 品番={product_number_normalized}, 工程番号=(空) が見つかりません。利用可能な工程番号: {list(product_dict.keys())}")
                     else:
                         # 2. 工程番号を正規化して検索
                         if isinstance(current_process_number, (int, float)):
@@ -343,8 +359,20 @@ class InspectorAssignmentManager:
                 # 秒/個はそのまま使用（既に秒単位）
                 seconds_per_unit = inspection_time_per_unit
                 
+                # 出荷予定日を取得し、「当日洗浄上がり品」の場合は文字列として保持
+                shipping_date_value = row[assignment_cols.get('出荷予定日', -1)] if '出荷予定日' in assignment_cols else None
+                if shipping_date_value != -1 and pd.notna(shipping_date_value):
+                    shipping_date_str = str(shipping_date_value).strip()
+                    # 「当日洗浄上がり品」の場合は文字列として保持
+                    if shipping_date_str == "当日洗浄上がり品" or shipping_date_str == "当日洗浄品" or "当日洗浄" in shipping_date_str:
+                        shipping_date_final = "当日洗浄上がり品"  # 統一して「当日洗浄上がり品」として保持
+                    else:
+                        shipping_date_final = shipping_date_value  # その他の場合は元の値を保持
+                else:
+                    shipping_date_final = None
+                
                 inspector_result = {
-                    '出荷予定日': row[assignment_cols.get('出荷予定日', -1)] if '出荷予定日' in assignment_cols else None,
+                    '出荷予定日': shipping_date_final,
                     '品番': product_number,
                     '品名': row[assignment_cols.get('品名', -1)] if '品名' in assignment_cols else '',
                     '客先': row[assignment_cols.get('客先', -1)] if '客先' in assignment_cols else '',
@@ -419,6 +447,22 @@ class InspectorAssignmentManager:
             self.log_message(f"スキルマスタの検査員コード: {skill_codes}", debug=True)
             self.log_message("=================================", debug=True)
             
+            # 出荷予定日を日付型に変換する関数（当日洗浄品は文字列として保持）
+            def convert_shipping_date(val):
+                if pd.isna(val):
+                    return val
+                val_str = str(val).strip()
+                # 当日洗浄品の場合は文字列として保持
+                if (val_str == "当日洗浄上がり品" or 
+                    val_str == "当日洗浄品" or
+                    "当日洗浄" in val_str):
+                    return val_str  # 文字列として保持
+                # その他の場合は日付型に変換
+                try:
+                    return pd.to_datetime(val, errors='coerce')
+                except:
+                    return val
+            
             # 結果用のDataFrameを作成
             result_df = inspector_df.copy()
             
@@ -439,8 +483,8 @@ class InspectorAssignmentManager:
             result_df['over_product_limit_flag'] = False
             
             # 出荷予定日でソート（古い順）- 最優先ルール
-            # 日付形式を統一してからソート
-            result_df['出荷予定日'] = pd.to_datetime(result_df['出荷予定日'], errors='coerce')
+            # 日付形式を統一してからソート（当日洗浄品は文字列として保持）
+            result_df['出荷予定日'] = result_df['出荷予定日'].apply(convert_shipping_date)
             
             # 新規品かどうかを判定する列を追加（ソート前に）
             def is_new_product_row(row):
@@ -494,15 +538,60 @@ class InspectorAssignmentManager:
             
             # 改善ポイント: 並び順ロジック（ボトルネック優先化）
             # 1. feasible_inspector_count（昇順）※スキルマスタで算出した候補数
-            # 2. 出荷予定日（昇順）
-            # 3. 新規品フラグ（優先）
-            # 4. ソート安定性確保: 品番IDを追加
+            # 2. 出荷予定日の優先順位（当日 > 当日洗浄品 > 翌日以降の新規品 > その他）
+            # 3. ソート安定性確保: 品番IDを追加
+            
+            # 出荷予定日の優先順位を設定（厳守ルール）
+            # 優先度: 1=当日、2=当日洗浄品、3=翌日以降の新規品、4=その他
+            today = pd.Timestamp.now().normalize()
+            today_date = today.date()
+            
+            def calculate_priority(row):
+                shipping_date = row['出荷予定日']
+                is_new_product = row['_is_new_product']
+                
+                if pd.notna(shipping_date):
+                    # 当日の日付かどうかをチェック
+                    try:
+                        date_value = pd.to_datetime(shipping_date, errors='coerce')
+                        if pd.notna(date_value):
+                            shipping_date_date = date_value.date()
+                            if shipping_date_date == today_date:
+                                return 1  # 当日が最優先
+                    except Exception:
+                        pass
+                    
+                    # 当日洗浄上がり品かどうかをチェック
+                    shipping_date_str = str(shipping_date).strip()
+                    if (shipping_date_str == "当日洗浄上がり品" or 
+                        shipping_date_str == "当日洗浄品" or
+                        "当日洗浄" in shipping_date_str):
+                        return 2  # 当日洗浄品が2番目
+                    
+                    # 翌日以降の新規品かどうかをチェック
+                    if is_new_product:
+                        try:
+                            date_value = pd.to_datetime(shipping_date, errors='coerce')
+                            if pd.notna(date_value):
+                                shipping_date_date = date_value.date()
+                                if shipping_date_date > today_date:
+                                    return 3  # 翌日以降の新規品が3番目
+                        except Exception:
+                            pass
+                
+                return 4  # その他が最後
+            
+            result_df['_shipping_priority'] = result_df.apply(calculate_priority, axis=1)
+            
             result_df['_sort_product_id'] = result_df['品番'].astype(str)
             result_df = result_df.sort_values(
-                ['feasible_inspector_count', '出荷予定日', '_is_new_product', '_sort_product_id'],
-                ascending=[True, True, False, True],
+                ['feasible_inspector_count', '_shipping_priority', '出荷予定日', '_sort_product_id'],
+                ascending=[True, True, True, True],
                 na_position='last'
             ).reset_index(drop=True)
+            
+            # 一時列を削除
+            result_df = result_df.drop(columns=['_shipping_priority'], errors='ignore')
             
             self.log_message("改善ポイント: 並び順ロジック変更 - feasible_inspector_count（候補数）を最優先にソートしました。候補が少ないロット（希少スキル必要品）を先に処理します。")
             
@@ -554,20 +643,21 @@ class InspectorAssignmentManager:
                 available_inspectors = copy.deepcopy(base_candidates)
                 
                 # 必要な検査員人数を計算
-                # 特例: 一ロットで検査員が5名以上必要になる場合、5名に制限し3時間の条件を無視
+                # 1人の検査員に4時間を超えないようにする制約を考慮
                 if inspection_time <= 0:
                     required_inspectors = 1
                 else:
-                    # 通常の計算（3時間で割る）
-                    calculated_inspectors = max(1, int(inspection_time / 3.0) + 1)
+                    # 1人の検査員に4時間を超えないようにする制約を考慮
+                    # 必要人数 = 検査時間 / 4時間（切り上げ）
+                    calculated_inspectors = max(1, int(inspection_time / PRODUCT_LIMIT_HARD_THRESHOLD) + (1 if inspection_time % PRODUCT_LIMIT_HARD_THRESHOLD > 0 else 0))
                     # 5名以上になる場合は5名に制限（特例）
                     required_inspectors = min(5, calculated_inspectors)
-                
-                # デバッグログ出力
-                if calculated_inspectors > 5:
-                    self.log_message(f"品番 {product_number}: 検査時間 {inspection_time:.1f}h → 必要人数 {required_inspectors}人（通常計算では{calculated_inspectors}名必要だが、特例により5名に制限）", debug=True)
-                else:
-                    self.log_message(f"品番 {product_number}: 検査時間 {inspection_time:.1f}h → 必要人数 {required_inspectors}人", debug=True)
+                    
+                    # デバッグログ: 必要人数が5名を超える場合の警告
+                    if calculated_inspectors > 5:
+                        self.log_message(f"品番 {product_number}: 検査時間 {inspection_time:.1f}h → 必要人数 {required_inspectors}人（4時間制約では{calculated_inspectors}名必要だが、特例により5名に制限。残り時間: {inspection_time - (required_inspectors * PRODUCT_LIMIT_HARD_THRESHOLD):.1f}h）", debug=True)
+                    else:
+                        self.log_message(f"品番 {product_number}: 検査時間 {inspection_time:.1f}h → 必要人数 {required_inspectors}人（4時間制約）", debug=True)
                 
                 # 新規品かどうかを判定（スキルマスタに登録がない場合）
                 is_new_product = False
@@ -689,9 +779,15 @@ class InspectorAssignmentManager:
                 
                 # 結果を設定
                 result_df.at[index, '検査員人数'] = len(assigned_inspectors)
-                # 分割検査時間の計算: 検査時間 ÷ 実際の分割した検査人数
+                # 分割検査時間の計算: 実際の割り当て時間の平均（非対称分配の場合は各検査員の割当時間が異なる）
                 if len(assigned_inspectors) > 0:
-                    divided_time = inspection_time / len(assigned_inspectors)
+                    # 非対称分配の場合、各検査員の割当時間の平均を計算
+                    if all('割当時間' in insp for insp in assigned_inspectors):
+                        # 各検査員の割当時間の平均
+                        divided_time = sum(insp['割当時間'] for insp in assigned_inspectors) / len(assigned_inspectors)
+                    else:
+                        # フォールバック: 検査時間 ÷ 実際の分割した検査人数
+                        divided_time = inspection_time / len(assigned_inspectors)
                     result_df.at[index, '分割検査時間'] = round(divided_time, 1)
                 else:
                     result_df.at[index, '分割検査時間'] = 0.0
@@ -897,10 +993,44 @@ class InspectorAssignmentManager:
             # 工程番号による絞り込み処理
             filtered_skill_rows = []
             # 追加仕様: 現在工程番号が空欄の場合は工程による絞り込みを行わず、品番一致行をすべて対象
+            # 洗浄指示から取得したロットの場合、工程番号が複数ある場合は数字が若い方から処理
             if process_number is None or str(process_number).strip() == '':
-                self.log_message("現在工程番号が空欄のため、工程フィルタをスキップして品番一致行を全件採用")
+                self.log_message("現在工程番号が空欄のため、工程フィルタをスキップして品番一致行を処理")
+                
+                # 工程番号が空の行を優先的に取得
+                empty_process_rows = []
+                numeric_process_rows = []
+                other_process_rows = []
+                
                 for _, skill_row in skill_rows.iterrows():
-                    filtered_skill_rows.append(skill_row)
+                    skill_process_number = skill_row.iloc[1]  # 工程番号列
+                    
+                    # 工程番号が空の行を優先
+                    if pd.isna(skill_process_number) or skill_process_number == '':
+                        empty_process_rows.append(skill_row)
+                    else:
+                        # 工程番号を数値として判定
+                        try:
+                            process_num = int(skill_process_number)
+                            numeric_process_rows.append((process_num, skill_row))
+                        except (ValueError, TypeError):
+                            # 数値に変換できない場合は別のリストに
+                            other_process_rows.append(skill_row)
+                
+                # 工程番号が空の行がある場合はそれを使用
+                if empty_process_rows:
+                    filtered_skill_rows = empty_process_rows
+                    self.log_message(f"工程番号が空の行を優先採用: {len(empty_process_rows)}件")
+                elif numeric_process_rows:
+                    # 数字が若い方からソート
+                    numeric_process_rows.sort(key=lambda x: x[0])
+                    filtered_skill_rows = [row for _, row in numeric_process_rows]
+                    selected_process = numeric_process_rows[0][0]
+                    self.log_message(f"工程番号が空の行が見つからず、数字が若い工程番号={selected_process}を選択: {len(filtered_skill_rows)}件")
+                else:
+                    # その他の行も含める
+                    filtered_skill_rows = other_process_rows
+                    self.log_message(f"工程番号が空の行も数値の行も見つからず、その他の行を採用: {len(filtered_skill_rows)}件")
             else:
                 for _, skill_row in skill_rows.iterrows():
                     skill_process_number = skill_row.iloc[1]  # 工程番号列
@@ -1285,7 +1415,13 @@ class InspectorAssignmentManager:
                     continue
                 
                 # 割り当て可能な時間を決定
-                take = min(cap, remaining)
+                # 1人の検査員に4時間を超えないようにする制約を追加
+                code = candidate['コード']
+                product_hours = self.inspector_product_hours.get(code, {}).get(product_number, 0.0)
+                max_assignable_per_inspector = max(0.0, PRODUCT_LIMIT_HARD_THRESHOLD - product_hours)
+                
+                # 容量、残り時間、1人あたりの最大割り当て時間の最小値を取る
+                take = min(cap, remaining, max_assignable_per_inspector)
                 
                 # 割り当てを記録
                 assignment = candidate.copy()
@@ -2072,8 +2208,25 @@ class InspectorAssignmentManager:
         try:
             self.log_message("全体最適化フェーズ0: result_dfから実際の割り当てを再計算")
             
+            # 出荷予定日を日付型に変換する関数（当日洗浄品は文字列として保持）
+            def convert_shipping_date(val):
+                if pd.isna(val):
+                    return val
+                val_str = str(val).strip()
+                # 当日洗浄品の場合は文字列として保持
+                if (val_str == "当日洗浄上がり品" or 
+                    val_str == "当日洗浄品" or
+                    "当日洗浄" in val_str):
+                    return val_str  # 文字列として保持
+                # その他の場合は日付型に変換
+                try:
+                    return pd.to_datetime(val, errors='coerce')
+                except:
+                    return val
+            
             # 最優先ルール: 出荷予定日の古い順にソート（処理の最初に必ず実行）
-            result_df['出荷予定日'] = pd.to_datetime(result_df['出荷予定日'], errors='coerce')
+            # 出荷予定日を変換（当日洗浄品は文字列として保持）
+            result_df['出荷予定日'] = result_df['出荷予定日'].apply(convert_shipping_date)
             result_df = result_df.sort_values('出荷予定日', na_position='last').reset_index(drop=True)
             self.log_message("最適化処理開始前に出荷予定日の古い順でソートしました（最優先ルール）")
             
@@ -2190,7 +2343,8 @@ class InspectorAssignmentManager:
                 product_limit_violations = []
                 
                 # 最優先ルール: 出荷予定日の古い順にソート（毎回のイテレーションで確実に）
-                result_df['出荷予定日'] = pd.to_datetime(result_df['出荷予定日'], errors='coerce')
+                # 出荷予定日を変換（当日洗浄品は文字列として保持）
+                result_df['出荷予定日'] = result_df['出荷予定日'].apply(convert_shipping_date)
                 result_df_sorted = result_df.sort_values('出荷予定日', na_position='last').reset_index(drop=True)
                 self.log_message(f"イテレーション {iteration}: 出荷予定日の古い順でソートしました（最優先ルール）", debug=True)
                 
@@ -2634,15 +2788,30 @@ class InspectorAssignmentManager:
                 for violation in final_violations:
                     index = violation[0]
                     row_series = result_df.iloc[index]
-                    shipping_date = row_series['出荷予定日'] if '出荷予定日' in row_series.index else pd.Timestamp.max
+                    shipping_date_raw = row_series['出荷予定日'] if '出荷予定日' in row_series.index else pd.Timestamp.max
                     product_number = row_series['品番'] if '品番' in row_series.index else ''
+                    
+                    # 出荷予定日が「当日洗浄上がり品」の場合は文字列として保持
+                    shipping_date_str = str(shipping_date_raw).strip() if pd.notna(shipping_date_raw) else ''
+                    is_same_day_cleaning = (
+                        shipping_date_str == "当日洗浄上がり品" or 
+                        shipping_date_str == "当日洗浄品" or
+                        "当日洗浄" in shipping_date_str
+                    )
+                    
+                    if is_same_day_cleaning:
+                        # 当日洗浄品の場合は文字列として保持
+                        shipping_date = "当日洗浄上がり品"
+                    else:
+                        shipping_date = shipping_date_raw
+                    
                     # 新製品かどうかを判定
                     skill_rows = skill_master_df[skill_master_df.iloc[:, 0] == product_number]
                     is_new_product = skill_rows.empty
                     
-                    # 2週間以内の出荷予定日かどうかを判定
+                    # 2週間以内の出荷予定日かどうかを判定（当日洗浄品の場合はスキップ）
                     is_within_two_weeks = False
-                    if pd.notna(shipping_date):
+                    if not is_same_day_cleaning and pd.notna(shipping_date):
                         try:
                             if isinstance(shipping_date, pd.Timestamp):
                                 shipping_date_date = shipping_date.date()
@@ -2774,12 +2943,36 @@ class InspectorAssignmentManager:
                                 resolved_count += 1
                                 continue
                         
-                        # 出荷予定日が最も古い新製品ロットの場合は割り当てを維持
-                        min_shipping_date = min([v[1] for v in violations_with_date])
-                        if is_new_product and shipping_date == min_shipping_date:
-                            self.log_message(f"⚠️ 出荷予定日が最も古い新製品ロットのため、ルール違反があっても割り当てを維持します（品番: {product_number}）", level='warning')
+                        # 当日洗浄品の場合は割り当てを維持（優先順位2のため保護）
+                        # violations_with_dateから取得したshipping_dateが文字列「当日洗浄上がり品」の場合をチェック
+                        shipping_date_str = str(shipping_date).strip() if pd.notna(shipping_date) else ''
+                        # 元のデータフレームからも確認（念のため）
+                        original_shipping_date = row_series.get('出荷予定日', '') if '出荷予定日' in row_series.index else ''
+                        original_shipping_date_str = str(original_shipping_date).strip() if pd.notna(original_shipping_date) else ''
+                        
+                        is_same_day_cleaning = (
+                            shipping_date_str == "当日洗浄上がり品" or 
+                            shipping_date_str == "当日洗浄品" or
+                            "当日洗浄" in shipping_date_str or
+                            original_shipping_date_str == "当日洗浄上がり品" or 
+                            original_shipping_date_str == "当日洗浄品" or
+                            "当日洗浄" in original_shipping_date_str
+                        )
+                        if is_same_day_cleaning:
+                            self.log_message(f"⚠️ 当日洗浄品のため、ルール違反があっても割り当てを維持します（品番: {product_number}, 出荷予定日: {shipping_date_str or original_shipping_date_str}）", level='warning')
                             # 割り当てを維持（未割当にしない）
                             resolved_count += 1
+                        # 出荷予定日が最も古い新製品ロットの場合は割り当てを維持
+                        elif is_new_product:
+                            min_shipping_date = min([v[1] for v in violations_with_date])
+                            if shipping_date == min_shipping_date:
+                                self.log_message(f"⚠️ 出荷予定日が最も古い新製品ロットのため、ルール違反があっても割り当てを維持します（品番: {product_number}）", level='warning')
+                                # 割り当てを維持（未割当にしない）
+                                resolved_count += 1
+                            else:
+                                # 是正できなかった場合は未割当にする
+                                self.clear_assignment(result_df, index)
+                                self.log_message(f"⚠️ ロットインデックス {index} を未割当にしました（{violation[3]}）", level='warning')
                         else:
                             # 是正できなかった場合は未割当にする
                             self.clear_assignment(result_df, index)
@@ -2870,7 +3063,8 @@ class InspectorAssignmentManager:
                         under_loaded.sort(key=lambda x: x[1])
                         
                         # 出荷予定日の古い順にソート（順序を維持）
-                        result_df['出荷予定日'] = pd.to_datetime(result_df['出荷予定日'], errors='coerce')
+                        # 出荷予定日を変換（当日洗浄品は文字列として保持）
+                        result_df['出荷予定日'] = result_df['出荷予定日'].apply(convert_shipping_date)
                         result_df_sorted = result_df.sort_values('出荷予定日', na_position='last').reset_index(drop=True)
                         
                         # 再割当て回数を制限（無限ループを防ぐ）
@@ -3490,7 +3684,8 @@ class InspectorAssignmentManager:
                 # 同じ出荷予定日の場合は新規品を優先
                 unassigned_df = result_df.loc[unassigned_indices].copy()
                 unassigned_df['_original_index'] = unassigned_indices  # 元のインデックスを保持
-                unassigned_df['出荷予定日'] = pd.to_datetime(unassigned_df['出荷予定日'], errors='coerce')
+                # 出荷予定日を変換（当日洗浄品は文字列として保持）
+                unassigned_df['出荷予定日'] = unassigned_df['出荷予定日'].apply(convert_shipping_date)
                 
                 # 新規品かどうかを判定
                 def is_new_product_for_unassigned(row):
@@ -4129,7 +4324,8 @@ class InspectorAssignmentManager:
             self.log_message("全体最適化フェーズ4: チーム情報の再計算を開始")
             
             # 最終的に出荷予定日順にソート（最優先ルールの維持）
-            result_df['出荷予定日'] = pd.to_datetime(result_df['出荷予定日'], errors='coerce')
+            # 出荷予定日を変換（当日洗浄品は文字列として保持）
+            result_df['出荷予定日'] = result_df['出荷予定日'].apply(convert_shipping_date)
             result_df = result_df.sort_values('出荷予定日', na_position='last').reset_index(drop=True)
             self.log_message("最終結果を出荷予定日の古い順でソートしました（最優先ルール）")
             
@@ -4821,7 +5017,8 @@ class InspectorAssignmentManager:
                 # 行を追加
                 ws[f'{product_column}{current_row}'] = product_number
                 ws[f'{product_name_column}{current_row}'] = product.get('品名', '')
-                ws[f'{process_column}{current_row}'] = product.get('工程番号', '')
+                # D列（工程番号）には何も出力しない
+                # ws[f'{process_column}{current_row}'] = product.get('工程番号', '')
                 ws[f'{inspection_time_column}{current_row}'] = product.get('検査時間', 15.0)
                 ws[f'{auto_add_column}{current_row}'] = True
                 
