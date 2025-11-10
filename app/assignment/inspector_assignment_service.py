@@ -71,6 +71,9 @@ class InspectorAssignmentManager:
         self.new_product_team_logged = False
         # 新製品チームメンバー数のログを1回だけ出力するためのフラグ
         self._new_product_team_count_logged = False
+        # 当日洗浄上がり品の検査員を追跡（重複を避けるため）
+        # 形式: { inspector_code: count } - 当日洗浄上がり品に割り当てられた回数
+        self.same_day_cleaning_inspectors = {}
     
     def log_message(self, message, debug=False, level='info'):
         """
@@ -621,6 +624,15 @@ class InspectorAssignmentManager:
                     lot_quantity = 0
                 pre_status = result_df.at[index, 'assignability_status']
                 
+                # 当日洗浄上がり品かどうかを判定（先に判定）
+                shipping_date = row[result_cols_after_sort.get('出荷予定日', -1)] if '出荷予定日' in result_cols_after_sort else 'N/A'
+                shipping_date_str = str(shipping_date).strip() if pd.notna(shipping_date) else ''
+                is_same_day_cleaning = (
+                    shipping_date_str == "当日洗浄上がり品" or
+                    shipping_date_str == "当日洗浄品" or
+                    "当日洗浄" in shipping_date_str
+                )
+                
                 # ロット数量が0の場合は検査員を割り当てない
                 if lot_quantity == 0 or pd.isna(lot_quantity) or inspection_time == 0 or pd.isna(inspection_time):
                     reason = "ロット数量0" if (lot_quantity == 0 or pd.isna(lot_quantity)) else "検査時間0"
@@ -642,22 +654,48 @@ class InspectorAssignmentManager:
                     base_candidates = []
                 available_inspectors = copy.deepcopy(base_candidates)
                 
-                # 必要な検査員人数を計算
-                # 1人の検査員に4時間を超えないようにする制約を考慮
+                # 必要な検査員人数を計算（先に計算してから、当日洗浄上がり品の制約を適用）
+                # 1人の検査員に3時間を超えないようにする制約を考慮
                 if inspection_time <= 0:
                     required_inspectors = 1
                 else:
-                    # 1人の検査員に4時間を超えないようにする制約を考慮
-                    # 必要人数 = 検査時間 / 4時間（切り上げ）
-                    calculated_inspectors = max(1, int(inspection_time / PRODUCT_LIMIT_HARD_THRESHOLD) + (1 if inspection_time % PRODUCT_LIMIT_HARD_THRESHOLD > 0 else 0))
-                    # 5名以上になる場合は5名に制限（特例）
-                    required_inspectors = min(5, calculated_inspectors)
+                    # 1人の検査員に3時間を超えないようにする制約を考慮
+                    # 必要人数 = 検査時間 / 3時間（切り上げ、最低2人）
+                    if inspection_time <= 3.0:
+                        required_inspectors = 1
+                    else:
+                        calculated_inspectors = max(2, int(inspection_time / 3.0) + 1)
+                        # 5名以上になる場合は5名に制限（特例）
+                        required_inspectors = min(5, calculated_inspectors)
                     
                     # デバッグログ: 必要人数が5名を超える場合の警告
-                    if calculated_inspectors > 5:
-                        self.log_message(f"品番 {product_number}: 検査時間 {inspection_time:.1f}h → 必要人数 {required_inspectors}人（4時間制約では{calculated_inspectors}名必要だが、特例により5名に制限。残り時間: {inspection_time - (required_inspectors * PRODUCT_LIMIT_HARD_THRESHOLD):.1f}h）", debug=True)
+                    if inspection_time > 3.0:
+                        calculated_for_log = max(2, int(inspection_time / 3.0) + 1)
+                        if calculated_for_log > 5:
+                            self.log_message(f"品番 {product_number}: 検査時間 {inspection_time:.1f}h → 必要人数 {required_inspectors}人（3時間制約では{calculated_for_log}名必要だが、特例により5名に制限。残り時間: {inspection_time - (required_inspectors * 3.0):.1f}h）", debug=True)
+                        else:
+                            self.log_message(f"品番 {product_number}: 検査時間 {inspection_time:.1f}h → 必要人数 {required_inspectors}人（3時間制約）", debug=True)
                     else:
-                        self.log_message(f"品番 {product_number}: 検査時間 {inspection_time:.1f}h → 必要人数 {required_inspectors}人（4時間制約）", debug=True)
+                        self.log_message(f"品番 {product_number}: 検査時間 {inspection_time:.1f}h → 必要人数 {required_inspectors}人（3時間以下）", debug=True)
+                
+                # 当日洗浄上がり品の場合は、既に当日洗浄上がり品に割り当てられた検査員を除外（1ロット/日・人の制約）
+                # ただし、スキルマスタに制約がかかる場合（候補が不足する場合）は例外とする
+                if is_same_day_cleaning:
+                    already_assigned_to_cleaning = set(self.same_day_cleaning_inspectors.keys())
+                    original_count = len(available_inspectors)
+                    # 既に当日洗浄上がり品に割り当てられた検査員を除外
+                    filtered_inspectors = [insp for insp in available_inspectors if insp['コード'] not in already_assigned_to_cleaning]
+                    
+                    # 候補が不足する場合（必要人数に達しない場合）は、制約を緩和
+                    if len(filtered_inspectors) < required_inspectors:
+                        # スキルマスタに制約がかかる場合（候補が不足）は、既に割り当てられた検査員も含める
+                        self.log_message(f"当日洗浄上がり品 {product_number}: 候補が不足しています（必要: {required_inspectors}人、制約後: {len(filtered_inspectors)}人、元: {original_count}人）。制約を緩和して既に割り当てられた検査員も含めます。")
+                        available_inspectors = available_inspectors  # 制約を緩和（全ての候補を使用）
+                    else:
+                        # 候補が十分な場合は、制約を適用
+                        available_inspectors = filtered_inspectors
+                        if original_count > len(available_inspectors):
+                            self.log_message(f"当日洗浄上がり品 {product_number}: 既に当日洗浄上がり品に割り当てられた検査員 {original_count - len(available_inspectors)}人を除外しました（1ロット/日・人の制約）")
                 
                 # 新規品かどうかを判定（スキルマスタに登録がない場合）
                 is_new_product = False
@@ -717,12 +755,284 @@ class InspectorAssignmentManager:
                 # 改善ポイント: 非対称分配＋部分割当の実装
                 # 検査員の残勤務時間に応じた非対称分配（貪欲法）を実行
                 # 特例: 一ロットで検査員が5名以上必要になる場合、5名に制限
+                
                 assigned_inspectors, remaining_time, assigned_time_sum = self.assign_inspectors_asymmetric(
                     available_inspectors, inspection_time, inspector_master_df, product_number, is_new_product, max_inspectors=required_inspectors
                 )
                 
                 # デバッグログ出力
                 self.log_message(f"品番 {product_number}: 必要時間 {inspection_time:.1f}h → 割当時間 {assigned_time_sum:.1f}h, 残り {remaining_time:.1f}h, 割当人数 {len(assigned_inspectors)}人")
+                
+                # 当日洗浄上がり品で必要人数に達しない場合、検査時間を再分配する
+                if is_same_day_cleaning and inspection_time > 3.0 and len(assigned_inspectors) < required_inspectors:
+                    self.log_message(f"当日洗浄上がり品 {product_number}: 必要人数 {required_inspectors}人に対して {len(assigned_inspectors)}人しか割り当てられていないため、検査時間を再分配します")
+                    
+                    current_date = pd.Timestamp.now().date()
+                    
+                    # 既に割り当てられた検査員のコードを取得
+                    assigned_codes = {insp['コード'] for insp in assigned_inspectors}
+                    
+                    # 既に当日洗浄上がり品に割り当てられた検査員を取得（重複を避けるため）
+                    # 再分配処理の各ステップで最新の状態を取得する
+                    already_assigned_to_cleaning = set(self.same_day_cleaning_inspectors.keys())
+                    
+                    # 追加の検査員候補を取得（より広い範囲から）
+                    process_number = row[result_cols_after_sort.get('現在工程番号', -1)] if '現在工程番号' in result_cols_after_sort else ''
+                    if process_number == -1:
+                        process_number = ''
+                    
+                    # 当日洗浄上がり品の場合は、制約を緩和して候補を取得
+                    # 新製品チームも含めて、より広い範囲から候補を取得
+                    additional_candidates = self.get_available_inspectors(
+                        product_number, process_number, skill_master_df, inspector_master_df,
+                        shipping_date=shipping_date, allow_new_team_fallback=True
+                    )
+                    
+                    # 既に当日洗浄上がり品に割り当てられた検査員を除外（重複を避けるため）
+                    # ただし、既にこのロットに割り当てられた検査員は含める
+                    filtered_candidates = []
+                    for candidate in additional_candidates:
+                        code = candidate['コード']
+                        # 既にこのロットに割り当てられた検査員は含める
+                        if code in assigned_codes:
+                            filtered_candidates.append(candidate)
+                        # まだ当日洗浄上がり品に割り当てられていない検査員は含める
+                        elif code not in already_assigned_to_cleaning:
+                            filtered_candidates.append(candidate)
+                        # 既に当日洗浄上がり品に割り当てられているが、必要人数に達しない場合は含める（優先度が高いため）
+                        elif len(assigned_inspectors) == 0:
+                            filtered_candidates.append(candidate)
+                    
+                    # 既に割り当てられた検査員も含めて、全候補で再割り当て
+                    # 既に割り当てられた検査員の情報を保持
+                    existing_assigned = copy.deepcopy(assigned_inspectors)
+                    
+                    # 全候補を統合（既に割り当てられた検査員も含む）
+                    all_candidates = copy.deepcopy(filtered_candidates)
+                    # 既に割り当てられた検査員を追加（重複を避ける）
+                    for existing in existing_assigned:
+                        if existing['コード'] not in {c['コード'] for c in all_candidates}:
+                            all_candidates.append(existing)
+                    
+                    # 候補を分散優先でソート（既に当日洗浄上がり品に割り当てられていない検査員を優先）
+                    # 最新の状態を再取得
+                    already_assigned_to_cleaning = set(self.same_day_cleaning_inspectors.keys())
+                    def sort_key_for_distribution(candidate):
+                        code = candidate['コード']
+                        # 既に当日洗浄上がり品に割り当てられていない検査員を優先
+                        if code not in already_assigned_to_cleaning:
+                            return (0, candidate.get('_fairness_score', 0))
+                        else:
+                            return (1, candidate.get('_fairness_score', 0))
+                    
+                    all_candidates.sort(key=sort_key_for_distribution)
+                    
+                    # 検査時間全体を再分配
+                    # 必要人数に達するまで、検査時間を強制的に分割する
+                    reassigned_inspectors, reassigned_remaining, reassigned_time_sum = self.assign_inspectors_asymmetric(
+                        all_candidates, inspection_time, inspector_master_df, product_number, is_new_product, 
+                        max_inspectors=required_inspectors
+                    )
+                    
+                    # 必要人数に達しない場合、検査時間を強制的に分割する
+                    # 候補が不足している場合でも、可能な限り割り当てる
+                    if len(reassigned_inspectors) < required_inspectors:
+                        self.log_message(f"当日洗浄上がり品 {product_number}: 必要人数 {required_inspectors}人に達しないため、検査時間を強制的に分割します（現在の割当人数: {len(reassigned_inspectors)}人、候補数: {len(all_candidates)}人）")
+                        # 検査時間を必要人数で分割
+                        divided_time_per_inspector = inspection_time / required_inspectors
+                        # 候補を必要人数分選択（候補が不足している場合は可能な限り）
+                        # ただし、最低2人は確保する（3時間基準を満たすため）
+                        min_required = max(2, required_inspectors) if inspection_time > 3.0 else required_inspectors
+                        max_available = min(min_required, len(all_candidates))
+                        # 候補が不足している場合は、可能な限り多くの候補を使用
+                        if max_available < min_required:
+                            self.log_message(f"当日洗浄上がり品 {product_number}: 候補が不足しています（必要: {min_required}人、利用可能: {max_available}人）。可能な限り割り当てます。")
+                        # 既に当日洗浄上がり品に割り当てられていない検査員を優先的に選択
+                        # 最新の状態を再取得
+                        already_assigned_to_cleaning = set(self.same_day_cleaning_inspectors.keys())
+                        unassigned_candidates = [c for c in all_candidates if c['コード'] not in already_assigned_to_cleaning]
+                        assigned_candidates = [c for c in all_candidates if c['コード'] in already_assigned_to_cleaning]
+                        # 未割当の検査員を優先的に選択
+                        selected_candidates = unassigned_candidates[:max_available]
+                        # まだ必要人数に達しない場合は、既に割り当てられた検査員も含める
+                        if len(selected_candidates) < min_required:
+                            remaining_needed = min_required - len(selected_candidates)
+                            selected_candidates.extend(assigned_candidates[:remaining_needed])
+                        selected_candidates = selected_candidates[:max_available]
+                        reassigned_inspectors = []
+                        reassigned_time_sum = 0.0
+                        for candidate in selected_candidates:
+                            # 各検査員に割り当て可能な時間を計算
+                            # 当日洗浄上がり品は優先度が高いため、制約を大幅に緩和
+                            code = candidate['コード']
+                            daily_hours = self.inspector_daily_assignments.get(code, {}).get(current_date, 0.0)
+                            max_hours = self.get_inspector_max_hours(code, inspector_master_df)
+                            # 当日洗浄上がり品は制約を大幅に緩和（WORK_HOURS_BUFFERを小さく、上限も緩和）
+                            work_hours_buffer = WORK_HOURS_BUFFER * 0.1  # 通常の10%に緩和（0.005h）
+                            # 上限を緩和（最大勤務時間の95%まで許容）
+                            remaining_capacity = max(0.0, max_hours * 0.95 - daily_hours - work_hours_buffer)
+                            product_hours = self.inspector_product_hours.get(code, {}).get(product_number, 0.0)
+                            # 当日洗浄上がり品は4時間上限も大幅に緩和（PRODUCT_LIMIT_DRAFT_THRESHOLDを使用、さらに緩和）
+                            product_room_to_4h = max(0.0, PRODUCT_LIMIT_DRAFT_THRESHOLD * 1.1 - product_hours)  # 4.5h * 1.1 = 4.95hまで許容
+                            # 割り当て可能な時間は、分割時間、残り容量、4時間上限の最小値
+                            assignable_time = min(divided_time_per_inspector, remaining_capacity, product_room_to_4h)
+                            # 当日洗浄上がり品は、少しでも割り当て可能な場合は含める（0.05h以上）
+                            if assignable_time >= 0.05:
+                                assignment = candidate.copy()
+                                assignment['割当時間'] = assignable_time
+                                reassigned_inspectors.append(assignment)
+                                reassigned_time_sum += assignable_time
+                        reassigned_remaining = inspection_time - reassigned_time_sum
+                        self.log_message(f"当日洗浄上がり品 {product_number}: 強制分割により {len(reassigned_inspectors)}人を割り当てました（必要人数: {required_inspectors}人、割当時間合計: {reassigned_time_sum:.1f}h、残り時間: {reassigned_remaining:.1f}h）")
+                    
+                    if len(reassigned_inspectors) >= required_inspectors:
+                        # 必要人数に達した場合、再割り当て結果を使用
+                        assigned_inspectors = reassigned_inspectors
+                        remaining_time = reassigned_remaining
+                        assigned_time_sum = reassigned_time_sum
+                        self.log_message(f"当日洗浄上がり品 {product_number}: 再分配により {len(assigned_inspectors)}人を割り当てました（必要人数: {required_inspectors}人）")
+                        # 再分配処理が完了した時点で、当日洗浄上がり品の検査員を即座に追跡（次のロットの処理前に反映）
+                        for inspector in assigned_inspectors:
+                            if isinstance(inspector, dict) and 'コード' in inspector:
+                                code = inspector['コード']
+                                if code not in self.same_day_cleaning_inspectors:
+                                    self.same_day_cleaning_inspectors[code] = 0
+                                self.same_day_cleaning_inspectors[code] += 1
+                    else:
+                        # まだ必要人数に達しない場合、新製品チームも含めて再試行
+                        assigned_codes = {insp['コード'] for insp in reassigned_inspectors}
+                        new_product_team = self.get_new_product_team_inspectors(inspector_master_df)
+                        if new_product_team:
+                            # 既に割り当てられた検査員を除外
+                            new_product_candidates = [insp for insp in new_product_team if insp['コード'] not in assigned_codes]
+                            if new_product_candidates:
+                                # 全候補を統合（元の候補情報を使用）
+                                all_candidates_with_new_team = copy.deepcopy(all_candidates)
+                                all_candidates_with_new_team.extend(new_product_candidates)
+                                
+                                # 検査時間全体を再分配
+                                final_assigned, final_remaining, final_time_sum = self.assign_inspectors_asymmetric(
+                                    all_candidates_with_new_team, inspection_time, inspector_master_df, product_number, is_new_product=True,
+                                    max_inspectors=required_inspectors
+                                )
+                                
+                                # 必要人数に達しない場合、検査時間を強制的に分割する
+                                # 候補が不足している場合でも、可能な限り割り当てる
+                                if len(final_assigned) < required_inspectors:
+                                    self.log_message(f"当日洗浄上がり品 {product_number}: 新製品チームを含めても必要人数 {required_inspectors}人に達しないため、検査時間を強制的に分割します（現在の割当人数: {len(final_assigned)}人、候補数: {len(all_candidates_with_new_team)}人）")
+                                    # 検査時間を必要人数で分割
+                                    divided_time_per_inspector = inspection_time / required_inspectors
+                                    # 候補を必要人数分選択（候補が不足している場合は可能な限り）
+                                    # ただし、最低2人は確保する（3時間基準を満たすため）
+                                    min_required = max(2, required_inspectors) if inspection_time > 3.0 else required_inspectors
+                                    max_available = min(min_required, len(all_candidates_with_new_team))
+                                    # 候補が不足している場合は、可能な限り多くの候補を使用
+                                    if max_available < min_required:
+                                        self.log_message(f"当日洗浄上がり品 {product_number}: 候補が不足しています（必要: {min_required}人、利用可能: {max_available}人）。可能な限り割り当てます。")
+                                    # 既に当日洗浄上がり品に割り当てられていない検査員を優先的に選択
+                                    # 最新の状態を再取得
+                                    already_assigned_to_cleaning = set(self.same_day_cleaning_inspectors.keys())
+                                    unassigned_candidates = [c for c in all_candidates_with_new_team if c['コード'] not in already_assigned_to_cleaning]
+                                    assigned_candidates = [c for c in all_candidates_with_new_team if c['コード'] in already_assigned_to_cleaning]
+                                    # 未割当の検査員を優先的に選択
+                                    selected_candidates = unassigned_candidates[:max_available]
+                                    # まだ必要人数に達しない場合は、既に割り当てられた検査員も含める
+                                    if len(selected_candidates) < min_required:
+                                        remaining_needed = min_required - len(selected_candidates)
+                                        selected_candidates.extend(assigned_candidates[:remaining_needed])
+                                    selected_candidates = selected_candidates[:max_available]
+                                    final_assigned = []
+                                    final_time_sum = 0.0
+                                    for candidate in selected_candidates:
+                                        # 各検査員に割り当て可能な時間を計算
+                                        # 当日洗浄上がり品は優先度が高いため、制約を緩和
+                                        code = candidate['コード']
+                                        daily_hours = self.inspector_daily_assignments.get(code, {}).get(current_date, 0.0)
+                                        max_hours = self.get_inspector_max_hours(code, inspector_master_df)
+                                        # 当日洗浄上がり品は制約を大幅に緩和（WORK_HOURS_BUFFERを小さく、上限も緩和）
+                                        work_hours_buffer = WORK_HOURS_BUFFER * 0.1  # 通常の10%に緩和（0.005h）
+                                        # 上限を緩和（最大勤務時間の95%まで許容）
+                                        remaining_capacity = max(0.0, max_hours * 0.95 - daily_hours - work_hours_buffer)
+                                        product_hours = self.inspector_product_hours.get(code, {}).get(product_number, 0.0)
+                                        # 当日洗浄上がり品は4時間上限も大幅に緩和（PRODUCT_LIMIT_DRAFT_THRESHOLDを使用、さらに緩和）
+                                        product_room_to_4h = max(0.0, PRODUCT_LIMIT_DRAFT_THRESHOLD * 1.1 - product_hours)  # 4.5h * 1.1 = 4.95hまで許容
+                                        # 割り当て可能な時間は、分割時間、残り容量、4時間上限の最小値
+                                        assignable_time = min(divided_time_per_inspector, remaining_capacity, product_room_to_4h)
+                                        # 当日洗浄上がり品は、少しでも割り当て可能な場合は含める（0.05h以上）
+                                        if assignable_time >= 0.05:
+                                            assignment = candidate.copy()
+                                            assignment['割当時間'] = assignable_time
+                                            final_assigned.append(assignment)
+                                            final_time_sum += assignable_time
+                                    final_remaining = inspection_time - final_time_sum
+                                    self.log_message(f"当日洗浄上がり品 {product_number}: 新製品チームを含めた強制分割により {len(final_assigned)}人を割り当てました（必要人数: {required_inspectors}人、割当時間合計: {final_time_sum:.1f}h、残り時間: {final_remaining:.1f}h）")
+                                
+                                if len(final_assigned) >= required_inspectors:
+                                    assigned_inspectors = final_assigned
+                                    remaining_time = final_remaining
+                                    assigned_time_sum = final_time_sum
+                                    self.log_message(f"当日洗浄上がり品 {product_number}: 新製品チームを含めた再分配により {len(assigned_inspectors)}人を割り当てました（必要人数: {required_inspectors}人）")
+                                    # 再分配処理が完了した時点で、当日洗浄上がり品の検査員を即座に追跡（次のロットの処理前に反映）
+                                    for inspector in assigned_inspectors:
+                                        if isinstance(inspector, dict) and 'コード' in inspector:
+                                            code = inspector['コード']
+                                            if code not in self.same_day_cleaning_inspectors:
+                                                self.same_day_cleaning_inspectors[code] = 0
+                                            self.same_day_cleaning_inspectors[code] += 1
+                                else:
+                                    # 最終的に必要人数に達しない場合、再割り当て結果を使用
+                                    assigned_inspectors = final_assigned
+                                    remaining_time = final_remaining
+                                    assigned_time_sum = final_time_sum
+                                    self.log_message(f"当日洗浄上がり品 {product_number}: 新製品チームを含めても {len(assigned_inspectors)}人しか割り当てられませんでした（必要人数: {required_inspectors}人）")
+                                    # 再分配処理が完了した時点で、当日洗浄上がり品の検査員を即座に追跡（次のロットの処理前に反映）
+                                    for inspector in assigned_inspectors:
+                                        if isinstance(inspector, dict) and 'コード' in inspector:
+                                            code = inspector['コード']
+                                            if code not in self.same_day_cleaning_inspectors:
+                                                self.same_day_cleaning_inspectors[code] = 0
+                                            self.same_day_cleaning_inspectors[code] += 1
+                            else:
+                                # 新製品チームの候補がない場合、再割り当て結果を使用
+                                assigned_inspectors = reassigned_inspectors
+                                remaining_time = reassigned_remaining
+                                assigned_time_sum = reassigned_time_sum
+                                # 再分配処理が完了した時点で、当日洗浄上がり品の検査員を即座に追跡（次のロットの処理前に反映）
+                                if len(assigned_inspectors) > 0:
+                                    for inspector in assigned_inspectors:
+                                        if isinstance(inspector, dict) and 'コード' in inspector:
+                                            code = inspector['コード']
+                                            if code not in self.same_day_cleaning_inspectors:
+                                                self.same_day_cleaning_inspectors[code] = 0
+                                            self.same_day_cleaning_inspectors[code] += 1
+                        else:
+                            # 新製品チームがない場合、再割り当て結果を使用
+                            assigned_inspectors = reassigned_inspectors
+                            remaining_time = reassigned_remaining
+                            assigned_time_sum = reassigned_time_sum
+                            # 再分配処理が完了した時点で、当日洗浄上がり品の検査員を即座に追跡（次のロットの処理前に反映）
+                            if len(assigned_inspectors) > 0:
+                                for inspector in assigned_inspectors:
+                                    if isinstance(inspector, dict) and 'コード' in inspector:
+                                        code = inspector['コード']
+                                        if code not in self.same_day_cleaning_inspectors:
+                                            self.same_day_cleaning_inspectors[code] = 0
+                                        self.same_day_cleaning_inspectors[code] += 1
+                
+                # 3時間基準の最低人数チェック: 検査時間が3時間を超える場合は最低2人必要
+                # 当日洗浄上がり品も含めて、3時間基準を満たす必要がある
+                if inspection_time > 3.0 and len(assigned_inspectors) < required_inspectors:
+                    # 当日洗浄上がり品でも、3時間基準違反の場合は未割当
+                    # ただし、優先度が高いため、可能な限り2人以上を割り当てるようにする
+                    self.log_message(f"⚠️ 警告: 品番 {product_number} (出荷予定日: {shipping_date}) は3時間基準違反のため未割当とします（検査時間: {inspection_time:.1f}h, 必要人数: {required_inspectors}人, 実際の割当人数: {len(assigned_inspectors)}人）")
+                    result_df.at[index, '検査員人数'] = 0
+                    result_df.at[index, '分割検査時間'] = 0.0
+                    for i in range(1, 6):
+                        result_df.at[index, f'検査員{i}'] = ''
+                    result_df.at[index, 'チーム情報'] = f'未割当(3時間基準違反: 必要{required_inspectors}人に対して{len(assigned_inspectors)}人)'
+                    result_df.at[index, 'remaining_work_hours'] = round(inspection_time, 2)
+                    result_df.at[index, 'assignability_status'] = 'logic_conflict'
+                    continue
                 
                 # 検査員が選択されなかった場合（ルール違反を避けるため未割当）
                 if len(assigned_inspectors) == 0:
@@ -808,6 +1118,15 @@ class InspectorAssignmentManager:
                 # 現在の日付を取得（勤務時間の履歴追跡用）
                 current_time = pd.Timestamp.now()
                 current_date = current_time.date()
+                
+                # 当日洗浄上がり品の検査員を追跡（重複を避けるため）
+                if is_same_day_cleaning:
+                    for inspector in assigned_inspectors:
+                        if isinstance(inspector, dict) and 'コード' in inspector:
+                            code = inspector['コード']
+                            if code not in self.same_day_cleaning_inspectors:
+                                self.same_day_cleaning_inspectors[code] = 0
+                            self.same_day_cleaning_inspectors[code] += 1
                 
                 # 検査員名を設定
                 team_members = []
@@ -2227,10 +2546,38 @@ class InspectorAssignmentManager:
             # 最優先ルール: 出荷予定日の古い順にソート（処理の最初に必ず実行）
             # 出荷予定日を変換（当日洗浄品は文字列として保持）
             result_df['出荷予定日'] = result_df['出荷予定日'].apply(convert_shipping_date)
-            result_df = result_df.sort_values('出荷予定日', na_position='last').reset_index(drop=True)
-            self.log_message("最適化処理開始前に出荷予定日の古い順でソートしました（最優先ルール）")
             
             current_date = pd.Timestamp.now().date()
+            
+            # ソート用のキー関数: 当日の日付を最優先、次に当日洗浄品
+            def sort_key(val):
+                if pd.isna(val):
+                    return (4, None)  # 最後に
+                val_str = str(val).strip()
+                # 当日洗浄品の場合は優先度2（当日の日付の次）
+                if (val_str == "当日洗浄上がり品" or 
+                    val_str == "当日洗浄品" or
+                    "当日洗浄" in val_str):
+                    return (1, val_str)  # 優先度1（当日の日付の次）
+                # 日付型の場合は優先度0（当日）または優先度2（その他の日付）
+                try:
+                    date_val = pd.to_datetime(val, errors='coerce')
+                    if pd.notna(date_val):
+                        date_date = date_val.date()
+                        if date_date == current_date:
+                            return (0, date_val)  # 優先度0（当日が最優先）
+                        else:
+                            return (2, date_val)  # 優先度2（その他の日付、古い順）
+                except:
+                    pass
+                return (3, val_str)  # 優先度3（その他文字列）
+            
+            # ソートキーを追加
+            result_df['_sort_key'] = result_df['出荷予定日'].apply(sort_key)
+            result_df = result_df.sort_values('_sort_key', na_position='last').reset_index(drop=True)
+            result_df = result_df.drop(columns=['_sort_key'], errors='ignore')
+            
+            self.log_message("最適化処理開始前に出荷予定日の古い順でソートしました（最優先ルール）")
             
             # result_dfから実際の割り当てを読み取って、履歴を再計算（正確な状態を把握）
             # まず、分割検査時間を実際の検査員数で再計算
@@ -2345,7 +2692,34 @@ class InspectorAssignmentManager:
                 # 最優先ルール: 出荷予定日の古い順にソート（毎回のイテレーションで確実に）
                 # 出荷予定日を変換（当日洗浄品は文字列として保持）
                 result_df['出荷予定日'] = result_df['出荷予定日'].apply(convert_shipping_date)
-                result_df_sorted = result_df.sort_values('出荷予定日', na_position='last').reset_index(drop=True)
+                
+                # ソート用のキー関数: 当日の日付を最優先、次に当日洗浄品
+                def sort_key(val):
+                    if pd.isna(val):
+                        return (4, None)  # 最後に
+                    val_str = str(val).strip()
+                    # 当日洗浄品の場合は優先度1（当日の日付の次）
+                    if (val_str == "当日洗浄上がり品" or 
+                        val_str == "当日洗浄品" or
+                        "当日洗浄" in val_str):
+                        return (1, val_str)  # 優先度1（当日の日付の次）
+                    # 日付型の場合は優先度0（当日）または優先度2（その他の日付）
+                    try:
+                        date_val = pd.to_datetime(val, errors='coerce')
+                        if pd.notna(date_val):
+                            date_date = date_val.date()
+                            if date_date == current_date:
+                                return (0, date_val)  # 優先度0（当日が最優先）
+                            else:
+                                return (2, date_val)  # 優先度2（その他の日付、古い順）
+                    except:
+                        pass
+                    return (3, val_str)  # 優先度3（その他文字列）
+                
+                # ソートキーを追加
+                result_df['_sort_key'] = result_df['出荷予定日'].apply(sort_key)
+                result_df_sorted = result_df.sort_values('_sort_key', na_position='last').reset_index(drop=True)
+                result_df_sorted = result_df_sorted.drop(columns=['_sort_key'], errors='ignore')
                 self.log_message(f"イテレーション {iteration}: 出荷予定日の古い順でソートしました（最優先ルール）", debug=True)
                 
                 # 列名のインデックスマップを作成（itertuples用）
@@ -2881,14 +3255,17 @@ class InspectorAssignmentManager:
                         new_product_team = self.get_new_product_team_inspectors(inspector_master_df)
                         if new_product_team:
                             # 必要な検査員人数を計算
-                            # 特例: 一ロットで検査員が5名以上必要になる場合、5名に制限し3時間の条件を無視
+                            # 特例: 一ロットで検査員が5名以上必要になる場合、5名に制限
                             if inspection_time <= 0:
                                 required_inspectors = 1
                             else:
-                                # 通常の計算（3時間で割る）
-                                calculated_inspectors = max(1, int(inspection_time / 3.0) + 1)
-                                # 5名以上になる場合は5名に制限（特例）
-                                required_inspectors = min(5, calculated_inspectors)
+                                # 通常の計算（3時間で割る、最低2人）
+                                if inspection_time <= 3.0:
+                                    required_inspectors = 1
+                                else:
+                                    calculated_inspectors = max(2, int(inspection_time / 3.0) + 1)
+                                    # 5名以上になる場合は5名に制限（特例）
+                                    required_inspectors = min(5, calculated_inspectors)
                             divided_time = inspection_time / required_inspectors
                             
                             # 新製品チームから検査員を選択
@@ -3065,7 +3442,35 @@ class InspectorAssignmentManager:
                         # 出荷予定日の古い順にソート（順序を維持）
                         # 出荷予定日を変換（当日洗浄品は文字列として保持）
                         result_df['出荷予定日'] = result_df['出荷予定日'].apply(convert_shipping_date)
-                        result_df_sorted = result_df.sort_values('出荷予定日', na_position='last').reset_index(drop=True)
+                        
+                        # ソート用のキー関数: 当日の日付を最優先、次に当日洗浄品
+                        current_date = pd.Timestamp.now().date()
+                        def sort_key(val):
+                            if pd.isna(val):
+                                return (4, None)  # 最後に
+                            val_str = str(val).strip()
+                            # 当日洗浄品の場合は優先度1（当日の日付の次）
+                            if (val_str == "当日洗浄上がり品" or
+                                val_str == "当日洗浄品" or
+                                "当日洗浄" in val_str):
+                                return (1, val_str)  # 優先度1（当日の日付の次）
+                            # 日付型の場合は優先度0（当日）または優先度2（その他の日付）
+                            try:
+                                date_val = pd.to_datetime(val, errors='coerce')
+                                if pd.notna(date_val):
+                                    date_date = date_val.date()
+                                    if date_date == current_date:
+                                        return (0, date_val)  # 優先度0（当日が最優先）
+                                    else:
+                                        return (2, date_val)  # 優先度2（その他の日付、古い順）
+                            except:
+                                pass
+                            return (3, val_str)  # 優先度3（その他文字列）
+                        
+                        # ソートキーを追加
+                        result_df['_sort_key'] = result_df['出荷予定日'].apply(sort_key)
+                        result_df_sorted = result_df.sort_values('_sort_key', na_position='last').reset_index(drop=True)
+                        result_df_sorted = result_df_sorted.drop(columns=['_sort_key'], errors='ignore')
                         
                         # 再割当て回数を制限（無限ループを防ぐ）
                         max_reassignments = 50
@@ -3107,6 +3512,15 @@ class InspectorAssignmentManager:
                                 
                                 # 再割当て可能かチェック（出荷予定日が古い順に処理）
                                 process_number = row.get('現在工程番号', '')
+                                
+                                # 当日洗浄上がり品かどうかを判定
+                                shipping_date_raw = row.get('出荷予定日', None)
+                                shipping_date_str = str(shipping_date_raw).strip() if pd.notna(shipping_date_raw) else ''
+                                is_same_day_cleaning_lot = (
+                                    shipping_date_str == "当日洗浄上がり品" or
+                                    shipping_date_str == "当日洗浄品" or
+                                    "当日洗浄" in shipping_date_str
+                                )
                                 
                                 # スキルマスタに登録があるか確認
                                 skill_rows = skill_master_df[skill_master_df.iloc[:, 0] == product_number]
@@ -3164,6 +3578,12 @@ class InspectorAssignmentManager:
                                     # 既に割り当てられている人は除外
                                     if candidate_code in current_codes:
                                         continue
+                                    
+                                    # 当日洗浄上がり品のロットの場合、既に当日洗浄上がり品に割り当てられた検査員を除外（1ロット/日・人の制約）
+                                    if is_same_day_cleaning_lot:
+                                        if candidate_code in self.same_day_cleaning_inspectors:
+                                            # 既に当日洗浄上がり品に割り当てられている場合は除外
+                                            continue
                                     
                                     # 多忙な人（平均の110%以上）への再割当ては避ける
                                     candidate_total_hours = self.inspector_work_hours.get(candidate_code, 0.0)
@@ -3252,6 +3672,18 @@ class InspectorAssignmentManager:
                                         self.inspector_product_hours[new_code][product_number] = (
                                             self.inspector_product_hours[new_code].get(product_number, 0.0) + divided_time
                                         )
+                                        
+                                        # 当日洗浄上がり品のロットの場合、same_day_cleaning_inspectorsを更新
+                                        if is_same_day_cleaning_lot:
+                                            # 元の検査員が当日洗浄上がり品に割り当てられていた場合、削除
+                                            if overloaded_code in self.same_day_cleaning_inspectors:
+                                                self.same_day_cleaning_inspectors[overloaded_code] -= 1
+                                                if self.same_day_cleaning_inspectors[overloaded_code] <= 0:
+                                                    del self.same_day_cleaning_inspectors[overloaded_code]
+                                            # 新しい検査員を当日洗浄上がり品に割り当てられた検査員として記録
+                                            if new_code not in self.same_day_cleaning_inspectors:
+                                                self.same_day_cleaning_inspectors[new_code] = 0
+                                            self.same_day_cleaning_inspectors[new_code] += 1
                                         
                                         # チーム情報を更新
                                         self.update_team_info(result_df_sorted, lot_index, inspector_master_df, show_skill_values)
@@ -3514,7 +3946,9 @@ class InspectorAssignmentManager:
                                 if inspection_time <= 3.0:
                                     required_inspectors = 1
                                 else:
-                                    required_inspectors = max(2, int(inspection_time / 3.0) + 1)
+                                    calculated_inspectors = max(2, int(inspection_time / 3.0) + 1)
+                                    # 5名以上になる場合は5名に制限（特例）
+                                    required_inspectors = min(5, calculated_inspectors)
                                 divided_time = inspection_time / required_inspectors
                                 
                                 # 利用可能な検査員から選択
@@ -3725,7 +4159,9 @@ class InspectorAssignmentManager:
                     if inspection_time <= 3.0:
                         required_inspectors = 1
                     else:
-                        required_inspectors = max(2, int(inspection_time / 3.0) + 1)
+                        calculated_inspectors = max(2, int(inspection_time / 3.0) + 1)
+                        # 5名以上になる場合は5名に制限（特例）
+                        required_inspectors = min(5, calculated_inspectors)
                     
                     divided_time = inspection_time / required_inspectors
                     
@@ -4167,7 +4603,9 @@ class InspectorAssignmentManager:
                                 if inspection_time <= 3.0:
                                     required_inspectors = 1
                                 else:
-                                    required_inspectors = max(2, int(inspection_time / 3.0) + 1)
+                                    calculated_inspectors = max(2, int(inspection_time / 3.0) + 1)
+                                    # 5名以上になる場合は5名に制限（特例）
+                                    required_inspectors = min(5, calculated_inspectors)
                                 divided_time = inspection_time / required_inspectors
                                 
                                 # 利用可能な検査員から選択
@@ -4326,7 +4764,35 @@ class InspectorAssignmentManager:
             # 最終的に出荷予定日順にソート（最優先ルールの維持）
             # 出荷予定日を変換（当日洗浄品は文字列として保持）
             result_df['出荷予定日'] = result_df['出荷予定日'].apply(convert_shipping_date)
-            result_df = result_df.sort_values('出荷予定日', na_position='last').reset_index(drop=True)
+            
+            # ソート用のキー関数: 当日の日付を最優先、次に当日洗浄品
+            current_date = pd.Timestamp.now().date()
+            def sort_key(val):
+                if pd.isna(val):
+                    return (4, None)  # 最後に
+                val_str = str(val).strip()
+                # 当日洗浄品の場合は優先度1（当日の日付の次）
+                if (val_str == "当日洗浄上がり品" or
+                    val_str == "当日洗浄品" or
+                    "当日洗浄" in val_str):
+                    return (1, val_str)  # 優先度1（当日の日付の次）
+                # 日付型の場合は優先度0（当日）または優先度2（その他の日付）
+                try:
+                    date_val = pd.to_datetime(val, errors='coerce')
+                    if pd.notna(date_val):
+                        date_date = date_val.date()
+                        if date_date == current_date:
+                            return (0, date_val)  # 優先度0（当日が最優先）
+                        else:
+                            return (2, date_val)  # 優先度2（その他の日付、古い順）
+                except:
+                    pass
+                return (3, val_str)  # 優先度3（その他文字列）
+            
+            # ソートキーを追加
+            result_df['_sort_key'] = result_df['出荷予定日'].apply(sort_key)
+            result_df = result_df.sort_values('_sort_key', na_position='last').reset_index(drop=True)
+            result_df = result_df.drop(columns=['_sort_key'], errors='ignore')
             self.log_message("最終結果を出荷予定日の古い順でソートしました（最優先ルール）")
             
             # チーム情報を更新（未割当の理由を保持）

@@ -3294,7 +3294,7 @@ class ModernDataExtractorUI:
             # ポップアップウィンドウを作成
             self.detail_popup = ctk.CTkToplevel(self.root)
             self.detail_popup.title("検査員詳細表示")
-            self.detail_popup.geometry("1200x800")
+            self.detail_popup.geometry("1400x900")
             self.detail_popup.resizable(True, True)
             
             # メインフレーム
@@ -3529,8 +3529,8 @@ class ModernDataExtractorUI:
             headers = ['生産ロットID', '指示日', '出荷予定日', '品番', '品名', 'ロット数量', '検査時間', 'チーム情報']
             
             # フォントメトリクスで実際の幅を測定するためのフォントオブジェクト
-            font_data = tk.font.Font(family="Yu Gothic", size=9)
-            font_header = tk.font.Font(family="Yu Gothic", size=10, weight="bold")
+            font_data = tk.font.Font(family="Yu Gothic", size=11)
+            font_header = tk.font.Font(family="Yu Gothic", size=12, weight="bold")
             
             # 各列の最大幅を計算
             column_widths = {}
@@ -3580,8 +3580,22 @@ class ModernDataExtractorUI:
                 
                 column_widths[header] = max(int(max_width), 60)  # 最小60ピクセル
             
-            # スクロール可能なフレーム
-            scroll_frame = ctk.CTkScrollableFrame(parent)
+            # スクロール可能なフレーム（スクロールバーのスタイルを改善）
+            # CustomTkinterのバージョンによっては、scrollbar_button_colorなどのパラメータが
+            # 存在しない場合があるため、try-exceptで対応
+            try:
+                scroll_frame = ctk.CTkScrollableFrame(
+                    parent,
+                    scrollbar_button_color="#9CA3AF",
+                    scrollbar_button_hover_color="#6B7280",
+                    corner_radius=8
+                )
+            except TypeError:
+                # パラメータが存在しない場合はデフォルトで作成
+                scroll_frame = ctk.CTkScrollableFrame(
+                    parent,
+                    corner_radius=8
+                )
             scroll_frame.pack(fill="both", expand=True, padx=10, pady=10)
             
             # マウスホイールイベントのバインド（詳細結果テーブル用）
@@ -3620,7 +3634,7 @@ class ModernDataExtractorUI:
             for inspector_name, lots in inspector_lots.items():
                 # 検査員セクション
                 inspector_section = ctk.CTkFrame(scroll_frame)
-                inspector_section.pack(fill="x", padx=5, pady=5)
+                inspector_section.pack(fill="x", padx=10, pady=8)
                 
                 # 検査員名とロット数
                 total_hours = sum(lot.get('分割検査時間', 0) for lot in lots if pd.notna(lot.get('分割検査時間', 0)))
@@ -3628,29 +3642,33 @@ class ModernDataExtractorUI:
                 header_label = ctk.CTkLabel(
                     inspector_section,
                     text=header_text,
-                    font=ctk.CTkFont(family="Yu Gothic", size=14, weight="bold"),
+                    font=ctk.CTkFont(family="Yu Gothic", size=16, weight="bold"),
                     fg_color="#E5E7EB"
                 )
-                header_label.pack(fill="x", padx=5, pady=5)
+                header_label.pack(fill="x", padx=8, pady=8)
                 
                 # ロット一覧テーブル（スクロール不要、全体のスクロールを使用）
                 lot_frame = tk.Frame(inspector_section, bg="white")
-                lot_frame.pack(fill="x", padx=5, pady=(0, 5))
+                lot_frame.pack(fill="x", padx=8, pady=(0, 8))
                 
                 # テーブルヘッダー（計算済みの列幅を使用）
                 for j, header in enumerate(headers):
                     header_label = tk.Label(
                         lot_frame,
                         text=header,
-                        font=ctk.CTkFont(family="Yu Gothic", size=10, weight="bold"),
-                        bg="#F3F4F6",
+                        font=ctk.CTkFont(family="Yu Gothic", size=12, weight="bold"),
+                        bg="#E5E7EB",
+                        fg="#1F2937",
                         relief="solid",
-                        borderwidth=1,
+                        borderwidth=2,
                         anchor="center"
                     )
-                    header_label.grid(row=0, column=j, sticky="ew", padx=1, pady=1)
+                    header_label.grid(row=0, column=j, sticky="ew", padx=2, pady=3, ipadx=5, ipady=5)
                 
-                # ロットデータ行
+                # ロットデータ行（ホバー効果と選択行のハイライトを追加）
+                selected_row_ref = {'value': None}  # この検査員セクションの選択された行を追跡
+                row_labels = {}  # 行ごとのラベルを保持 {row_idx: [label1, label2, ...]}
+                
                 for i, lot in enumerate(lots):
                     row_data = [
                         str(lot.get('生産ロットID', '')),
@@ -3663,20 +3681,66 @@ class ModernDataExtractorUI:
                         str(lot.get('チーム情報', ''))
                     ]
                     
+                    # 行全体の背景色を決定
+                    base_bg = "white" if i % 2 == 0 else "#F3F4F6"
+                    row_labels[i] = []  # この行のラベルを保持
+                    
                     for j, data in enumerate(row_data):
                         header = headers[j]
                         anchor_pos = "e" if header in ['ロット数量', '検査時間'] else "w"
                         data_label = tk.Label(
                             lot_frame,
                             text=data,
-                            font=ctk.CTkFont(family="Yu Gothic", size=9),
-                            bg="white" if i % 2 == 0 else "#F9FAFB",
+                            font=ctk.CTkFont(family="Yu Gothic", size=11),
+                            bg=base_bg,
+                            fg="#111827",
                             relief="solid",
                             borderwidth=1,
                             anchor=anchor_pos,
                             wraplength=column_widths.get(header, 100) * 8  # 折り返し対応
                         )
-                        data_label.grid(row=i+1, column=j, sticky="ew", padx=1, pady=1)
+                        data_label.grid(row=i+1, column=j, sticky="ew", padx=2, pady=2, ipadx=5, ipady=4)
+                        row_labels[i].append(data_label)  # ラベルを保存
+                        
+                        # ホバー効果とクリックイベントを追加
+                        def make_handlers(row_idx, bg_color, labels_list):
+                            """行ごとのイベントハンドラを作成"""
+                            def on_enter(event):
+                                """マウスが行に入った時の処理"""
+                                if selected_row_ref['value'] != row_idx:
+                                    # 選択されていない行の場合のみホバー色を適用
+                                    for label in labels_list:
+                                        label.config(bg="#E0E7FF")  # 薄い青
+                            
+                            def on_leave(event):
+                                """マウスが行から出た時の処理"""
+                                if selected_row_ref['value'] != row_idx:
+                                    # 選択されていない行の場合のみ元の色に戻す
+                                    for label in labels_list:
+                                        label.config(bg=bg_color)
+                            
+                            def on_click(event):
+                                """行がクリックされた時の処理"""
+                                # 前の選択行を元の色に戻す
+                                if selected_row_ref['value'] is not None:
+                                    prev_bg = "white" if selected_row_ref['value'] % 2 == 0 else "#F3F4F6"
+                                    if selected_row_ref['value'] in row_labels:
+                                        for label in row_labels[selected_row_ref['value']]:
+                                            label.config(bg=prev_bg)
+                                
+                                # 新しい選択行をハイライト
+                                selected_row_ref['value'] = row_idx
+                                for label in labels_list:
+                                    label.config(bg="#DBEAFE")  # 選択時の青
+                            
+                            return on_enter, on_leave, on_click
+                        
+                        on_enter, on_leave, on_click = make_handlers(i, base_bg, row_labels[i])
+                        data_label.bind("<Enter>", on_enter)
+                        data_label.bind("<Leave>", on_leave)
+                        data_label.bind("<Button-1>", on_click)
+                        # カーソルをポインターに変更
+                        data_label.config(cursor="hand2")
                 
                 # 列の重みと最小幅を設定（計算された最大幅を使用）
                 for j, header in enumerate(headers):
