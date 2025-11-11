@@ -250,7 +250,6 @@ class ModernDataExtractorUI:
         )
         
         logger.info(f"ログファイル: {log_file.absolute()}")
-        print(f"📝 ログファイル: {log_file.absolute()}")
     
     def load_config(self):
         """設定の読み込み"""

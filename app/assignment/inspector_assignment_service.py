@@ -13,7 +13,7 @@ from datetime import timedelta
 
 logger = logging.getLogger(__name__)
 
-# ==================== 改善ポイント: 定数定義 ====================
+# 定数定義
 # 4時間上限ルールの2段階化
 PRODUCT_LIMIT_DRAFT_THRESHOLD = 4.5  # ドラフトフェーズでの許容上限（4.5h未満まで許容）
 PRODUCT_LIMIT_HARD_THRESHOLD = 4.0   # 最適化フェーズでの厳格上限（4.0h）
@@ -31,7 +31,6 @@ TABU_LIST_MAX_ITERATIONS = 3  # 再配置直後のロットを何回のイテレ
 
 # ソート安定性確保用の固定シード
 SORT_SEED = 42
-# ==================== 定数定義終了 ====================
 
 
 class InspectorAssignmentManager:
@@ -58,13 +57,13 @@ class InspectorAssignmentManager:
         self.inspector_product_hours = {}
         # 初期割当フェーズで4時間上限を緩和した検査員を追跡（後続最適化で優先的に是正する）
         self.relaxed_product_limit_assignments = set()
-        # 改善ポイント: フェーズ間スラッシング防止用のタブーリスト
+        # フェーズ間スラッシング防止用のタブーリスト
         # 形式: { lot_index: iteration_count } - 再配置されたロットを一定回数除外
         self.tabu_list = {}
-        # 改善ポイント: 検査員ごとの担当品番種類数を追跡（品番切替ペナルティ用）
+        # 検査員ごとの担当品番種類数を追跡（品番切替ペナルティ用）
         # 形式: { inspector_code: set(product_numbers) }
         self.inspector_product_variety = {}
-        # 改善ポイント: 警告の重複出力を防ぐためのセット
+        # 警告の重複出力を防ぐためのセット
         # 形式: {(警告タイプ, キー)} - 同じ警告を1回だけ出力
         self.logged_warnings = set()
         # 新製品チーム列の確認ログを1回だけ出力するためのフラグ
@@ -256,11 +255,9 @@ class InspectorAssignmentManager:
                     
                     if process_key != '':
                         product_master_dict[product_num][process_key] = inspection_time
-                        self.log_message(f"製品マスタ登録: 品番={product_num}, 工程番号={process_key}, 検査時間={inspection_time}", debug=True)
                 else:
                     # 工程番号が空の場合は、空文字列キーとして保存（スキルマスタと同様）
                     product_master_dict[product_num][''] = inspection_time
-                    self.log_message(f"製品マスタ登録: 品番={product_num}, 工程番号=(空), 検査時間={inspection_time}", debug=True)
             
             inspector_results = []
             new_products_to_add = []  # 製品マスタに追加する品番のリスト
@@ -288,9 +285,7 @@ class InspectorAssignmentManager:
                     if current_process_number is None or (pd.notna(current_process_number) and str(current_process_number).strip() == ''):
                         # 工程番号が空の行を検索
                         inspection_time_per_unit = product_dict.get('')
-                        if inspection_time_per_unit is not None:
-                            self.log_message(f"製品マスタ検索成功: 品番={product_number_normalized}, 工程番号=(空), 検査時間={inspection_time_per_unit}", debug=True)
-                        else:
+                        if inspection_time_per_unit is None:
                             # 工程番号が空の行が見つからない場合、工程番号が複数ある場合は数字が若い方から選択
                             process_keys = [k for k in product_dict.keys() if k != '']  # 空文字列を除外
                             if process_keys:
@@ -304,7 +299,6 @@ class InspectorAssignmentManager:
                                 sorted_keys = sorted(process_keys, key=sort_key)
                                 selected_key = sorted_keys[0]  # 数字が最も若い工程番号を選択
                                 inspection_time_per_unit = product_dict.get(selected_key)
-                                self.log_message(f"製品マスタ検索成功: 品番={product_number_normalized}, 工程番号=(空)が見つからず、数字が若い工程番号={selected_key}を選択, 検査時間={inspection_time_per_unit}", debug=True)
                             else:
                                 self.log_message(f"⚠️ 製品マスタ検索失敗: 品番={product_number_normalized}, 工程番号=(空) が見つかりません。利用可能な工程番号: {list(product_dict.keys())}")
                     else:
@@ -317,15 +311,11 @@ class InspectorAssignmentManager:
                         if process_key != '':
                             # まず工程番号が一致するものを検索
                             inspection_time_per_unit = product_dict.get(process_key)
-                            if inspection_time_per_unit is not None:
-                                self.log_message(f"製品マスタ検索成功: 品番={product_number_normalized}, 工程番号={process_key}, 検査時間={inspection_time_per_unit}", debug=True)
-                            else:
+                            if inspection_time_per_unit is None:
                                 # 工程番号が一致しない場合、工程番号が空の行を検索（スキルマスタと同様）
                                 inspection_time_per_unit = product_dict.get('')
-                                if inspection_time_per_unit is not None:
-                                    self.log_message(f"製品マスタ検索成功: 品番={product_number_normalized}, 工程番号={process_key} が見つからず、工程番号=(空) の検査時間を使用, 検査時間={inspection_time_per_unit}", debug=True)
-                                else:
-                                    self.log_message(f"⚠️ 製品マスタ検索失敗: 品番={product_number_normalized}, 工程番号={process_key} および工程番号=(空) が見つかりません。利用可能な工程番号: {list(product_dict.keys())}")
+                            if inspection_time_per_unit is None:
+                                self.log_message(f"⚠️ 製品マスタ検索失敗: 品番={product_number_normalized}, 工程番号={process_key} および工程番号=(空) が見つかりません。利用可能な工程番号: {list(product_dict.keys())}")
                     
                     # 検索結果が取得できない場合
                     if inspection_time_per_unit is None or pd.isna(inspection_time_per_unit):
@@ -434,22 +424,6 @@ class InspectorAssignmentManager:
                 self.log_message("スキルマスタが読み込まれていません")
                 return inspector_df
             
-            # デバッグ: 検査員マスタの全検査員を表示
-            self.log_message("=== 検査員マスタの全検査員 ===", debug=True)
-            inspector_cols = {col: idx for idx, col in enumerate(inspector_master_df.columns)}
-            for row in inspector_master_df.itertuples(index=False):
-                name = row[inspector_cols['#氏名']]
-                code = row[inspector_cols['#ID']]
-                new_product_team = row[inspector_cols[inspector_master_df.columns[7]]] if len(inspector_master_df.columns) > 7 else 'N/A'
-                self.log_message(f"検査員: {name} (コード: {code}, 新製品チーム: {new_product_team})", debug=True)
-            self.log_message("================================", debug=True)
-            
-            # デバッグ: スキルマスタの検査員コードを表示
-            self.log_message("=== スキルマスタの検査員コード ===", debug=True)
-            skill_codes = skill_master_df.columns[2:].tolist()  # 品番、工程を除く検査員コード列
-            self.log_message(f"スキルマスタの検査員コード: {skill_codes}", debug=True)
-            self.log_message("=================================", debug=True)
-            
             # 出荷予定日を日付型に変換する関数（当日洗浄品は文字列として保持）
             def convert_shipping_date(val):
                 if pd.isna(val):
@@ -529,11 +503,6 @@ class InspectorAssignmentManager:
                 assign_statuses.append(status)
                 capacity_list.append(round(total_capacity, 2))
                 shipping_date = row[result_cols.get('出荷予定日', -1)]
-                self.log_message(
-                    f"事前評価: 品番 {product_number} / 出荷日 {shipping_date} "
-                    f"=> 候補数 {feasible_count}, 予備容量 {total_capacity:.2f}h, status={status}",
-                    debug=True
-                )
 
             result_df['feasible_inspector_count'] = feasible_counts
             result_df['assignability_status'] = assign_statuses
@@ -634,18 +603,6 @@ class InspectorAssignmentManager:
             
             self.log_message("改善ポイント: 並び順ロジック変更 - feasible_inspector_count（候補数）を最優先にソートしました。候補が少ないロット（希少スキル必要品）を先に処理します。")
             
-            # ソート結果をログで確認
-            self.log_message("=== 出荷予定日順での処理順序 ===", debug=True)
-            result_cols_after_sort = {col: idx for idx, col in enumerate(result_df.columns)}
-            skill_cols = {col: idx for idx, col in enumerate(skill_master_df.columns)}
-            for row_idx, row in enumerate(result_df.itertuples(index=False)):
-                product_number = row[result_cols_after_sort['品番']]
-                skill_rows = skill_master_df[skill_master_df.iloc[:, 0] == product_number]
-                is_new = "新規品" if skill_rows.empty else "既存品"
-                shipping_date = row[result_cols_after_sort['出荷予定日']]
-                self.log_message(f"順序{row_idx+1}: 品番={product_number}, 出荷予定日={shipping_date}, {is_new}", debug=True)
-            self.log_message("================================", debug=True)
-            
             # 各ロットに対して検査員を割り当て
             result_cols_after_sort = {col: idx for idx, col in enumerate(result_df.columns)}
             for row_idx, row in enumerate(result_df.itertuples(index=False)):
@@ -706,16 +663,6 @@ class InspectorAssignmentManager:
                         # 5名以上になる場合は5名に制限（特例）
                         required_inspectors = min(5, calculated_inspectors)
                     
-                    # デバッグログ: 必要人数が5名を超える場合の警告
-                    if inspection_time > 3.0:
-                        calculated_for_log = max(2, int(inspection_time / 3.0) + 1)
-                        if calculated_for_log > 5:
-                            self.log_message(f"品番 {product_number}: 検査時間 {inspection_time:.1f}h → 必要人数 {required_inspectors}人（3時間制約では{calculated_for_log}名必要だが、特例により5名に制限。残り時間: {inspection_time - (required_inspectors * 3.0):.1f}h）", debug=True)
-                        else:
-                            self.log_message(f"品番 {product_number}: 検査時間 {inspection_time:.1f}h → 必要人数 {required_inspectors}人（3時間制約）", debug=True)
-                    else:
-                        self.log_message(f"品番 {product_number}: 検査時間 {inspection_time:.1f}h → 必要人数 {required_inspectors}人（3時間以下）", debug=True)
-                
                 # 当日洗浄上がり品の場合は、既に当日洗浄上がり品に割り当てられた検査員を除外（1ロット/日・人の制約）
                 # ただし、スキルマスタに制約がかかる場合（候補が不足する場合）は例外とする
                 if is_same_day_cleaning:
@@ -1427,20 +1374,6 @@ class InspectorAssignmentManager:
                                 return self.get_new_product_team_inspectors(inspector_master_df)
                     self.log_message("利用可能な検査員が見つかりません")
                     return []
-            else:
-                self.log_message(f"品番 '{product_number}' でマッチしました: {len(skill_rows)}件")
-                
-                # デバッグ: スキルマスタの詳細情報を表示
-                self.log_message(f"スキルマスタの列: {skill_master_df.columns.tolist()[:10]}...")
-                for idx, row in skill_rows.iterrows():
-                    self.log_message(f"スキル行 {idx}: 品番={row.iloc[0]}, 工程={row.iloc[1]}")
-                    # 検査員コードとスキル値を表示（全列を対象）
-                    for i in range(2, len(row)):
-                        col_name = skill_master_df.columns[i]
-                        skill_value = row.iloc[i]
-                        if pd.notna(skill_value) and str(skill_value).strip() != '':
-                            self.log_message(f"  {col_name}: {skill_value}")
-            
             # 工程番号による絞り込み処理
             filtered_skill_rows = []
             # 追加仕様: 現在工程番号が空欄の場合は工程による絞り込みを行わず、品番一致行をすべて対象
@@ -1660,16 +1593,6 @@ class InspectorAssignmentManager:
             
             # デバッグ: 新製品チーム列の内容を確認（最初の1回だけ）
             if not self.new_product_team_logged:
-                self.log_message("=== 新製品チーム列の確認 ===", debug=True)
-                if len(inspector_master_df.columns) > 7:
-                    team_column = inspector_master_df.iloc[:, 7]
-                    self.log_message(f"新製品チーム列の値: {team_column.unique()}", debug=True)
-                    for idx, value in team_column.items():
-                        if pd.notna(value) and str(value).strip() != '':
-                            self.log_message(f"行 {idx}: {value}", debug=True)
-                else:
-                    self.log_message("新製品チーム列が存在しません", debug=True)
-                self.log_message("=============================", debug=True)
                 self.new_product_team_logged = True
             
             # 検査員マスタのH列（新製品チーム）が"★"のメンバーを取得
@@ -1746,12 +1669,6 @@ class InspectorAssignmentManager:
                     'コード': inspector_row['#ID'],
                     'is_new_team': True  # 新規品チームフラグ
                 })
-                # 追加ログもdebugレベルに変更
-                self.log_message(
-                    f"新製品チームメンバー '{inspector_row['#氏名']}' (コード: {inspector_row['#ID']}) を追加",
-                    debug=True
-                )
-            
             # メンバー数は最初の1回だけ出力
             if not self._new_product_team_count_logged:
                 self.log_message(f"新製品チームメンバー: {len(new_product_team_inspectors)}人")
@@ -1856,10 +1773,6 @@ class InspectorAssignmentManager:
                 if remaining <= 0:
                     break
                 
-                # 最大検査員数の制限をチェック
-                if max_inspectors is not None and len(assignments) >= max_inspectors:
-                    self.log_message(f"非対称分配: 最大検査員数 {max_inspectors}名に達したため、割り当てを停止します（残り時間: {remaining:.1f}h）", debug=True)
-                    break
                 
                 cap = candidate['_remaining_capacity']
                 if cap <= 0:
@@ -1895,7 +1808,6 @@ class InspectorAssignmentManager:
         try:
             # 特例: 一ロットで検査員が5名以上必要になる場合、5名に制限
             if required_count > 5:
-                self.log_message(f"品番 {product_number}: 要求人数 {required_count}名が5名を超えるため、5名に制限します", debug=True)
                 required_count = 5
             
             if not available_inspectors:
@@ -1946,11 +1858,6 @@ class InspectorAssignmentManager:
                 # 4.0h超過の場合はフラグを設定（ドラフトフェーズでは許容、最適化フェーズで是正）
                 insp['over_product_limit'] = projected_hours > PRODUCT_LIMIT_HARD_THRESHOLD
                 # 3.5h以上4.0h以下の場合は警告フラグを付ける（未割当ロット削減のため柔軟に対応）
-                if projected_hours >= 3.5:
-                    insp['__near_product_limit'] = True
-                    self.log_message(f"検査員 '{insp['氏名']}' は品番 {product_number} の累計が {current:.1f}h → {projected_hours:.1f}h (3.5h以上、未割当ロット削減のため候補に含める)", debug=True)
-                else:
-                    insp['__near_product_limit'] = False
                 
                 filtered_by_product.append(insp)
             
@@ -1983,7 +1890,6 @@ class InspectorAssignmentManager:
         try:
             # 特例: 一ロットで検査員が5名以上必要になる場合、5名に制限
             if required_count > 5:
-                self.log_message(f"スキル組み合わせ選択: 要求人数 {required_count}名が5名を超えるため、5名に制限します", debug=True)
                 required_count = 5
             
             # スキルレベル別に検査員を分類
@@ -2924,7 +2830,6 @@ class InspectorAssignmentManager:
                 result_df['_sort_key'] = result_df['出荷予定日'].apply(sort_key)
                 result_df_sorted = result_df.sort_values('_sort_key', na_position='last').reset_index(drop=True)
                 result_df_sorted = result_df_sorted.drop(columns=['_sort_key'], errors='ignore')
-                self.log_message(f"イテレーション {iteration}: 出荷予定日の古い順でソートしました（最優先ルール）", debug=True)
                 
                 # 列名のインデックスマップを作成（itertuples用）
                 sorted_cols = {col: idx for idx, col in enumerate(result_df_sorted.columns)}
@@ -3054,7 +2959,6 @@ class InspectorAssignmentManager:
                     
                     # 改善ポイント: フェーズ間スラッシング防止 - タブーリストに含まれるロットはスキップ
                     if index in self.tabu_list:
-                        self.log_message(f"タブーリストによりスキップ: ロットインデックス {index} (残り{self.tabu_list[index]}回)", debug=True)
                         continue
                     
                     # 改善ポイント: 新規品（出荷予定日2週以内）は保護対象として移動対象外にする
@@ -3784,7 +3688,6 @@ class InspectorAssignmentManager:
                                                 # 新規品で出荷予定日が2週間以内の場合は再割当てをスキップ
                                                 self.log_message(
                                                     f"偏り是正: 新規品 {product_number} (出荷予定日: {shipping_date_date}) は保護のため再割当てをスキップします",
-                                                    debug=True
                                                 )
                                                 continue
                                 
@@ -4467,7 +4370,6 @@ class InspectorAssignmentManager:
                             # 3.5h以上4.5h未満の場合は警告フラグを付ける
                             if projected_hours >= 3.5:
                                 insp['__near_product_limit'] = True
-                                self.log_message(f"未割当ロット再処理: 検査員 '{insp['氏名']}' は品番 {product_number} の累計が {current:.1f}h → {projected_hours:.1f}h (上限緩和)", debug=True)
                             relaxed_candidates.append(insp)
                         
                         if relaxed_candidates:
