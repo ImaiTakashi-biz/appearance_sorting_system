@@ -362,13 +362,13 @@ class InspectorAssignmentManager:
                 # 秒/個はそのまま使用（既に秒単位）
                 seconds_per_unit = inspection_time_per_unit
                 
-                # 出荷予定日を取得し、「当日洗浄上がり品」の場合は文字列として保持
+                # 出荷予定日を取得し、「当日洗浄上がり品」または「先行検査」の場合は文字列として保持
                 shipping_date_value = row[assignment_cols.get('出荷予定日', -1)] if '出荷予定日' in assignment_cols else None
                 if shipping_date_value != -1 and pd.notna(shipping_date_value):
                     shipping_date_str = str(shipping_date_value).strip()
-                    # 「当日洗浄上がり品」の場合は文字列として保持
-                    if shipping_date_str == "当日洗浄上がり品" or shipping_date_str == "当日洗浄品" or "当日洗浄" in shipping_date_str:
-                        shipping_date_final = "当日洗浄上がり品"  # 統一して「当日洗浄上がり品」として保持
+                    # 「当日洗浄上がり品」または「先行検査」の場合は文字列として保持（元の値を保持）
+                    if shipping_date_str == "当日洗浄上がり品" or shipping_date_str == "当日洗浄品" or "当日洗浄" in shipping_date_str or shipping_date_str == "先行検査" or shipping_date_str == "当日先行検査":
+                        shipping_date_final = shipping_date_str  # 元の値を保持（「先行検査」は「先行検査」のまま）
                     else:
                         shipping_date_final = shipping_date_value  # その他の場合は元の値を保持
                 else:
@@ -458,7 +458,9 @@ class InspectorAssignmentManager:
                 # 当日洗浄品の場合は文字列として保持
                 if (val_str == "当日洗浄上がり品" or 
                     val_str == "当日洗浄品" or
-                    "当日洗浄" in val_str):
+                    "当日洗浄" in val_str or
+                    val_str == "先行検査" or
+                    val_str == "当日先行検査"):
                     return val_str  # 文字列として保持
                 # その他の場合は日付型に変換
                 try:
@@ -545,16 +547,27 @@ class InspectorAssignmentManager:
             # 3. ソート安定性確保: 品番IDを追加
             
             # 出荷予定日の優先順位を設定（厳守ルール）
-            # 優先度: 1=当日、2=当日洗浄品、3=翌日以降の新規品、4=その他
+            # 優先度: 1=当日、2=当日洗浄品、3=先行検査品、4=翌日/翌営業日、5=それ以降
             today = pd.Timestamp.now().normalize()
             today_date = today.date()
+            
+            # 翌営業日の計算（金曜日の場合は翌週の月曜日）
+            def get_next_business_day(date_val):
+                """翌営業日を取得（金曜日の場合は翌週の月曜日）"""
+                weekday = date_val.weekday()  # 0=月曜日, 4=金曜日
+                if weekday == 4:  # 金曜日
+                    return date_val + timedelta(days=3)  # 翌週の月曜日
+                else:
+                    return date_val + timedelta(days=1)  # 翌日
+            
+            next_business_day = get_next_business_day(today_date)
             
             def calculate_priority(row):
                 shipping_date = row['出荷予定日']
                 is_new_product = row['_is_new_product']
                 
                 if pd.notna(shipping_date):
-                    # 当日の日付かどうかをチェック
+                    # 1. 当日の日付かどうかをチェック
                     try:
                         date_value = pd.to_datetime(shipping_date, errors='coerce')
                         if pd.notna(date_value):
@@ -564,14 +577,37 @@ class InspectorAssignmentManager:
                     except Exception:
                         pass
                     
-                    # 当日洗浄上がり品かどうかをチェック
+                    # 2. 当日洗浄上がり品かどうかをチェック
                     shipping_date_str = str(shipping_date).strip()
                     if (shipping_date_str == "当日洗浄上がり品" or 
                         shipping_date_str == "当日洗浄品" or
                         "当日洗浄" in shipping_date_str):
                         return 2  # 当日洗浄品が2番目
                     
-                    # 翌日以降の新規品かどうかをチェック
+                    # 3. 先行検査品かどうかをチェック
+                    if (shipping_date_str == "先行検査" or
+                        shipping_date_str == "当日先行検査"):
+                        return 3  # 先行検査品が3番目
+                    
+                    # 4. 翌日または翌営業日かどうかをチェック
+                    try:
+                        date_value = pd.to_datetime(shipping_date, errors='coerce')
+                        if pd.notna(date_value):
+                            shipping_date_date = date_value.date()
+                            if shipping_date_date == next_business_day:
+                                return 4  # 翌日/翌営業日が4番目
+                    except Exception:
+                        pass
+                    
+                    # 5. それ以降の日付
+                    try:
+                        date_value = pd.to_datetime(shipping_date, errors='coerce')
+                        if pd.notna(date_value):
+                            return 5  # それ以降の日付が5番目
+                    except Exception:
+                        pass
+                    
+                    # 翌日以降の新規品かどうかをチェック（既存のロジックを維持）
                     if is_new_product:
                         try:
                             date_value = pd.to_datetime(shipping_date, errors='coerce')
@@ -630,7 +666,9 @@ class InspectorAssignmentManager:
                 is_same_day_cleaning = (
                     shipping_date_str == "当日洗浄上がり品" or
                     shipping_date_str == "当日洗浄品" or
-                    "当日洗浄" in shipping_date_str
+                    "当日洗浄" in shipping_date_str or
+                    shipping_date_str == "先行検査" or
+                    shipping_date_str == "当日先行検査"
                 )
                 
                 # ロット数量が0の場合は検査員を割り当てない
@@ -1220,6 +1258,100 @@ class InspectorAssignmentManager:
                 result_df = result_df.drop(columns=['_sort_product_id'])
             if '_is_new_product' in result_df.columns:
                 result_df = result_df.drop(columns=['_is_new_product'])
+            
+            # 最終的な表示用ソート: 出荷予定日、品番、指示日の順
+            # 出荷予定日のソートキー関数
+            current_date = pd.Timestamp.now().date()
+            
+            # 翌営業日の計算（金曜日の場合は翌週の月曜日）
+            def get_next_business_day(date_val):
+                """翌営業日を取得（金曜日の場合は翌週の月曜日）"""
+                weekday = date_val.weekday()  # 0=月曜日, 4=金曜日
+                if weekday == 4:  # 金曜日
+                    return date_val + timedelta(days=3)  # 翌週の月曜日
+                else:
+                    return date_val + timedelta(days=1)  # 翌日
+            
+            next_business_day = get_next_business_day(current_date)
+            
+            def shipping_date_sort_key(val):
+                if pd.isna(val):
+                    return (5, None)  # 最後に
+                val_str = str(val).strip()
+                
+                # 1. 当日の日付（優先度0）
+                try:
+                    date_val = pd.to_datetime(val, errors='coerce')
+                    if pd.notna(date_val):
+                        date_date = date_val.date()
+                        if date_date == current_date:
+                            return (0, date_val)
+                except:
+                    pass
+                
+                # 2. 当日洗浄上がり品（優先度1）
+                if (val_str == "当日洗浄上がり品" or 
+                    val_str == "当日洗浄品" or
+                    "当日洗浄" in val_str):
+                    return (1, val_str)
+                
+                # 3. 先行検査品（優先度2）
+                if (val_str == "先行検査" or
+                    val_str == "当日先行検査"):
+                    return (2, val_str)
+                
+                # 4. 翌日または翌営業日（優先度3）
+                try:
+                    date_val = pd.to_datetime(val, errors='coerce')
+                    if pd.notna(date_val):
+                        date_date = date_val.date()
+                        if date_date == next_business_day:
+                            return (3, date_val)
+                except:
+                    pass
+                
+                # 5. それ以降の日付（優先度4）
+                try:
+                    date_val = pd.to_datetime(val, errors='coerce')
+                    if pd.notna(date_val):
+                        return (4, date_val)
+                except:
+                    pass
+                
+                return (5, val_str)  # その他文字列
+            
+            # 指示日のソートキー関数
+            def instruction_date_sort_key(val):
+                if pd.isna(val):
+                    return None
+                try:
+                    date_val = pd.to_datetime(val, errors='coerce')
+                    if pd.notna(date_val):
+                        return date_val
+                except:
+                    pass
+                return val
+            
+            # ソートキーを追加
+            result_df['_shipping_sort_key'] = result_df['出荷予定日'].apply(shipping_date_sort_key)
+            if '指示日' in result_df.columns:
+                result_df['_instruction_sort_key'] = result_df['指示日'].apply(instruction_date_sort_key)
+            else:
+                result_df['_instruction_sort_key'] = None
+            
+            # ソート実行: 出荷予定日、品番、指示日の順
+            sort_columns = ['_shipping_sort_key', '品番']
+            if '指示日' in result_df.columns:
+                sort_columns.append('_instruction_sort_key')
+            
+            result_df = result_df.sort_values(
+                sort_columns,
+                ascending=[True, True, True] if '指示日' in result_df.columns else [True, True],
+                na_position='last'
+            ).reset_index(drop=True)
+            
+            # ソートキー列を削除
+            result_df = result_df.drop(columns=['_shipping_sort_key', '_instruction_sort_key'], errors='ignore')
                 
             return result_df
             
@@ -2535,7 +2667,9 @@ class InspectorAssignmentManager:
                 # 当日洗浄品の場合は文字列として保持
                 if (val_str == "当日洗浄上がり品" or 
                     val_str == "当日洗浄品" or
-                    "当日洗浄" in val_str):
+                    "当日洗浄" in val_str or
+                    val_str == "先行検査" or
+                    val_str == "当日先行検査"):
                     return val_str  # 文字列として保持
                 # その他の場合は日付型に変換
                 try:
@@ -2549,28 +2683,62 @@ class InspectorAssignmentManager:
             
             current_date = pd.Timestamp.now().date()
             
-            # ソート用のキー関数: 当日の日付を最優先、次に当日洗浄品
+            # ソート用のキー関数: 新しい優先順位に従う
+            def get_next_business_day(date_val):
+                """翌営業日を取得（金曜日の場合は翌週の月曜日）"""
+                weekday = date_val.weekday()  # 0=月曜日, 4=金曜日
+                if weekday == 4:  # 金曜日
+                    return date_val + timedelta(days=3)  # 翌週の月曜日
+                else:
+                    return date_val + timedelta(days=1)  # 翌日
+            
+            next_business_day = get_next_business_day(current_date)
+            
             def sort_key(val):
                 if pd.isna(val):
-                    return (4, None)  # 最後に
+                    return (5, None)  # 最後に
                 val_str = str(val).strip()
-                # 当日洗浄品の場合は優先度2（当日の日付の次）
-                if (val_str == "当日洗浄上がり品" or 
-                    val_str == "当日洗浄品" or
-                    "当日洗浄" in val_str):
-                    return (1, val_str)  # 優先度1（当日の日付の次）
-                # 日付型の場合は優先度0（当日）または優先度2（その他の日付）
+                
+                # 1. 当日の日付（優先度0）
                 try:
                     date_val = pd.to_datetime(val, errors='coerce')
                     if pd.notna(date_val):
                         date_date = date_val.date()
                         if date_date == current_date:
-                            return (0, date_val)  # 優先度0（当日が最優先）
-                        else:
-                            return (2, date_val)  # 優先度2（その他の日付、古い順）
+                            return (0, date_val)
                 except:
                     pass
-                return (3, val_str)  # 優先度3（その他文字列）
+                
+                # 2. 当日洗浄上がり品（優先度1）
+                if (val_str == "当日洗浄上がり品" or 
+                    val_str == "当日洗浄品" or
+                    "当日洗浄" in val_str):
+                    return (1, val_str)
+                
+                # 3. 先行検査品（優先度2）
+                if (val_str == "先行検査" or
+                    val_str == "当日先行検査"):
+                    return (2, val_str)
+                
+                # 4. 翌日または翌営業日（優先度3）
+                try:
+                    date_val = pd.to_datetime(val, errors='coerce')
+                    if pd.notna(date_val):
+                        date_date = date_val.date()
+                        if date_date == next_business_day:
+                            return (3, date_val)
+                except:
+                    pass
+                
+                # 5. それ以降の日付（優先度4）
+                try:
+                    date_val = pd.to_datetime(val, errors='coerce')
+                    if pd.notna(date_val):
+                        return (4, date_val)
+                except:
+                    pass
+                
+                return (5, val_str)  # その他文字列
             
             # ソートキーを追加
             result_df['_sort_key'] = result_df['出荷予定日'].apply(sort_key)
@@ -2693,28 +2861,64 @@ class InspectorAssignmentManager:
                 # 出荷予定日を変換（当日洗浄品は文字列として保持）
                 result_df['出荷予定日'] = result_df['出荷予定日'].apply(convert_shipping_date)
                 
-                # ソート用のキー関数: 当日の日付を最優先、次に当日洗浄品
+                # ソート用のキー関数: 新しい優先順位に従う
+                current_date = pd.Timestamp.now().date()
+                
+                def get_next_business_day(date_val):
+                    """翌営業日を取得（金曜日の場合は翌週の月曜日）"""
+                    weekday = date_val.weekday()  # 0=月曜日, 4=金曜日
+                    if weekday == 4:  # 金曜日
+                        return date_val + timedelta(days=3)  # 翌週の月曜日
+                    else:
+                        return date_val + timedelta(days=1)  # 翌日
+                
+                next_business_day = get_next_business_day(current_date)
+                
                 def sort_key(val):
                     if pd.isna(val):
-                        return (4, None)  # 最後に
+                        return (5, None)  # 最後に
                     val_str = str(val).strip()
-                    # 当日洗浄品の場合は優先度1（当日の日付の次）
-                    if (val_str == "当日洗浄上がり品" or 
-                        val_str == "当日洗浄品" or
-                        "当日洗浄" in val_str):
-                        return (1, val_str)  # 優先度1（当日の日付の次）
-                    # 日付型の場合は優先度0（当日）または優先度2（その他の日付）
+                    
+                    # 1. 当日の日付（優先度0）
                     try:
                         date_val = pd.to_datetime(val, errors='coerce')
                         if pd.notna(date_val):
                             date_date = date_val.date()
                             if date_date == current_date:
-                                return (0, date_val)  # 優先度0（当日が最優先）
-                            else:
-                                return (2, date_val)  # 優先度2（その他の日付、古い順）
+                                return (0, date_val)
                     except:
                         pass
-                    return (3, val_str)  # 優先度3（その他文字列）
+                    
+                    # 2. 当日洗浄上がり品（優先度1）
+                    if (val_str == "当日洗浄上がり品" or 
+                        val_str == "当日洗浄品" or
+                        "当日洗浄" in val_str):
+                        return (1, val_str)
+                    
+                    # 3. 先行検査品（優先度2）
+                    if (val_str == "先行検査" or
+                        val_str == "当日先行検査"):
+                        return (2, val_str)
+                    
+                    # 4. 翌日または翌営業日（優先度3）
+                    try:
+                        date_val = pd.to_datetime(val, errors='coerce')
+                        if pd.notna(date_val):
+                            date_date = date_val.date()
+                            if date_date == next_business_day:
+                                return (3, date_val)
+                    except:
+                        pass
+                    
+                    # 5. それ以降の日付（優先度4）
+                    try:
+                        date_val = pd.to_datetime(val, errors='coerce')
+                        if pd.notna(date_val):
+                            return (4, date_val)
+                    except:
+                        pass
+                    
+                    return (5, val_str)  # その他文字列
                 
                 # ソートキーを追加
                 result_df['_sort_key'] = result_df['出荷予定日'].apply(sort_key)
@@ -3170,7 +3374,9 @@ class InspectorAssignmentManager:
                     is_same_day_cleaning = (
                         shipping_date_str == "当日洗浄上がり品" or 
                         shipping_date_str == "当日洗浄品" or
-                        "当日洗浄" in shipping_date_str
+                        "当日洗浄" in shipping_date_str or
+                        shipping_date_str == "先行検査" or
+                        shipping_date_str == "当日先行検査"
                     )
                     
                     if is_same_day_cleaning:
@@ -3331,9 +3537,13 @@ class InspectorAssignmentManager:
                             shipping_date_str == "当日洗浄上がり品" or 
                             shipping_date_str == "当日洗浄品" or
                             "当日洗浄" in shipping_date_str or
+                            shipping_date_str == "先行検査" or
+                            shipping_date_str == "当日先行検査" or
                             original_shipping_date_str == "当日洗浄上がり品" or 
                             original_shipping_date_str == "当日洗浄品" or
-                            "当日洗浄" in original_shipping_date_str
+                            "当日洗浄" in original_shipping_date_str or
+                            original_shipping_date_str == "先行検査" or
+                            original_shipping_date_str == "当日先行検査"
                         )
                         if is_same_day_cleaning:
                             self.log_message(f"⚠️ 当日洗浄品のため、ルール違反があっても割り当てを維持します（品番: {product_number}, 出荷予定日: {shipping_date_str or original_shipping_date_str}）", level='warning')
@@ -3443,29 +3653,64 @@ class InspectorAssignmentManager:
                         # 出荷予定日を変換（当日洗浄品は文字列として保持）
                         result_df['出荷予定日'] = result_df['出荷予定日'].apply(convert_shipping_date)
                         
-                        # ソート用のキー関数: 当日の日付を最優先、次に当日洗浄品
+                        # ソート用のキー関数: 新しい優先順位に従う
                         current_date = pd.Timestamp.now().date()
+                        
+                        def get_next_business_day(date_val):
+                            """翌営業日を取得（金曜日の場合は翌週の月曜日）"""
+                            weekday = date_val.weekday()  # 0=月曜日, 4=金曜日
+                            if weekday == 4:  # 金曜日
+                                return date_val + timedelta(days=3)  # 翌週の月曜日
+                            else:
+                                return date_val + timedelta(days=1)  # 翌日
+                        
+                        next_business_day = get_next_business_day(current_date)
+                        
                         def sort_key(val):
                             if pd.isna(val):
-                                return (4, None)  # 最後に
+                                return (5, None)  # 最後に
                             val_str = str(val).strip()
-                            # 当日洗浄品の場合は優先度1（当日の日付の次）
-                            if (val_str == "当日洗浄上がり品" or
-                                val_str == "当日洗浄品" or
-                                "当日洗浄" in val_str):
-                                return (1, val_str)  # 優先度1（当日の日付の次）
-                            # 日付型の場合は優先度0（当日）または優先度2（その他の日付）
+                            
+                            # 1. 当日の日付（優先度0）
                             try:
                                 date_val = pd.to_datetime(val, errors='coerce')
                                 if pd.notna(date_val):
                                     date_date = date_val.date()
                                     if date_date == current_date:
-                                        return (0, date_val)  # 優先度0（当日が最優先）
-                                    else:
-                                        return (2, date_val)  # 優先度2（その他の日付、古い順）
+                                        return (0, date_val)
                             except:
                                 pass
-                            return (3, val_str)  # 優先度3（その他文字列）
+                            
+                            # 2. 当日洗浄上がり品（優先度1）
+                            if (val_str == "当日洗浄上がり品" or
+                                val_str == "当日洗浄品" or
+                                "当日洗浄" in val_str):
+                                return (1, val_str)
+                            
+                            # 3. 先行検査品（優先度2）
+                            if (val_str == "先行検査" or
+                                val_str == "当日先行検査"):
+                                return (2, val_str)
+                            
+                            # 4. 翌日または翌営業日（優先度3）
+                            try:
+                                date_val = pd.to_datetime(val, errors='coerce')
+                                if pd.notna(date_val):
+                                    date_date = date_val.date()
+                                    if date_date == next_business_day:
+                                        return (3, date_val)
+                            except:
+                                pass
+                            
+                            # 5. それ以降の日付（優先度4）
+                            try:
+                                date_val = pd.to_datetime(val, errors='coerce')
+                                if pd.notna(date_val):
+                                    return (4, date_val)
+                            except:
+                                pass
+                            
+                            return (5, val_str)  # その他文字列
                         
                         # ソートキーを追加
                         result_df['_sort_key'] = result_df['出荷予定日'].apply(sort_key)
@@ -4765,29 +5010,64 @@ class InspectorAssignmentManager:
             # 出荷予定日を変換（当日洗浄品は文字列として保持）
             result_df['出荷予定日'] = result_df['出荷予定日'].apply(convert_shipping_date)
             
-            # ソート用のキー関数: 当日の日付を最優先、次に当日洗浄品
+            # ソート用のキー関数: 新しい優先順位に従う
             current_date = pd.Timestamp.now().date()
+            
+            def get_next_business_day(date_val):
+                """翌営業日を取得（金曜日の場合は翌週の月曜日）"""
+                weekday = date_val.weekday()  # 0=月曜日, 4=金曜日
+                if weekday == 4:  # 金曜日
+                    return date_val + timedelta(days=3)  # 翌週の月曜日
+                else:
+                    return date_val + timedelta(days=1)  # 翌日
+            
+            next_business_day = get_next_business_day(current_date)
+            
             def sort_key(val):
                 if pd.isna(val):
-                    return (4, None)  # 最後に
+                    return (5, None)  # 最後に
                 val_str = str(val).strip()
-                # 当日洗浄品の場合は優先度1（当日の日付の次）
-                if (val_str == "当日洗浄上がり品" or
-                    val_str == "当日洗浄品" or
-                    "当日洗浄" in val_str):
-                    return (1, val_str)  # 優先度1（当日の日付の次）
-                # 日付型の場合は優先度0（当日）または優先度2（その他の日付）
+                
+                # 1. 当日の日付（優先度0）
                 try:
                     date_val = pd.to_datetime(val, errors='coerce')
                     if pd.notna(date_val):
                         date_date = date_val.date()
                         if date_date == current_date:
-                            return (0, date_val)  # 優先度0（当日が最優先）
-                        else:
-                            return (2, date_val)  # 優先度2（その他の日付、古い順）
+                            return (0, date_val)
                 except:
                     pass
-                return (3, val_str)  # 優先度3（その他文字列）
+                
+                # 2. 当日洗浄上がり品（優先度1）
+                if (val_str == "当日洗浄上がり品" or
+                    val_str == "当日洗浄品" or
+                    "当日洗浄" in val_str):
+                    return (1, val_str)
+                
+                # 3. 先行検査品（優先度2）
+                if (val_str == "先行検査" or
+                    val_str == "当日先行検査"):
+                    return (2, val_str)
+                
+                # 4. 翌日または翌営業日（優先度3）
+                try:
+                    date_val = pd.to_datetime(val, errors='coerce')
+                    if pd.notna(date_val):
+                        date_date = date_val.date()
+                        if date_date == next_business_day:
+                            return (3, date_val)
+                except:
+                    pass
+                
+                # 5. それ以降の日付（優先度4）
+                try:
+                    date_val = pd.to_datetime(val, errors='coerce')
+                    if pd.notna(date_val):
+                        return (4, date_val)
+                except:
+                    pass
+                
+                return (5, val_str)  # その他文字列
             
             # ソートキーを追加
             result_df['_sort_key'] = result_df['出荷予定日'].apply(sort_key)

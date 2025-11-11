@@ -13,6 +13,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
 from pathlib import Path
+import json
 from loguru import logger
 from app.config import DatabaseConfig
 import calendar
@@ -63,6 +64,17 @@ class ModernDataExtractorUI:
         self.selected_start_date = None
         self.selected_end_date = None
         
+        # 当日検査品入力用の変数
+        self.product_code_entry = None  # 品番入力フィールド
+        self.inspectable_lots_entry = None  # 検査可能ロット数／日入力フィールド
+        self.register_button = None  # 登録確定ボタン
+        self.registered_products = []  # 登録された品番のリスト [{品番, ロット数}, ...]
+        self.registered_products_frame = None  # 登録リスト表示フレーム
+        self.registered_list_container = None  # 登録リストコンテナ
+        
+        # 登録済み品番リストの保存ファイルパス
+        self.registered_products_file = Path(__file__).parent.parent.parent / "registered_products.json"
+        
         # カレンダー用の変数初期化
         today = date.today()
         self.current_year = today.year
@@ -111,6 +123,9 @@ class ModernDataExtractorUI:
         
         # 設定の読み込み
         self.load_config()
+        
+        # 登録済み品番リストの読み込み
+        self.load_registered_products()
         
         # UI構築後に全画面表示を設定
         self.root.after(200, self.set_fullscreen)  # UI完全構築後に全画面表示
@@ -276,6 +291,9 @@ class ModernDataExtractorUI:
         # 日付選択セクション
         self.create_date_section(self.main_scroll_frame)
         
+        # 当日検査品追加セクション
+        self.create_same_day_inspection_section(self.main_scroll_frame)
+        
         # ボタンセクション
         self.create_button_section(self.main_scroll_frame)
         
@@ -308,7 +326,7 @@ class ModernDataExtractorUI:
     
     def create_date_section(self, parent):
         """日付選択セクションの作成"""
-        date_frame = ctk.CTkFrame(parent, fg_color="#F8FAFC", corner_radius=12)
+        date_frame = ctk.CTkFrame(parent, fg_color="#EFF6FF", corner_radius=12)
         date_frame.pack(fill="x", pady=(0, 10), padx=20)
         
         # セクションタイトル
@@ -321,11 +339,300 @@ class ModernDataExtractorUI:
         date_title.pack(pady=(10, 8))
         
         # 期間選択フレーム
-        period_frame = ctk.CTkFrame(date_frame, fg_color="white", corner_radius=8)
+        period_frame = ctk.CTkFrame(date_frame, fg_color="white", corner_radius=8, border_width=1, border_color="#DBEAFE")
         period_frame.pack(fill="x", padx=15, pady=(0, 10))
         
         # 期間選択UIを作成
         self.create_period_selector(period_frame)
+    
+    def create_same_day_inspection_section(self, parent):
+        """当日検査品追加セクションの作成"""
+        # メインフレーム
+        inspection_frame = ctk.CTkFrame(parent, fg_color="#EFF6FF", corner_radius=12)
+        inspection_frame.pack(fill="x", pady=(0, 8), padx=20)
+        
+        # セクションタイトル
+        inspection_title = ctk.CTkLabel(
+            inspection_frame,
+            text="<追加>　当日検査品",
+            font=ctk.CTkFont(family="Yu Gothic", size=20, weight="bold"),
+            text_color="#1E3A8A"
+        )
+        inspection_title.pack(pady=(8, 4))
+        
+        # 入力フォームフレーム
+        input_frame = ctk.CTkFrame(inspection_frame, fg_color="white", corner_radius=8, border_width=1, border_color="#DBEAFE")
+        input_frame.pack(fill="x", padx=10, pady=(0, 0))  # 下部余白はボタンフレームで制御
+        
+        # 入力フィールドを横並びに配置するフレーム
+        fields_frame = ctk.CTkFrame(input_frame, fg_color="transparent")
+        fields_frame.pack(fill="x", padx=10, pady=(8, 0))  # 下部余白を0に
+        
+        # 品番入力セクション
+        product_code_frame = ctk.CTkFrame(fields_frame, fg_color="transparent")
+        product_code_frame.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        
+        product_code_label = ctk.CTkLabel(
+            product_code_frame,
+            text="品番（製品マスタと完全一致）",
+            font=ctk.CTkFont(family="Yu Gothic", size=16, weight="bold"),
+            text_color="#374151"
+        )
+        product_code_label.pack(anchor="w", pady=(0, 4))
+        
+        self.product_code_entry = ctk.CTkEntry(
+            product_code_frame,
+            placeholder_text="品番を入力",
+            font=ctk.CTkFont(family="Yu Gothic", size=14),
+            height=40,
+            border_width=1,
+            fg_color="white",
+            text_color="#374151"
+        )
+        self.product_code_entry.pack(fill="x")
+        
+        # 検査可能ロット数／日入力セクション
+        lots_frame = ctk.CTkFrame(fields_frame, fg_color="transparent")
+        lots_frame.pack(side="left", fill="x", expand=True, padx=(8, 0))
+        
+        lots_label = ctk.CTkLabel(
+            lots_frame,
+            text="検査可能ロット数／日",
+            font=ctk.CTkFont(family="Yu Gothic", size=16, weight="bold"),
+            text_color="#374151"
+        )
+        lots_label.pack(anchor="w", pady=(0, 4))
+        
+        self.inspectable_lots_entry = ctk.CTkEntry(
+            lots_frame,
+            placeholder_text="ロット数を入力",
+            font=ctk.CTkFont(family="Yu Gothic", size=14),
+            height=40,
+            border_width=1,
+            fg_color="white",
+            text_color="#374151"
+        )
+        self.inspectable_lots_entry.pack(fill="x")
+        
+        # 入力フィールドの変更を監視してボタンの表示/非表示を制御
+        self.product_code_entry.bind("<KeyRelease>", self.check_input_fields)
+        self.inspectable_lots_entry.bind("<KeyRelease>", self.check_input_fields)
+        self.product_code_entry.bind("<FocusOut>", self.check_input_fields)
+        self.inspectable_lots_entry.bind("<FocusOut>", self.check_input_fields)
+        
+        # 登録確定ボタン（初期状態は非表示）
+        self.button_frame = ctk.CTkFrame(input_frame, fg_color="transparent")
+        # 初期状態ではボタンフレーム自体も非表示にする
+        self.button_frame.pack_forget()
+        
+        self.register_button = ctk.CTkButton(
+            self.button_frame,
+            text="登録確定",
+            command=self.register_product,
+            font=ctk.CTkFont(family="Yu Gothic", size=14, weight="bold"),
+            height=40,
+            fg_color="#3B82F6",
+            hover_color="#2563EB",
+            text_color="white"
+        )
+        # 初期状態では非表示
+        self.register_button.pack_forget()
+        
+        # 登録リスト表示フレーム
+        self.registered_products_frame = ctk.CTkFrame(inspection_frame, fg_color="white", corner_radius=8, border_width=1, border_color="#DBEAFE")
+        self.registered_products_frame.pack(fill="x", padx=10, pady=(8, 8))  # 上部に8pxの余白を追加
+        
+        # 登録リストのタイトル
+        list_title = ctk.CTkLabel(
+            self.registered_products_frame,
+            text="登録済み品番",
+            font=ctk.CTkFont(family="Yu Gothic", size=16, weight="bold"),
+            text_color="#374151"
+        )
+        list_title.pack(pady=(8, 5))
+        
+        # 登録リストコンテナ（スクロール可能）
+        self.registered_list_container = ctk.CTkScrollableFrame(
+            self.registered_products_frame,
+            fg_color="transparent",
+            height=200
+        )
+        self.registered_list_container.pack(fill="both", expand=True, padx=10, pady=(0, 8))
+        
+        # 初期状態では登録リストを非表示
+        self.registered_products_frame.pack_forget()
+        
+        # 既に読み込まれた登録済み品番があれば表示
+        if self.registered_products:
+            self.update_registered_list()
+    
+    def check_input_fields(self, event=None):
+        """入力フィールドの状態をチェックして登録確定ボタンの表示/非表示を制御"""
+        product_code = self.product_code_entry.get().strip()
+        lots = self.inspectable_lots_entry.get().strip()
+        
+        # 両方のフィールドが入力されている場合はボタンを表示
+        if product_code and lots:
+            # ボタンフレームを表示
+            self.button_frame.pack(fill="x", padx=10, pady=(0, 8))
+            self.register_button.pack(pady=(5, 0))
+        else:
+            self.register_button.pack_forget()
+            # ボタンフレームも非表示にする
+            self.button_frame.pack_forget()
+    
+    def register_product(self):
+        """品番を登録リストに追加"""
+        product_code = self.product_code_entry.get().strip()
+        lots = self.inspectable_lots_entry.get().strip()
+        
+        # 入力チェック
+        if not product_code or not lots:
+            return
+        
+        # 既に登録されているかチェック
+        for item in self.registered_products:
+            if item['品番'] == product_code:
+                # 既に登録されている場合は更新
+                item['ロット数'] = lots
+                self.update_registered_list()
+                # ファイルに保存
+                self.save_registered_products()
+                # 入力フィールドをクリア
+                self.product_code_entry.delete(0, "end")
+                self.inspectable_lots_entry.delete(0, "end")
+                self.check_input_fields()
+                return
+        
+        # 新規登録
+        self.registered_products.append({
+            '品番': product_code,
+            'ロット数': lots
+        })
+        
+        # リストを更新
+        self.update_registered_list()
+        
+        # ファイルに保存
+        self.save_registered_products()
+        
+        # 入力フィールドをクリア
+        self.product_code_entry.delete(0, "end")
+        self.inspectable_lots_entry.delete(0, "end")
+        self.check_input_fields()
+    
+    def update_registered_list(self):
+        """登録リストを更新して表示"""
+        # 既存のウィジェットを削除
+        for widget in self.registered_list_container.winfo_children():
+            widget.destroy()
+        
+        # 登録がない場合は非表示
+        if not self.registered_products:
+            self.registered_products_frame.pack_forget()
+            return
+        
+        # 登録リストを表示
+        self.registered_products_frame.pack(fill="x", padx=10, pady=(8, 8))  # 上部に8pxの余白を追加
+        
+        # 各登録項目を表示
+        for idx, item in enumerate(self.registered_products):
+            item_frame = ctk.CTkFrame(self.registered_list_container, fg_color="#F3F4F6", corner_radius=6)
+            item_frame.pack(fill="x", pady=(0, 4), padx=5)
+            
+            # 情報表示フレーム（一行で表示）
+            info_frame = ctk.CTkFrame(item_frame, fg_color="transparent")
+            info_frame.pack(side="left", fill="x", expand=True, padx=10, pady=6)
+            
+            # 一行で表示するフレーム
+            single_row = ctk.CTkFrame(info_frame, fg_color="transparent")
+            single_row.pack(fill="x")
+            
+            # 品番ラベル
+            product_label = ctk.CTkLabel(
+                single_row,
+                text="品番：",
+                font=ctk.CTkFont(family="Yu Gothic", size=14),
+                text_color="#374151",
+                anchor="w"
+            )
+            product_label.pack(side="left")
+            
+            # 品番の値（固定幅で位置を揃える）
+            product_value = ctk.CTkLabel(
+                single_row,
+                text=item['品番'],
+                font=ctk.CTkFont(family="Yu Gothic", size=14),
+                text_color="#374151",
+                width=150,  # 固定幅で位置を揃える
+                anchor="w"
+            )
+            product_value.pack(side="left")
+            
+            # 検査可能ロット数／日のラベル（位置が揃う）
+            lots_label = ctk.CTkLabel(
+                single_row,
+                text="検査可能ロット数／日：",
+                font=ctk.CTkFont(family="Yu Gothic", size=14),
+                text_color="#374151",
+                anchor="w"
+            )
+            lots_label.pack(side="left")
+            
+            # ロット数の値
+            lots_value = ctk.CTkLabel(
+                single_row,
+                text=f"{item['ロット数']}ロット",
+                font=ctk.CTkFont(family="Yu Gothic", size=14),
+                text_color="#374151",
+                anchor="w"
+            )
+            lots_value.pack(side="left")
+            
+            # 削除ボタン
+            delete_button = ctk.CTkButton(
+                item_frame,
+                text="登録削除",
+                command=lambda idx=idx: self.delete_registered_product(idx),
+                font=ctk.CTkFont(family="Yu Gothic", size=12),
+                width=100,
+                height=32,
+                fg_color="#EF4444",
+                hover_color="#DC2626",
+                text_color="white"
+            )
+            delete_button.pack(side="right", padx=10, pady=6)
+    
+    def delete_registered_product(self, index):
+        """登録された品番を削除"""
+        if 0 <= index < len(self.registered_products):
+            self.registered_products.pop(index)
+            self.update_registered_list()
+            # ファイルに保存
+            self.save_registered_products()
+    
+    def load_registered_products(self):
+        """登録済み品番リストをファイルから読み込む"""
+        try:
+            if self.registered_products_file.exists():
+                with open(self.registered_products_file, 'r', encoding='utf-8') as f:
+                    self.registered_products = json.load(f)
+                # UIが構築されている場合はリストを更新
+                if self.registered_list_container is not None:
+                    self.update_registered_list()
+                logger.info(f"登録済み品番リストを読み込みました: {len(self.registered_products)}件")
+        except Exception as e:
+            logger.error(f"登録済み品番リストの読み込みに失敗しました: {str(e)}")
+            self.registered_products = []
+    
+    def save_registered_products(self):
+        """登録済み品番リストをファイルに保存"""
+        try:
+            with open(self.registered_products_file, 'w', encoding='utf-8') as f:
+                json.dump(self.registered_products, f, ensure_ascii=False, indent=2)
+            logger.debug(f"登録済み品番リストを保存しました: {len(self.registered_products)}件")
+        except Exception as e:
+            logger.error(f"登録済み品番リストの保存に失敗しました: {str(e)}")
     
     def create_period_selector(self, parent):
         """期間選択UIの作成"""
@@ -1087,7 +1394,7 @@ class ModernDataExtractorUI:
     
     def create_progress_section(self, parent):
         """進捗セクションの作成"""
-        progress_frame = ctk.CTkFrame(parent, fg_color="#F8FAFC", corner_radius=12)
+        progress_frame = ctk.CTkFrame(parent, fg_color="#EFF6FF", corner_radius=12)
         progress_frame.pack(fill="x", pady=(0, 10), padx=20)
         
         # 進捗ラベル
@@ -1111,7 +1418,7 @@ class ModernDataExtractorUI:
     
     def create_data_display_section(self, parent):
         """データ表示セクションの作成"""
-        data_frame = ctk.CTkFrame(parent, fg_color="#F8FAFC", corner_radius=12)
+        data_frame = ctk.CTkFrame(parent, fg_color="#EFF6FF", corner_radius=12)
         data_frame.pack(fill="both", expand=True, pady=(0, 20), padx=20)
         
         # データ表示タイトル
@@ -1586,7 +1893,7 @@ class ModernDataExtractorUI:
             self.hide_current_table()
             
             # 抽出データセクションを作成
-            data_frame = ctk.CTkFrame(self.main_scroll_frame, fg_color="#F8FAFC", corner_radius=12)
+            data_frame = ctk.CTkFrame(self.main_scroll_frame, fg_color="#EFF6FF", corner_radius=12)
             data_frame.table_section = True
             data_frame.pack(fill="x", padx=20, pady=(10, 20))
             
@@ -1896,6 +2203,190 @@ class ModernDataExtractorUI:
             self.log_message(f"利用可能ロットの取得中にエラーが発生しました: {str(e)}")
             return pd.DataFrame()
     
+    def get_registered_products_lots(self, connection):
+        """登録済み品番のロットをt_現品票履歴から取得"""
+        try:
+            if not self.registered_products:
+                return pd.DataFrame()
+            
+            # 登録済み品番のリストを取得
+            registered_product_numbers = [item['品番'] for item in self.registered_products]
+            if not registered_product_numbers:
+                return pd.DataFrame()
+            
+            self.log_message(f"登録済み品番のロットを取得中: {len(registered_product_numbers)}件の品番")
+            
+            # テーブル構造を確認
+            columns_query = f"SELECT TOP 1 * FROM [t_現品票履歴]"
+            sample_df = pd.read_sql(columns_query, connection)
+            
+            if sample_df.empty:
+                self.log_message("t_現品票履歴テーブルにデータが見つかりません")
+                return pd.DataFrame()
+            
+            # 実際の列名を取得
+            actual_columns = sample_df.columns.tolist()
+            
+            # 利用可能な列のみでクエリを作成
+            available_columns = [col for col in actual_columns if col in [
+                "品番", "数量", "指示日", "号機", "現在工程番号", "現在工程名", 
+                "現在工程二次処理", "生産ロットID"
+            ]]
+            
+            if not available_columns:
+                available_columns = actual_columns
+            
+            columns_str = ", ".join([f"[{col}]" for col in available_columns])
+            
+            # 品番のリストをSQL用の文字列に変換
+            product_numbers_str = "', '".join([str(pn) for pn in registered_product_numbers])
+            
+            # WHERE条件を構築
+            where_conditions = [f"品番 IN ('{product_numbers_str}')"]
+            
+            # 現在工程名が存在する場合のみ条件を追加
+            if "現在工程名" in available_columns:
+                where_conditions.append("現在工程名 NOT LIKE '%完了%'")
+                where_conditions.append("現在工程名 NOT LIKE '%梱包%'")
+                
+                # 検査対象.csvのキーワードでフィルタリング
+                if self.inspection_target_keywords:
+                    keyword_conditions = []
+                    for keyword in self.inspection_target_keywords:
+                        escaped_keyword = keyword.replace("'", "''").replace("%", "[%]").replace("_", "[_]")
+                        keyword_conditions.append(f"現在工程名 LIKE '%{escaped_keyword}%'")
+                    
+                    if keyword_conditions:
+                        keyword_filter = "(" + " OR ".join(keyword_conditions) + ")"
+                        where_conditions.append(keyword_filter)
+            
+            where_clause = " AND ".join(where_conditions)
+            
+            # ORDER BY条件（指示日順、生産日の古い順）
+            order_conditions = ["品番"]
+            if "指示日" in available_columns:
+                order_conditions.append("指示日 ASC")
+            elif "号機" in available_columns:
+                order_conditions.append("号機 ASC")
+            
+            order_clause = ", ".join(order_conditions)
+            
+            # クエリを実行
+            lots_query = f"""
+            SELECT {columns_str}
+            FROM [t_現品票履歴]
+            WHERE {where_clause}
+            ORDER BY {order_clause}
+            """
+            
+            lots_df = pd.read_sql(lots_query, connection)
+            
+            if lots_df.empty:
+                self.log_message("登録済み品番のロットが見つかりませんでした")
+                return pd.DataFrame()
+            
+            self.log_message(f"登録済み品番のロットを取得しました: {len(lots_df)}件")
+            
+            return lots_df
+            
+        except Exception as e:
+            self.log_message(f"登録済み品番のロット取得中にエラーが発生しました: {str(e)}")
+            return pd.DataFrame()
+    
+    def assign_registered_products_lots(self, connection, main_df, assignment_df):
+        """登録済み品番のロットを割り当て"""
+        try:
+            if not self.registered_products:
+                return assignment_df
+            
+            # 登録済み品番のロットを取得
+            registered_lots_df = self.get_registered_products_lots(connection)
+            
+            if registered_lots_df.empty:
+                return assignment_df
+            
+            # 登録済み品番ごとに処理
+            additional_assignments = []
+            
+            for registered_item in self.registered_products:
+                product_number = registered_item['品番']
+                max_lots_per_day = int(registered_item['ロット数'])
+                
+                # 該当品番のロットを取得
+                product_lots = registered_lots_df[registered_lots_df['品番'] == product_number].copy()
+                
+                if product_lots.empty:
+                    continue
+                
+                # 指示日順でソート（生産日の古い順）
+                if '指示日' in product_lots.columns:
+                    product_lots = product_lots.copy()
+                    product_lots['_指示日_ソート用'] = product_lots['指示日'].apply(
+                        lambda x: str(x) if pd.notna(x) else ''
+                    )
+                    product_lots = product_lots.sort_values('_指示日_ソート用', na_position='last')
+                    product_lots = product_lots.drop(columns=['_指示日_ソート用'])
+                
+                # 検査可能ロット数／日を考慮してロットを割り当て
+                assigned_count = 0
+                lot_cols = {col: idx for idx, col in enumerate(product_lots.columns)}
+                
+                for lot in product_lots.itertuples(index=False):
+                    if assigned_count >= max_lots_per_day:
+                        break
+                    
+                    # main_dfから該当品番の情報を取得
+                    product_in_main = main_df[main_df['品番'] == product_number]
+                    
+                    if not product_in_main.empty:
+                        main_row = product_in_main.iloc[0]
+                    else:
+                        # main_dfに存在しない場合は、ロットの情報のみを使用
+                        main_row = None
+                    
+                    lot_quantity = int(lot[lot_cols['数量']]) if pd.notna(lot[lot_cols['数量']]) else 0
+                    
+                    # 出荷予定日は「先行検査」とする
+                    shipping_date = "先行検査"
+                    
+                    assignment_result = {
+                        '出荷予定日': shipping_date,
+                        '品番': product_number,
+                        '品名': main_row.get('品名', '') if main_row is not None else '',
+                        '客先': main_row.get('客先', '') if main_row is not None else '',
+                        '出荷数': int(main_row.get('出荷数', 0)) if main_row is not None else 0,
+                        '在庫数': int(main_row.get('在庫数', 0)) if main_row is not None else 0,
+                        '在梱包数': int(main_row.get('梱包・完了', 0)) if main_row is not None else 0,
+                        '不足数': 0,  # 登録済み品番は不足数0として扱う
+                        'ロット数量': lot_quantity,
+                        '指示日': lot[lot_cols.get('指示日', -1)] if '指示日' in lot_cols and pd.notna(lot[lot_cols['指示日']]) else '',
+                        '号機': lot[lot_cols.get('号機', -1)] if '号機' in lot_cols and pd.notna(lot[lot_cols['号機']]) else '',
+                        '現在工程番号': lot[lot_cols.get('現在工程番号', -1)] if '現在工程番号' in lot_cols and pd.notna(lot[lot_cols['現在工程番号']]) else '',
+                        '現在工程名': lot[lot_cols.get('現在工程名', -1)] if '現在工程名' in lot_cols and pd.notna(lot[lot_cols['現在工程名']]) else '',
+                        '現在工程二次処理': lot[lot_cols.get('現在工程二次処理', -1)] if '現在工程二次処理' in lot_cols and pd.notna(lot[lot_cols['現在工程二次処理']]) else '',
+                        '生産ロットID': lot[lot_cols.get('生産ロットID', -1)] if '生産ロットID' in lot_cols and pd.notna(lot[lot_cols['生産ロットID']]) else ''
+                    }
+                    
+                    additional_assignments.append(assignment_result)
+                    assigned_count += 1
+                
+                self.log_message(f"登録済み品番 {product_number}: {assigned_count}ロットを割り当てました（最大: {max_lots_per_day}ロット/日）")
+            
+            # assignment_dfに追加
+            if additional_assignments:
+                registered_df = pd.DataFrame(additional_assignments)
+                if assignment_df.empty:
+                    assignment_df = registered_df
+                else:
+                    assignment_df = pd.concat([assignment_df, registered_df], ignore_index=True)
+                self.log_message(f"登録済み品番のロット {len(registered_df)}件を割り当てました")
+            
+            return assignment_df
+            
+        except Exception as e:
+            self.log_message(f"登録済み品番のロット割り当て中にエラーが発生しました: {str(e)}")
+            return assignment_df
+    
     def assign_lots_to_shortage(self, shortage_df, lots_df):
         """不足数に対してロットを割り当て"""
         try:
@@ -2137,6 +2628,11 @@ class ModernDataExtractorUI:
             # ロット割り当てを実行
             self.update_progress(start_progress + 0.15, "ロットを割り当て中...")
             assignment_df = self.assign_lots_to_shortage(shortage_df, lots_df)
+            
+            # 登録済み品番のロットを割り当て（追加）
+            if self.registered_products:
+                self.update_progress(start_progress + 0.17, "登録済み品番のロットを割り当て中...")
+                assignment_df = self.assign_registered_products_lots(connection, main_df, assignment_df)
             
             # 洗浄二次処理依頼のロットを追加（不足数がマイナスの品番と一致するものも含む）
             if not cleaning_lots_df.empty:
@@ -2413,7 +2909,7 @@ class ModernDataExtractorUI:
         """ロット割り当て結果セクションを作成"""
         try:
             # ロット割り当て結果フレーム
-            lot_frame = ctk.CTkFrame(self.main_scroll_frame, fg_color="#F8FAFC", corner_radius=12)
+            lot_frame = ctk.CTkFrame(self.main_scroll_frame, fg_color="#EFF6FF", corner_radius=12)
             lot_frame.table_section = True
             lot_frame.pack(fill="x", padx=20, pady=(10, 20))
             
@@ -2963,7 +3459,7 @@ class ModernDataExtractorUI:
             self.hide_current_table()
             
             # 検査員割振りセクションを作成
-            inspector_frame = ctk.CTkFrame(self.main_scroll_frame, fg_color="#F8FAFC", corner_radius=12)
+            inspector_frame = ctk.CTkFrame(self.main_scroll_frame, fg_color="#EFF6FF", corner_radius=12)
             inspector_frame.table_section = True
             inspector_frame.pack(fill="x", padx=20, pady=(10, 20))
             
@@ -3217,7 +3713,7 @@ class ModernDataExtractorUI:
                 return
             
             # グラフフレームを作成
-            self.graph_frame = ctk.CTkFrame(self.main_scroll_frame, fg_color="#F8FAFC", corner_radius=12)
+            self.graph_frame = ctk.CTkFrame(self.main_scroll_frame, fg_color="#EFF6FF", corner_radius=12)
             self.graph_frame.pack(fill="x", padx=20, pady=(0, 20))
             
             # グラフタイトル
