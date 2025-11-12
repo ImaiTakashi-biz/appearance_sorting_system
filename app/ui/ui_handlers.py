@@ -1617,6 +1617,51 @@ class ModernDataExtractorUI:
             self.log_message(f"データ抽出を開始します")
             self.log_message(f"抽出期間: {start_date} ～ {end_date}")
             
+            # 【追加】休暇予定を取得（データ抽出開始日付を使用）
+            self.update_progress(0.01, "休暇予定を取得中...")
+            from app.services.vacation_schedule_service import load_vacation_schedule, get_vacation_for_date
+            from datetime import date as date_type
+            
+            # データ抽出開始日付を取得
+            extraction_date = start_date if isinstance(start_date, date_type) else pd.to_datetime(start_date).date()
+            
+            vacation_sheets_url = os.getenv("GOOGLE_SHEETS_URL_VACATION")
+            credentials_path = os.getenv("GOOGLE_SHEETS_CREDENTIALS_PATH")
+            
+            vacation_data_for_date = {}
+            if vacation_sheets_url and credentials_path:
+                try:
+                    # 月全体の休暇予定を読み込む
+                    vacation_data = load_vacation_schedule(
+                        sheets_url=vacation_sheets_url,
+                        credentials_path=credentials_path,
+                        year=extraction_date.year,
+                        month=extraction_date.month
+                    )
+                    
+                    # 対象日の休暇情報を取得
+                    vacation_data_for_date = get_vacation_for_date(vacation_data, extraction_date)
+                    
+                    self.log_message(f"休暇予定を取得しました: {len(vacation_data_for_date)}名")
+                except Exception as e:
+                    self.log_message(f"警告: 休暇予定の取得に失敗しました: {str(e)}")
+            else:
+                self.log_message("休暇予定スプレッドシートの設定がありません")
+            
+            # 検査員マスタを読み込む（休暇情報のマッピング用）
+            inspector_master_df = None
+            try:
+                inspector_master_df = self.load_inspector_master()
+            except Exception as e:
+                self.log_message(f"警告: 検査員マスタの読み込みに失敗しました: {str(e)}")
+            
+            # 検査員割当てマネージャーに休暇情報を設定
+            self.inspector_manager.set_vacation_data(
+                vacation_data_for_date, 
+                extraction_date,
+                inspector_master_df=inspector_master_df
+            )
+            
             # データベース接続
             self.update_progress(0.02, "データベースに接続中...")
             connection_string = self.config.get_connection_string()

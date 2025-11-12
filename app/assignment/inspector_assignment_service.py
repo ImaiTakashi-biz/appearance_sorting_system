@@ -80,6 +80,13 @@ class InspectorAssignmentManager:
         # このデータ構造により、理想的な割当て（各ロットに異なる検査員を割り当て）を実現
         # 変更時は慎重に検討すること（再現性の高い割当てロジックの基盤）
         self.same_day_cleaning_inspectors = {}
+        # 【追加】休暇情報を保持
+        self.vacation_data = {}  # {検査員名: 休暇情報辞書}
+        self.vacation_date = None  # 休暇情報の対象日付
+        self.inspector_name_to_vacation = {}  # {検査員名: 休暇情報辞書} - 名前マッピング用
+        # 【追加】swap実施率追跡用
+        self.swap_count = 0  # swapが実行された回数
+        self.violation_count = 0  # 総違反件数（swap対象となった違反の数）
     
     def log_message(self, message, debug=False, level='info'):
         """
@@ -1654,14 +1661,31 @@ class InspectorAssignmentManager:
                                     self.logged_warnings.add(warning_key)
                                 continue
                             
+                            inspector_name = inspector_data['#氏名']
+                            
+                            # 【追加】休暇情報をチェック（終日休みの場合は除外）
+                            vacation_info = self.get_vacation_info(inspector_name)
+                            if vacation_info:
+                                code = vacation_info.get("code", "")
+                                work_status = vacation_info.get("work_status", "")
+                                
+                                # 終日休みの場合は除外
+                                if code in ["休", "出", "当"]:
+                                    interpretation = vacation_info.get("interpretation", "")
+                                    self.log_message(
+                                        f"検査員 '{inspector_name}' は終日休暇のため候補から除外 "
+                                        f"(休暇コード: {code}, 解釈: {interpretation})"
+                                    )
+                                    continue
+                            
                             available_inspectors.append({
-                                '氏名': inspector_data['#氏名'],
+                                '氏名': inspector_name,
                                 'スキル': int(str(skill_value).strip()),
                                 '就業時間': inspector_data['開始時刻'],
                                 'コード': inspector_code,
                                 'is_new_team': False  # 通常の検査員
                             })
-                            self.log_message(f"検査員 '{inspector_data['#氏名']}' (コード: {inspector_code}, スキル: {skill_value}) を追加")
+                            self.log_message(f"検査員 '{inspector_name}' (コード: {inspector_code}, スキル: {skill_value}) を追加")
                         else:
                             self.log_message(f"警告: 検査員コード '{inspector_code}' が検査員マスタに見つかりません")
                             # 検査員マスタの全コードを表示
@@ -1732,34 +1756,39 @@ class InspectorAssignmentManager:
                 start_time = row_tuple[start_time_col_idx + 1]  # itertuplesはインデックスを含むため+1
                 end_time = row_tuple[end_time_col_idx + 1]
                 
+                inspector_name = row_tuple[name_col_idx + 1]
+                
+                # 【追加】休暇情報をチェック（終日休みの場合は除外）
+                vacation_info = self.get_vacation_info(inspector_name)
+                if vacation_info:
+                    code = vacation_info.get("code", "")
+                    work_status = vacation_info.get("work_status", "")
+                    
+                    # 終日休みの場合は除外
+                    if code in ["休", "出", "当"]:
+                        interpretation = vacation_info.get("interpretation", "")
+                        warning_key = (f"終日休暇_新製品チーム", inspector_name)
+                        if warning_key not in self.logged_warnings:
+                            self.log_message(
+                                f"警告: 新製品チームメンバー '{inspector_name}' は終日休暇のため候補から除外 "
+                                f"(休暇コード: {code}, 解釈: {interpretation})",
+                                level='warning'
+                            )
+                            self.logged_warnings.add(warning_key)
+                        continue
+                
                 if pd.notna(start_time) and pd.notna(end_time):
                     try:
-                        # 時刻文字列を時間に変換
-                        if isinstance(start_time, str):
-                            start_hour = float(start_time.split(':')[0]) + float(start_time.split(':')[1]) / 60.0
-                        else:
-                            start_hour = start_time.hour + start_time.minute / 60.0
-                            
-                        if isinstance(end_time, str):
-                            end_hour = float(end_time.split(':')[0]) + float(end_time.split(':')[1]) / 60.0
-                        else:
-                            end_hour = end_time.hour + end_time.minute / 60.0
-                        
-                        # 基本勤務時間を計算
-                        max_daily_hours = end_hour - start_hour
-                        
-                        # 休憩時間（12:15～13:00）を含む場合は1時間を差し引く
-                        if start_hour <= 12.25 and end_hour >= 13.0:
-                            max_daily_hours -= 1.0
+                        # 実質勤務時間を取得（休暇情報を考慮）
+                        max_daily_hours = self.get_inspector_max_hours(row_tuple[id_col_idx + 1], inspector_master_df)
                         
                         # 勤務時間が0以下の場合は候補から除外
                         if max_daily_hours <= 0:
                             # 重複警告を防ぐ
-                            inspector_name = row_tuple[name_col_idx + 1]
                             warning_key = (f"勤務時間0時間_新製品チーム", inspector_name)
                             if warning_key not in self.logged_warnings:
                                 self.log_message(
-                                    f"警告: 新製品チームメンバー '{inspector_name}' の勤務時間が0時間以下です "
+                                    f"警告: 新製品チームメンバー '{inspector_name}' の調整後勤務時間が0時間以下です "
                                     f"(開始: {start_time}, 終了: {end_time}) - 候補から除外",
                                     level='warning'
                                 )
@@ -2360,74 +2389,41 @@ class InspectorAssignmentManager:
 
             for inspector in available_inspectors:
                 inspector_code = inspector['コード']
+                inspector_name = inspector['氏名']
                 inspector_entry = inspector.copy()
+
+                # 【追加】休暇情報をチェック（終日休みの場合は除外）
+                vacation_info = self.get_vacation_info(inspector_name)
+                if vacation_info:
+                    code = vacation_info.get("code", "")
+                    work_status = vacation_info.get("work_status", "")
+                    
+                    # 終日休みの場合は除外
+                    if code in ["休", "出", "当"]:
+                        interpretation = vacation_info.get("interpretation", "")
+                        self.log_message(
+                            f"検査員 '{inspector_name}' は終日休暇のため除外 "
+                            f"(休暇コード: {code}, 解釈: {interpretation})"
+                        )
+                        continue
 
                 # 現在の日付での累積勤務時間を取得
                 daily_hours = self.inspector_daily_assignments.get(inspector_code, {}).get(current_date, 0.0)
                 additional_hours = divided_time
 
-                # 勤務時間上限を算出（検査員マスタベース）
-                inspector_info = inspector_master_df[inspector_master_df['#ID'] == inspector_code]
-                max_daily_hours = 8.0
-                if not inspector_info.empty:
-                    inspector_data = inspector_info.iloc[0]
-                    start_time = inspector_data['開始時刻']
-                    end_time = inspector_data['終了時刻']
-                    if pd.notna(start_time) and pd.notna(end_time):
-                        try:
-                            if isinstance(start_time, str):
-                                start_hour = float(start_time.split(':')[0]) + float(start_time.split(':')[1]) / 60.0
-                            else:
-                                start_hour = start_time.hour + start_time.minute / 60.0
-                            if isinstance(end_time, str):
-                                end_hour = float(end_time.split(':')[0]) + float(end_time.split(':')[1]) / 60.0
-                            else:
-                                end_hour = end_time.hour + end_time.minute / 60.0
-                            max_daily_hours = end_hour - start_hour
-                            if start_hour <= 12.25 and end_hour >= 13.0:
-                                max_daily_hours -= 1.0
-                                self.log_message(
-                                    f"検査員 '{inspector['氏名']}' は休憩時間を含むため、勤務時間から1時間を差し引きます "
-                                    f"(調整後: {max_daily_hours:.1f}h)"
-                                )
-                            if max_daily_hours <= 0:
-                                # 重複警告を防ぐ
-                                warning_key = (f"調整後勤務時間0時間", inspector['氏名'])
-                                if warning_key not in self.logged_warnings:
-                                    self.log_message(
-                                        f"警告: 検査員 '{inspector['氏名']}' の調整後勤務時間が0時間以下です - 除外します",
-                                        level='warning'
-                                    )
-                                    self.logged_warnings.add(warning_key)
-                                continue
-                        except Exception as exc:
-                            # 重複警告を防ぐ
-                            warning_key = (f"勤務時間計算失敗_デフォルト", inspector['氏名'])
-                            if warning_key not in self.logged_warnings:
-                                self.log_message(
-                                    f"警告: 検査員 '{inspector['氏名']}' の勤務時間計算に失敗: {exc} - デフォルト8時間を使用",
-                                    level='warning'
-                                )
-                                self.logged_warnings.add(warning_key)
-                    else:
-                        # 重複警告を防ぐ
-                        warning_key = (f"時刻情報不正_デフォルト", inspector['氏名'])
-                        if warning_key not in self.logged_warnings:
-                            self.log_message(
-                                f"警告: 検査員 '{inspector['氏名']}' の時刻情報が不正です "
-                                f"(開始: {start_time}, 終了: {end_time}) - デフォルト8時間を使用",
-                                level='warning'
-                            )
-                            self.logged_warnings.add(warning_key)
-                else:
-                    # 重複警告を防ぐ
-                    warning_key = (f"マスタに見つからない", inspector['氏名'])
+                # 勤務時間上限を算出（検査員マスタベース、休暇情報を考慮）
+                max_daily_hours = self.get_inspector_max_hours(inspector_code, inspector_master_df)
+                
+                # 実質勤務時間が0以下の場合は除外
+                if max_daily_hours <= 0:
+                    warning_key = (f"調整後勤務時間0時間", inspector_name)
                     if warning_key not in self.logged_warnings:
                         self.log_message(
-                            f"警告: 検査員 '{inspector['氏名']}' が検査員マスタに見つかりません - デフォルト8時間を使用",
+                            f"警告: 検査員 '{inspector_name}' の調整後勤務時間が0時間以下です - 除外します",
                             level='warning'
                         )
                         self.logged_warnings.add(warning_key)
+                    continue
 
                 # 改善ポイント: 定数を使用
                 # 勤務時間チェック（WORK_HOURS_BUFFERの余裕を確保）
@@ -2488,27 +2484,111 @@ class InspectorAssignmentManager:
             self.log_message(f"検査員フィルタリング中にエラーが発生しました: {str(e)}")
             return available_inspectors
     
+    def set_vacation_data(self, vacation_data: dict, target_date, inspector_master_df=None):
+        """
+        休暇情報を設定する
+        
+        Args:
+            vacation_data: {従業員名: 休暇情報辞書} の形式の辞書
+            target_date: 対象日付
+            inspector_master_df: 検査員マスタDataFrame（別名マッピング用）
+        """
+        self.vacation_data = vacation_data
+        self.vacation_date = target_date
+        
+        # 検査員マスタの「休暇予定表の別名」列を考慮してマッピングを作成
+        self.inspector_name_to_vacation = {}
+        
+        if inspector_master_df is not None and '#氏名' in inspector_master_df.columns:
+            # 別名列がある場合はそれを使用
+            if '休暇予定表の別名' in inspector_master_df.columns:
+                for _, row in inspector_master_df.iterrows():
+                    inspector_name = row['#氏名']
+                    alias_name = row.get('休暇予定表の別名', '')
+                    
+                    # 別名が設定されている場合は別名で検索、なければ氏名で検索
+                    vacation_name = alias_name.strip() if pd.notna(alias_name) and alias_name.strip() else inspector_name
+                    
+                    if vacation_name in vacation_data:
+                        self.inspector_name_to_vacation[inspector_name] = vacation_data[vacation_name]
+                        self.log_message(f"検査員 '{inspector_name}' の休暇情報をマッピング（別名: '{vacation_name}'）")
+                    elif inspector_name in vacation_data:
+                        self.inspector_name_to_vacation[inspector_name] = vacation_data[inspector_name]
+            else:
+                # 別名列がない場合は氏名で直接マッピング
+                for inspector_name in inspector_master_df['#氏名']:
+                    if inspector_name in vacation_data:
+                        self.inspector_name_to_vacation[inspector_name] = vacation_data[inspector_name]
+        else:
+            # 検査員マスタがない場合は直接マッピング
+            self.inspector_name_to_vacation = vacation_data.copy()
+        
+        self.log_message(f"休暇情報を設定しました: {len(self.inspector_name_to_vacation)}名、対象日: {target_date}")
+    
+    def get_vacation_info(self, inspector_name: str) -> dict:
+        """
+        検査員の休暇情報を取得する
+        
+        Args:
+            inspector_name: 検査員名
+        
+        Returns:
+            dict: 休暇情報辞書（休暇でない場合はNone）
+        """
+        return self.inspector_name_to_vacation.get(inspector_name)
+    
+    def is_inspector_on_vacation(self, inspector_name: str) -> bool:
+        """
+        検査員が休暇中かどうかを判定する
+        
+        Args:
+            inspector_name: 検査員名
+        
+        Returns:
+            bool: 休暇中の場合はTrue
+        """
+        vacation_info = self.get_vacation_info(inspector_name)
+        if not vacation_info:
+            return False
+        
+        work_status = vacation_info.get("work_status")
+        return work_status == "休み"
+    
     def get_inspector_max_hours(self, inspector_code, inspector_master_df):
-        """検査員の最大勤務時間を取得（検査員マスタから）"""
+        """
+        検査員の最大勤務時間を取得（検査員マスタから、休暇情報を考慮）
+        
+        Args:
+            inspector_code: 検査員コード
+            inspector_master_df: 検査員マスタDataFrame
+        
+        Returns:
+            float: 実質的な最大勤務時間（時間単位）
+        """
         try:
             inspector_info = inspector_master_df[inspector_master_df['#ID'] == inspector_code]
             if not inspector_info.empty:
                 inspector_data = inspector_info.iloc[0]
                 start_time = inspector_data['開始時刻']
                 end_time = inspector_data['終了時刻']
+                inspector_name = inspector_data['#氏名']
                 
                 if pd.notna(start_time) and pd.notna(end_time):
                     try:
                         # 時刻文字列を時間に変換
                         if isinstance(start_time, str):
                             start_hour = float(start_time.split(':')[0]) + float(start_time.split(':')[1]) / 60.0
+                            start_time_str = start_time
                         else:
                             start_hour = start_time.hour + start_time.minute / 60.0
+                            start_time_str = f"{start_time.hour:02d}:{start_time.minute:02d}"
                             
                         if isinstance(end_time, str):
                             end_hour = float(end_time.split(':')[0]) + float(end_time.split(':')[1]) / 60.0
+                            end_time_str = end_time
                         else:
                             end_hour = end_time.hour + end_time.minute / 60.0
+                            end_time_str = f"{end_time.hour:02d}:{end_time.minute:02d}"
                         
                         # 基本勤務時間を計算
                         max_daily_hours = end_hour - start_hour
@@ -2517,15 +2597,37 @@ class InspectorAssignmentManager:
                         if start_hour <= 12.25 and end_hour >= 13.0:
                             max_daily_hours -= 1.0
                         
-                        return max_daily_hours
-                    except:
-                        return 8.0  # デフォルト
+                        # 【追加】休暇情報を考慮して不在時間を差し引く
+                        vacation_info = self.get_vacation_info(inspector_name)
+                        if vacation_info:
+                            from app.services.vacation_schedule_service import calculate_vacation_absence_hours
+                            absence_hours = calculate_vacation_absence_hours(
+                                vacation_info, start_time_str, end_time_str
+                            )
+                            max_daily_hours -= absence_hours
+                            
+                            if absence_hours > 0:
+                                code = vacation_info.get("code", "")
+                                interpretation = vacation_info.get("interpretation", "")
+                                self.log_message(
+                                    f"検査員 '{inspector_name}' の休暇を考慮: "
+                                    f"基本勤務時間 {max_daily_hours + absence_hours:.1f}h - "
+                                    f"不在時間 {absence_hours:.1f}h = "
+                                    f"実質勤務時間 {max_daily_hours:.1f}h "
+                                    f"(休暇コード: {code}, {interpretation})"
+                                )
+                        
+                        return max(0.0, max_daily_hours)
+                    except Exception as e:
+                        self.log_message(f"勤務時間計算エラー ({inspector_name}): {str(e)}", level='warning')
+                        return 8.0
                 else:
-                    return 8.0  # デフォルト
+                    return 8.0
             else:
-                return 8.0  # デフォルト
-        except:
-            return 8.0  # デフォルト
+                return 8.0
+        except Exception as e:
+            self.log_message(f"最大勤務時間取得エラー: {str(e)}", level='warning')
+            return 8.0
 
     def print_assignment_statistics(self, inspector_master_df=None):
         """割り当て統計を表示"""
@@ -2653,8 +2755,11 @@ class InspectorAssignmentManager:
             
             # 4. 偏り是正フェーズの swap 実施率
             # (fix_single_violationでswapが実行された件数 / 総違反件数)
-            # 注: 現在の実装ではswapの追跡がないため、簡易的に実装
-            self.log_message("【偏り是正フェーズの swap 実施率】: 実装予定（swap追跡機能追加が必要）")
+            if self.violation_count > 0:
+                swap_rate = (self.swap_count / self.violation_count) * 100
+                self.log_message(f"【偏り是正フェーズの swap 実施率】: {self.swap_count}/{self.violation_count} = {swap_rate:.1f}%")
+            else:
+                self.log_message("【偏り是正フェーズの swap 実施率】: 違反件数が0件のため計算不可")
             
             # 5. 各検査員の勤務時間平均・分散・変動係数（CV）
             if inspector_master_df is not None and self.inspector_daily_assignments:
@@ -3890,6 +3995,9 @@ class InspectorAssignmentManager:
                                 
                                 # 最も総勤務時間が少ない候補を選択
                                 if replacement_candidates:
+                                    # 違反件数をカウント
+                                    self.violation_count += 1
+                                    
                                     replacement_candidates.sort(key=lambda x: x[0])
                                     _, new_code, replacement_inspector = replacement_candidates[0]
                                     
@@ -3968,6 +4076,9 @@ class InspectorAssignmentManager:
                                         
                                         # チーム情報を更新
                                         self.update_team_info(result_df_sorted, lot_index, inspector_master_df, show_skill_values)
+                                        
+                                        # swap成功時にカウント
+                                        self.swap_count += 1
                                         
                                         reassignment_count += 1
                                         self.log_message(
@@ -5344,6 +5455,9 @@ class InspectorAssignmentManager:
     def fix_single_violation(self, index, inspector_code, inspector_name, divided_time, product_number, inspection_time, inspector_col_num, result_df, inspector_master_df, skill_master_df, inspector_max_hours, current_date, show_skill_values):
         """単一の違反（勤務時間超過または同一品番4時間超過）を是正"""
         try:
+            # 違反件数をカウント
+            self.violation_count += 1
+            
             row = result_df.iloc[index]
             
             # 新規品かどうかを判定（スキルマスタに登録がない場合）
@@ -5495,6 +5609,9 @@ class InspectorAssignmentManager:
                             if product_number in self.inspector_product_hours[old_code]:
                                 self.inspector_product_hours[old_code][product_number] = max(0.0, self.inspector_product_hours[old_code][product_number] - divided_time)
                         self.relaxed_product_limit_assignments.discard((old_code, product_number))
+                        
+                        # swap成功時にカウント
+                        self.swap_count += 1
                         
                         # 新しい検査員に時間を追加
                         new_code = replacement_inspector['コード']
