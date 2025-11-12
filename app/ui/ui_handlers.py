@@ -1960,26 +1960,37 @@ class ModernDataExtractorUI:
             # データの挿入（最初の100件まで）
             display_limit = min(100, len(df))
             row_index = 0
-            for index, row in df.head(display_limit).iterrows():
+            # 列名から列インデックスへのマッピングを作成（高速化：itertuples()を使用）
+            col_idx_map = {col: df.head(display_limit).columns.get_loc(col) for col in columns}
+            
+            for row_tuple in df.head(display_limit).itertuples(index=True):
+                index = row_tuple[0]  # インデックス
                 values = []
                 item_id = None
                 for col in columns:
-                    if pd.notna(row[col]):
+                    col_idx = col_idx_map[col]
+                    # itertuples(index=True)では、row_tuple[0]がインデックス、row_tuple[1]以降が列の値
+                    # 列インデックスは0始まりなので、col_idx + 1でアクセス
+                    if col_idx + 1 < len(row_tuple):
+                        col_value = row_tuple[col_idx + 1]
+                    else:
+                        col_value = None
+                    if pd.notna(col_value):
                         # 出荷予定日の場合は日付形式で表示
                         if col == '出荷予定日':
                             try:
-                                date_value = pd.to_datetime(row[col])
+                                date_value = pd.to_datetime(col_value)
                                 values.append(date_value.strftime('%Y/%m/%d'))
                             except:
-                                values.append(str(row[col]))
+                                values.append(str(col_value))
                         # 数値列は整数で表示
                         elif col in ['出荷数', '在庫数', '梱包・完了', '不足数']:
                             try:
-                                values.append(str(int(row[col])))
+                                values.append(str(int(col_value)))
                             except:
-                                values.append(str(row[col]))
+                                values.append(str(col_value))
                         else:
-                            values.append(str(row[col]))
+                            values.append(str(col_value))
                     else:
                         values.append("")
                 
@@ -1988,14 +1999,17 @@ class ModernDataExtractorUI:
                 
                 # 不足数がマイナスの場合は警告タグを追加（交互色は適用しない）
                 is_negative = False
-                if '不足数' in columns and pd.notna(row['不足数']):
-                    try:
-                        shortage = float(row['不足数'])
-                        if shortage < 0:
-                            tags.append("negative")
-                            is_negative = True
-                    except:
-                        pass
+                if '不足数' in columns:
+                    shortage_idx = col_idx_map['不足数']
+                    shortage_value = row_tuple[shortage_idx + 1] if shortage_idx < len(row_tuple) - 1 else None
+                    if pd.notna(shortage_value):
+                        try:
+                            shortage = float(shortage_value)
+                            if shortage < 0:
+                                tags.append("negative")
+                                is_negative = True
+                        except:
+                            pass
                 
                 # 不足数がマイナスでない場合のみ交互色を適用
                 if not is_negative:
@@ -2680,7 +2694,13 @@ class ModernDataExtractorUI:
                     
                     # これらのロットを独立したロットとして追加
                     additional_assignments = []
-                    for _, lot_row in all_additional_cleaning_lots.iterrows():
+                    # 列名から列インデックスへのマッピングを作成（高速化：itertuples()を使用）
+                    lot_col_idx_map = {col: all_additional_cleaning_lots.columns.get_loc(col) for col in all_additional_cleaning_lots.columns}
+                    
+                    for row_tuple in all_additional_cleaning_lots.itertuples(index=True):
+                        lot_row_idx = row_tuple[0]  # インデックス
+                        lot_row = all_additional_cleaning_lots.loc[lot_row_idx]  # Seriesとして扱うために元の行を取得
+                        
                         # 品番がmain_dfに存在するか確認
                         product_in_main = main_df[main_df['品番'] == lot_row['品番']]
                         if not product_in_main.empty:
@@ -2870,11 +2890,20 @@ class ModernDataExtractorUI:
             current_product = None
             current_shortage = 0
             
-            for index, row in assignment_df.iterrows():
-                if current_product != row['品番']:
+            # 列名から列インデックスへのマッピングを作成（高速化：itertuples()を使用）
+            product_col_idx = assignment_df.columns.get_loc('品番')
+            shortage_col_idx = assignment_df.columns.get_loc('不足数')
+            lot_qty_col_idx = assignment_df.columns.get_loc('ロット数量')
+            
+            for row_tuple in assignment_df.itertuples(index=True):
+                index = row_tuple[0]  # インデックス
+                product_number = row_tuple[product_col_idx + 1]  # itertuplesはインデックスを含むため+1
+                shortage_value = row_tuple[shortage_col_idx + 1] if shortage_col_idx < len(row_tuple) - 1 else 0
+                
+                if current_product != product_number:
                     # 新しい品番の場合は初期不足数を設定
-                    current_shortage = row['不足数']
-                    current_product = row['品番']
+                    current_shortage = shortage_value
+                    current_product = product_number
                 else:
                     # 同一品番の場合は前のロット数量を加算して不足数を更新
                     previous_lot_quantity = assignment_df.iloc[index-1]['ロット数量']
@@ -2987,23 +3016,34 @@ class ModernDataExtractorUI:
             
             # データの挿入
             row_index = 0
-            for index, row in assignment_df.iterrows():
+            # 列名から列インデックスへのマッピングを作成（高速化：itertuples()を使用）
+            lot_col_idx_map = {col: assignment_df.columns.get_loc(col) for col in lot_columns}
+            
+            for row_tuple in assignment_df.itertuples(index=True):
+                index = row_tuple[0]  # インデックス
                 values = []
                 for col in lot_columns:
-                    if pd.notna(row[col]):
+                    col_idx = lot_col_idx_map[col]
+                    # itertuples(index=True)では、row_tuple[0]がインデックス、row_tuple[1]以降が列の値
+                    # 列インデックスは0始まりなので、col_idx + 1でアクセス
+                    if col_idx + 1 < len(row_tuple):
+                        col_value = row_tuple[col_idx + 1]
+                    else:
+                        col_value = None
+                    if pd.notna(col_value):
                         if col == '出荷予定日' or col == '指示日':
                             try:
-                                date_value = pd.to_datetime(row[col])
+                                date_value = pd.to_datetime(col_value)
                                 values.append(date_value.strftime('%Y/%m/%d'))
                             except:
-                                values.append(str(row[col]))
+                                values.append(str(col_value))
                         elif col in lot_numeric_columns:
                             try:
-                                values.append(str(int(row[col])))
+                                values.append(str(int(col_value)))
                             except:
-                                values.append(str(row[col]))
+                                values.append(str(col_value))
                         else:
-                            values.append(str(row[col]))
+                            values.append(str(col_value))
                     else:
                         values.append("")
                 
@@ -3552,7 +3592,12 @@ class ModernDataExtractorUI:
             
             # データの挿入
             row_index = 0
-            for _, row in inspector_df.iterrows():
+            # 列名から列インデックスへのマッピングを作成（高速化：itertuples()を使用）
+            inspector_col_idx_map = {col: inspector_df.columns.get_loc(col) for col in inspector_columns if col in inspector_df.columns}
+            
+            for row_tuple in inspector_df.itertuples(index=True):
+                row_idx = row_tuple[0]  # インデックス
+                row = inspector_df.loc[row_idx]  # Seriesとして扱うために元の行を取得
                 values = []
                 for col in inspector_columns:
                     # 列が存在しない場合は空文字を表示
@@ -3560,15 +3605,26 @@ class ModernDataExtractorUI:
                         values.append('')
                         continue
                     
+                    col_idx = inspector_col_idx_map.get(col)
+                    if col_idx is not None:
+                        # itertuples(index=True)では、row_tuple[0]がインデックス、row_tuple[1]以降が列の値
+                        # 列インデックスは0始まりなので、col_idx + 1でアクセス
+                        if col_idx + 1 < len(row_tuple):
+                            col_value = row_tuple[col_idx + 1]
+                        else:
+                            col_value = None
+                    else:
+                        col_value = None
+                    
                     if col == '出荷予定日' or col == '指示日':
                         try:
-                            date_value = pd.to_datetime(row[col])
-                            values.append(date_value.strftime('%Y/%m/%d'))
+                            date_value = pd.to_datetime(col_value) if pd.notna(col_value) else None
+                            values.append(date_value.strftime('%Y/%m/%d') if date_value is not None else '')
                         except:
-                            values.append(str(row[col]) if pd.notna(row[col]) else '')
+                            values.append(str(col_value) if pd.notna(col_value) else '')
                     elif col.startswith('検査員'):
                         # 検査員名の表示制御
-                        inspector_name = str(row[col]) if pd.notna(row[col]) else ''
+                        inspector_name = str(col_value) if pd.notna(col_value) else ''
                         if not self.show_skill_values:
                             # スキル値を非表示にする場合、括弧内を削除
                             if '(' in inspector_name and ')' in inspector_name:
@@ -3587,7 +3643,7 @@ class ModernDataExtractorUI:
                                         pass
                         values.append(inspector_name)
                     else:
-                        values.append(str(row[col]) if pd.notna(row[col]) else '')
+                        values.append(str(col_value) if pd.notna(col_value) else '')
                 
                 # 交互行色を適用
                 tag = "even" if row_index % 2 == 0 else "odd"
@@ -3690,22 +3746,35 @@ class ModernDataExtractorUI:
             # 検査員の検査時間を集計
             inspector_hours = {}
             
-            for _, row in self.current_inspector_data.iterrows():
+            # 列名から列インデックスへのマッピングを作成（高速化：itertuples()を使用）
+            inspector_col_indices = {f'検査員{i}': self.current_inspector_data.columns.get_loc(f'検査員{i}') for i in range(1, 6) if f'検査員{i}' in self.current_inspector_data.columns}
+            divided_time_col_idx = self.current_inspector_data.columns.get_loc('分割検査時間') if '分割検査時間' in self.current_inspector_data.columns else None
+            
+            for row_tuple in self.current_inspector_data.itertuples(index=True):
+                row_idx = row_tuple[0]  # インデックス
+                row = self.current_inspector_data.loc[row_idx]  # Seriesとして扱うために元の行を取得
+                
                 for i in range(1, 6):  # 検査員1〜5
                     inspector_col = f'検査員{i}'
-                    if pd.notna(row[inspector_col]) and str(row[inspector_col]).strip() != '':
-                        inspector_name = str(row[inspector_col])
-                        # スキル値や(新)を除去して氏名のみを取得
-                        if '(' in inspector_name:
-                            inspector_name = inspector_name.split('(')[0].strip()
-                        
-                        # 分割検査時間を取得
-                        divided_time = row.get('分割検査時間', 0)
-                        if pd.notna(divided_time):
-                            if inspector_name in inspector_hours:
-                                inspector_hours[inspector_name] += float(divided_time)
+                    if inspector_col in inspector_col_indices:
+                        inspector_col_idx = inspector_col_indices[inspector_col]
+                        inspector_value = row_tuple[inspector_col_idx + 1] if inspector_col_idx < len(row_tuple) - 1 else None  # itertuplesはインデックスを含むため+1
+                        if pd.notna(inspector_value) and str(inspector_value).strip() != '':
+                            inspector_name = str(inspector_value)
+                            # スキル値や(新)を除去して氏名のみを取得
+                            if '(' in inspector_name:
+                                inspector_name = inspector_name.split('(')[0].strip()
+                            
+                            # 分割検査時間を取得
+                            if divided_time_col_idx is not None:
+                                divided_time = row_tuple[divided_time_col_idx + 1] if divided_time_col_idx < len(row_tuple) - 1 else 0
                             else:
-                                inspector_hours[inspector_name] = float(divided_time)
+                                divided_time = row.get('分割検査時間', 0)
+                            if pd.notna(divided_time):
+                                if inspector_name in inspector_hours:
+                                    inspector_hours[inspector_name] += float(divided_time)
+                                else:
+                                    inspector_hours[inspector_name] = float(divided_time)
             
             if not inspector_hours:
                 self.log_message("グラフ表示するデータがありません")
@@ -3852,31 +3921,45 @@ class ModernDataExtractorUI:
             
             # 検査員の検査時間集計を取得（実際に割り当てられた検査員のみ）
             inspector_hours = {}
-            for _, row in self.current_inspector_data.iterrows():
+            # 列名から列インデックスへのマッピングを作成（高速化：itertuples()を使用）
+            inspector_col_indices = {f'検査員{i}': self.current_inspector_data.columns.get_loc(f'検査員{i}') for i in range(1, 6) if f'検査員{i}' in self.current_inspector_data.columns}
+            divided_time_col_idx = self.current_inspector_data.columns.get_loc('分割検査時間') if '分割検査時間' in self.current_inspector_data.columns else None
+            
+            for row_tuple in self.current_inspector_data.itertuples(index=True):
+                row_idx = row_tuple[0]  # インデックス
+                row = self.current_inspector_data.loc[row_idx]  # Seriesとして扱うために元の行を取得
+                
                 # 検査員1～5を確認
                 for i in range(1, 6):
                     inspector_col = f'検査員{i}'
-                    if inspector_col in row and pd.notna(row[inspector_col]):
-                        inspector_name = str(row[inspector_col]).strip()
-                        
-                        # 空文字列をスキップ
-                        if not inspector_name:
-                            continue
-                        
-                        # スキル値や(新)を除去して名前のみ取得
-                        if '(' in inspector_name:
-                            inspector_name = inspector_name.split('(')[0].strip()
-                        
-                        # 名前が空の場合はスキップ
-                        if not inspector_name:
-                            continue
-                        
-                        if inspector_name not in inspector_hours:
-                            inspector_hours[inspector_name] = 0.0
-                        
-                        # 分割検査時間を加算
-                        if '分割検査時間' in row and pd.notna(row['分割検査時間']):
-                            inspector_hours[inspector_name] += float(row['分割検査時間'])
+                    if inspector_col in inspector_col_indices:
+                        inspector_col_idx = inspector_col_indices[inspector_col]
+                        inspector_value = row_tuple[inspector_col_idx + 1] if inspector_col_idx < len(row_tuple) - 1 else None  # itertuplesはインデックスを含むため+1
+                        if pd.notna(inspector_value):
+                            inspector_name = str(inspector_value).strip()
+                            
+                            # 空文字列をスキップ
+                            if not inspector_name:
+                                continue
+                            
+                            # スキル値や(新)を除去して名前のみ取得
+                            if '(' in inspector_name:
+                                inspector_name = inspector_name.split('(')[0].strip()
+                            
+                            # 名前が空の場合はスキップ
+                            if not inspector_name:
+                                continue
+                            
+                            if inspector_name not in inspector_hours:
+                                inspector_hours[inspector_name] = 0.0
+                            
+                            # 分割検査時間を加算
+                            if divided_time_col_idx is not None:
+                                divided_time_value = row_tuple[divided_time_col_idx + 1] if divided_time_col_idx < len(row_tuple) - 1 else None
+                            else:
+                                divided_time_value = row.get('分割検査時間', None)
+                            if pd.notna(divided_time_value):
+                                inspector_hours[inspector_name] += float(divided_time_value)
             
             if not inspector_hours:
                 no_data_label = ctk.CTkLabel(
@@ -3952,40 +4035,49 @@ class ModernDataExtractorUI:
             
             # 検査員ごとのロットデータを整理（実際に割り当てられた検査員のみ）
             inspector_lots = {}
-            for _, row in self.current_inspector_data.iterrows():
+            # 列名から列インデックスへのマッピングを作成（高速化：itertuples()を使用）
+            inspector_col_indices = {f'検査員{i}': self.current_inspector_data.columns.get_loc(f'検査員{i}') for i in range(1, 6) if f'検査員{i}' in self.current_inspector_data.columns}
+            lot_info_cols = ['生産ロットID', '指示日', '出荷予定日', 'ロット数量', '分割検査時間', '品番', '品名', 'チーム情報']
+            lot_info_col_indices = {col: self.current_inspector_data.columns.get_loc(col) for col in lot_info_cols if col in self.current_inspector_data.columns}
+            
+            for row_tuple in self.current_inspector_data.itertuples(index=True):
+                row_idx = row_tuple[0]  # インデックス
+                row = self.current_inspector_data.loc[row_idx]  # Seriesとして扱うために元の行を取得
+                
                 # 検査員1～5を確認
                 for i in range(1, 6):
                     inspector_col = f'検査員{i}'
-                    if inspector_col in row and pd.notna(row[inspector_col]):
-                        inspector_name = str(row[inspector_col]).strip()
-                        
-                        # 空文字列をスキップ
-                        if not inspector_name:
-                            continue
-                        
-                        # スキル値や(新)を除去して名前のみ取得
-                        if '(' in inspector_name:
-                            inspector_name = inspector_name.split('(')[0].strip()
-                        
-                        # 名前が空の場合はスキップ
-                        if not inspector_name:
-                            continue
-                        
-                        if inspector_name not in inspector_lots:
-                            inspector_lots[inspector_name] = []
-                        
-                        # ロット情報を追加
-                        lot_info = {
-                            '生産ロットID': row.get('生産ロットID', ''),
-                            '指示日': row.get('指示日', ''),
-                            '出荷予定日': row.get('出荷予定日', ''),
-                            'ロット数量': row.get('ロット数量', ''),
-                            '分割検査時間': row.get('分割検査時間', ''),
-                            '品番': row.get('品番', ''),
-                            '品名': row.get('品名', ''),
-                            'チーム情報': row.get('チーム情報', '')
-                        }
-                        inspector_lots[inspector_name].append(lot_info)
+                    if inspector_col in inspector_col_indices:
+                        inspector_col_idx = inspector_col_indices[inspector_col]
+                        inspector_value = row_tuple[inspector_col_idx + 1] if inspector_col_idx < len(row_tuple) - 1 else None  # itertuplesはインデックスを含むため+1
+                        if pd.notna(inspector_value):
+                            inspector_name = str(inspector_value).strip()
+                            
+                            # 空文字列をスキップ
+                            if not inspector_name:
+                                continue
+                            
+                            # スキル値や(新)を除去して名前のみ取得
+                            if '(' in inspector_name:
+                                inspector_name = inspector_name.split('(')[0].strip()
+                            
+                            # 名前が空の場合はスキップ
+                            if not inspector_name:
+                                continue
+                            
+                            if inspector_name not in inspector_lots:
+                                inspector_lots[inspector_name] = []
+                            
+                            # ロット情報を追加
+                            lot_info = {}
+                            for col in lot_info_cols:
+                                if col in lot_info_col_indices:
+                                    col_idx = lot_info_col_indices[col]
+                                    col_value = row_tuple[col_idx + 1] if col_idx < len(row_tuple) - 1 else None  # itertuplesはインデックスを含むため+1
+                                    lot_info[col] = col_value if pd.notna(col_value) else ''
+                                else:
+                                    lot_info[col] = row.get(col, '')
+                            inspector_lots[inspector_name].append(lot_info)
             
             if not inspector_lots:
                 no_data_label = ctk.CTkLabel(

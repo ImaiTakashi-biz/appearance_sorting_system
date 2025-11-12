@@ -617,18 +617,22 @@ def get_cleaning_lots(
                         if '指示日' in has_lot_id_df.columns and '指示日' in no_lot_id_df.columns:
                             check_cols.append('指示日')
                         
-                        # 通常の在庫ロットの組み合わせをセットとして取得（高速化）
+                        # 通常の在庫ロットの組み合わせをセットとして取得（高速化：itertuples()を使用）
                         has_lot_id_keys = set()
-                        for _, row in has_lot_id_df.iterrows():
-                            key = tuple(row[col] for col in check_cols)
+                        # 列インデックスを事前に取得
+                        col_indices = [has_lot_id_df.columns.get_loc(col) for col in check_cols]
+                        for row_tuple in has_lot_id_df.itertuples(index=False):
+                            key = tuple(row_tuple[i] for i in col_indices)
                             has_lot_id_keys.add(key)
                         
-                        # 洗浄指示ロットから重複を除外
+                        # 洗浄指示ロットから重複を除外（高速化：itertuples()を使用）
                         if has_lot_id_keys:
                             before_no_lot_id_count = len(no_lot_id_df)
+                            # 列インデックスを事前に取得
+                            no_lot_id_col_indices = [no_lot_id_df.columns.get_loc(col) for col in check_cols]
                             mask = []
-                            for _, row in no_lot_id_df.iterrows():
-                                key = tuple(row[col] for col in check_cols)
+                            for row_tuple in no_lot_id_df.itertuples(index=False):
+                                key = tuple(row_tuple[i] for i in no_lot_id_col_indices)
                                 mask.append(key not in has_lot_id_keys)
                             no_lot_id_df = no_lot_id_df[mask].copy()
                             excluded_count = before_no_lot_id_count - len(no_lot_id_df)

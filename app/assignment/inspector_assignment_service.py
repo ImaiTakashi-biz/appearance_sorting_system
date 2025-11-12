@@ -70,8 +70,15 @@ class InspectorAssignmentManager:
         self.new_product_team_logged = False
         # 新製品チームメンバー数のログを1回だけ出力するためのフラグ
         self._new_product_team_count_logged = False
-        # 当日洗浄上がり品の検査員を追跡（重複を避けるため）
-        # 形式: { inspector_code: count } - 当日洗浄上がり品に割り当てられた回数
+        # 【重要】当日洗浄上がり品および先行検査品の検査員を追跡（品番単位で管理）
+        # 形式: {品番: set(検査員コード)} - 各品番ごとに割り当てられた検査員のセット
+        # 
+        # 制約ルール（このロジックの核心）:
+        # - 別品番であれば同一検査員を割り当ててOK
+        # - 同一品番の複数ロットには同一検査員を割り当てない（必須制約）
+        # 
+        # このデータ構造により、理想的な割当て（各ロットに異なる検査員を割り当て）を実現
+        # 変更時は慎重に検討すること（再現性の高い割当てロジックの基盤）
         self.same_day_cleaning_inspectors = {}
     
     def log_message(self, message, debug=False, level='info'):
@@ -111,9 +118,14 @@ class InspectorAssignmentManager:
             if process_number is None or str(process_number).strip() == '':
                 filtered_skill_rows = list(skill_rows.iterrows())
             else:
-                for row_idx, skill_row in skill_rows.iterrows():
-                    skill_process_number = skill_row.iloc[1]
+                # 工程番号列のインデックスを事前に取得（高速化：itertuples()を使用）
+                process_col_idx = 1  # iloc[1]に対応
+                for row_tuple in skill_rows.itertuples(index=True):
+                    row_idx = row_tuple[0]  # インデックス
+                    skill_process_number = row_tuple[process_col_idx + 1]  # itertuplesはインデックスを含むため+1
                     if pd.isna(skill_process_number) or str(skill_process_number).strip() == '' or str(skill_process_number) == str(process_number):
+                        # Seriesとして扱うために元の行を取得
+                        skill_row = skill_rows.loc[row_idx]
                         filtered_skill_rows.append((row_idx, skill_row))
 
             if not filtered_skill_rows:
@@ -510,10 +522,11 @@ class InspectorAssignmentManager:
             # 後続フェーズで利用するためにベース候補を保持（深いコピーで再利用）
             result_df['_base_candidates'] = [copy.deepcopy(base_candidate_cache[idx]) for idx in result_df.index]
             
-            # 改善ポイント: 並び順ロジック（ボトルネック優先化）
-            # 1. feasible_inspector_count（昇順）※スキルマスタで算出した候補数
-            # 2. 出荷予定日の優先順位（当日 > 当日洗浄品 > 翌日以降の新規品 > その他）
-            # 3. ソート安定性確保: 品番IDを追加
+            # 並び順ロジック: 出荷予定日の優先順位ごとに候補数が少ないロットを優先
+            # 1. 出荷予定日の優先順位（1=当日、2=当日洗浄品、3=先行検査品、4=翌日、5=それ以降）
+            # 2. 各優先順位グループ内で feasible_inspector_count（昇順）※候補が少ないロットを優先
+            # 3. 出荷予定日（日付順）
+            # 4. 品番ID（ソート安定性確保）
             
             # 出荷予定日の優先順位を設定（厳守ルール）
             # 優先度: 1=当日、2=当日洗浄品、3=先行検査品、4=翌日/翌営業日、5=それ以降
@@ -591,9 +604,34 @@ class InspectorAssignmentManager:
             
             result_df['_shipping_priority'] = result_df.apply(calculate_priority, axis=1)
             
+            # 同一品番の当日洗浄上がり品/先行検査品のロット数を事前にカウント（各ロットに均等に検査員を分散させるため）
+            same_day_cleaning_product_counts = {}
+            for row_idx, row in enumerate(result_df.itertuples(index=False)):
+                shipping_date = row[result_cols.get('出荷予定日', -1)] if '出荷予定日' in result_cols else 'N/A'
+                shipping_date_str = str(shipping_date).strip() if pd.notna(shipping_date) else ''
+                is_same_day_cleaning = (
+                    shipping_date_str == "当日洗浄上がり品" or
+                    shipping_date_str == "当日洗浄品" or
+                    "当日洗浄" in shipping_date_str or
+                    shipping_date_str == "先行検査" or
+                    shipping_date_str == "当日先行検査"
+                )
+                if is_same_day_cleaning:
+                    product_number = row[result_cols['品番']]
+                    same_day_cleaning_product_counts[product_number] = same_day_cleaning_product_counts.get(product_number, 0) + 1
+            
+            # 各ロットにロット数を記録
+            result_df['_same_day_cleaning_lot_count'] = result_df.apply(
+                lambda row: same_day_cleaning_product_counts.get(row['品番'], 0) if (
+                    str(row.get('出荷予定日', '')).strip() in ["当日洗浄上がり品", "当日洗浄品", "先行検査", "当日先行検査"] or
+                    "当日洗浄" in str(row.get('出荷予定日', '')).strip()
+                ) else 0,
+                axis=1
+            )
+            
             result_df['_sort_product_id'] = result_df['品番'].astype(str)
             result_df = result_df.sort_values(
-                ['feasible_inspector_count', '_shipping_priority', '出荷予定日', '_sort_product_id'],
+                ['_shipping_priority', 'feasible_inspector_count', '出荷予定日', '_sort_product_id'],
                 ascending=[True, True, True, True],
                 na_position='last'
             ).reset_index(drop=True)
@@ -601,7 +639,7 @@ class InspectorAssignmentManager:
             # 一時列を削除
             result_df = result_df.drop(columns=['_shipping_priority'], errors='ignore')
             
-            self.log_message("改善ポイント: 並び順ロジック変更 - feasible_inspector_count（候補数）を最優先にソートしました。候補が少ないロット（希少スキル必要品）を先に処理します。")
+            self.log_message("並び順ロジック: 出荷予定日の優先順位ごとに候補数が少ないロットを優先してソートしました。")
             
             # 各ロットに対して検査員を割り当て
             result_cols_after_sort = {col: idx for idx, col in enumerate(result_df.columns)}
@@ -663,24 +701,64 @@ class InspectorAssignmentManager:
                         # 5名以上になる場合は5名に制限（特例）
                         required_inspectors = min(5, calculated_inspectors)
                     
-                # 当日洗浄上がり品の場合は、既に当日洗浄上がり品に割り当てられた検査員を除外（1ロット/日・人の制約）
-                # ただし、スキルマスタに制約がかかる場合（候補が不足する場合）は例外とする
+                # 【重要】当日洗浄上がり品および先行検査品の品番単位制約ロジック
+                # このロジックは理想的な割当てを実現するため、変更時は慎重に検討すること
+                # 
+                # 制約ルール:
+                # 1. 別品番であれば同一検査員を割り当ててOK
+                # 2. 同一品番の複数ロットには同一検査員を割り当てない（必須制約）
+                # 3. 同一品番の複数ロットがある場合、各ロットに均等に検査員を分散させる
+                # 
+                # 実装のポイント:
+                # - self.same_day_cleaning_inspectors は品番ごとに管理（{品番: set(検査員コード)}）
+                # - 各ロットで既に割り当てられた検査員を除外して候補を絞り込む
+                # - 複数ロットがある場合は均等分散ロジックで必要人数を調整
+                # - 候補が不足しても制約は緩和しない（品番単位の制約は必須）
                 if is_same_day_cleaning:
-                    already_assigned_to_cleaning = set(self.same_day_cleaning_inspectors.keys())
-                    original_count = len(available_inspectors)
-                    # 既に当日洗浄上がり品に割り当てられた検査員を除外
-                    filtered_inspectors = [insp for insp in available_inspectors if insp['コード'] not in already_assigned_to_cleaning]
+                    # この品番に既に割り当てられた検査員を取得（品番単位の制約）
+                    already_assigned_to_this_product = self.same_day_cleaning_inspectors.get(product_number, set())
                     
-                    # 候補が不足する場合（必要人数に達しない場合）は、制約を緩和
-                    if len(filtered_inspectors) < required_inspectors:
-                        # スキルマスタに制約がかかる場合（候補が不足）は、既に割り当てられた検査員も含める
-                        self.log_message(f"当日洗浄上がり品 {product_number}: 候補が不足しています（必要: {required_inspectors}人、制約後: {len(filtered_inspectors)}人、元: {original_count}人）。制約を緩和して既に割り当てられた検査員も含めます。")
-                        available_inspectors = available_inspectors  # 制約を緩和（全ての候補を使用）
-                    else:
-                        # 候補が十分な場合は、制約を適用
-                        available_inspectors = filtered_inspectors
-                        if original_count > len(available_inspectors):
-                            self.log_message(f"当日洗浄上がり品 {product_number}: 既に当日洗浄上がり品に割り当てられた検査員 {original_count - len(available_inspectors)}人を除外しました（1ロット/日・人の制約）")
+                    # 同一品番のロット数を取得
+                    lot_count = result_df.at[index, '_same_day_cleaning_lot_count'] if '_same_day_cleaning_lot_count' in result_df.columns else 1
+                    lot_count = max(1, int(lot_count)) if pd.notna(lot_count) else 1
+                    
+                    # この品番の既に割り当てられたロット数をカウント（現在のロットを含む）
+                    # ソート後の順序で、現在のロットより前のロットをカウント
+                    current_assigned_lot_count = 0
+                    for prev_idx in range(row_idx):
+                        prev_index = result_df.index[prev_idx]
+                        if (result_df.at[prev_index, '品番'] == product_number and 
+                            result_df.at[prev_index, '_same_day_cleaning_lot_count'] > 0):
+                            current_assigned_lot_count += 1
+                    # 現在のロットを含める
+                    current_assigned_lot_count += 1
+                    
+                    original_count = len(available_inspectors)
+                    # 既にこの品番に割り当てられた検査員を除外（別品番であれば同一検査員を割り当ててOK）
+                    filtered_inspectors = [insp for insp in available_inspectors if insp['コード'] not in already_assigned_to_this_product]
+                    
+                    # 同一品番の複数ロットがある場合、各ロットに均等に検査員を分散させる
+                    # 利用可能な検査員数をロット数で割って、各ロットに割り当て可能な検査員数を計算
+                    if lot_count > 1 and len(filtered_inspectors) > 0:
+                        # 各ロットに割り当て可能な検査員数（切り上げ）
+                        available_per_lot = int(len(filtered_inspectors) / lot_count) + (1 if len(filtered_inspectors) % lot_count > 0 else 0)
+                        # 現在のロットに割り当て可能な検査員数（既に割り当てられたロット数を考慮）
+                        remaining_lots = lot_count - current_assigned_lot_count + 1
+                        max_inspectors_for_this_lot = min(required_inspectors, available_per_lot * remaining_lots)
+                        
+                        # 必要人数を調整（ただし、最小限の必要人数は維持）
+                        if max_inspectors_for_this_lot < required_inspectors:
+                            self.log_message(f"当日洗浄上がり品/先行検査品 {product_number}: 同一品番の複数ロット（{lot_count}ロット）があるため、このロットの必要人数を {required_inspectors}人から {max_inspectors_for_this_lot}人に調整します（均等分散）")
+                            required_inspectors = max(1, max_inspectors_for_this_lot)
+                    
+                    # 品番単位の制約を常に適用（候補が不足しても緩和しない）
+                    available_inspectors = filtered_inspectors
+                    if original_count > len(available_inspectors):
+                        self.log_message(f"当日洗浄上がり品/先行検査品 {product_number}: 既にこの品番に割り当てられた検査員 {original_count - len(available_inspectors)}人を除外しました（品番単位の制約、ロット数: {lot_count}）")
+                    
+                    # 候補が不足する場合は警告を出すが、制約は緩和しない
+                    if len(available_inspectors) < required_inspectors:
+                        self.log_message(f"⚠️ 警告: 当日洗浄上がり品/先行検査品 {product_number} の候補が不足しています（必要: {required_inspectors}人、利用可能: {len(available_inspectors)}人、ロット数: {lot_count}）。品番単位の制約を維持します。", level='warning')
                 
                 # 新規品かどうかを判定（スキルマスタに登録がない場合）
                 is_new_product = False
@@ -714,9 +792,14 @@ class InspectorAssignmentManager:
                         if process_number is None or str(process_number).strip() == '':
                             filtered_rows = list(skill_rows.iterrows())
                         else:
-                            for _, skill_row in skill_rows.iterrows():
-                                skill_process = skill_row.iloc[1]
+                            # 工程番号列のインデックスを事前に取得（高速化：itertuples()を使用）
+                            process_col_idx = 1  # iloc[1]に対応
+                            for row_tuple in skill_rows.itertuples(index=True):
+                                row_idx = row_tuple[0]  # インデックス
+                                skill_process = row_tuple[process_col_idx + 1]  # itertuplesはインデックスを含むため+1
                                 if pd.isna(skill_process) or skill_process == '' or str(skill_process) == str(process_number):
+                                    # Seriesとして扱うために元の行を取得
+                                    skill_row = skill_rows.loc[row_idx]
                                     filtered_rows.append(skill_row)
                         
                         if not filtered_rows:
@@ -757,9 +840,9 @@ class InspectorAssignmentManager:
                     # 既に割り当てられた検査員のコードを取得
                     assigned_codes = {insp['コード'] for insp in assigned_inspectors}
                     
-                    # 既に当日洗浄上がり品に割り当てられた検査員を取得（重複を避けるため）
+                    # 既にこの品番に割り当てられた検査員を取得（品番単位の制約）
                     # 再分配処理の各ステップで最新の状態を取得する
-                    already_assigned_to_cleaning = set(self.same_day_cleaning_inspectors.keys())
+                    already_assigned_to_this_product = self.same_day_cleaning_inspectors.get(product_number, set())
                     
                     # 追加の検査員候補を取得（より広い範囲から）
                     process_number = row[result_cols_after_sort.get('現在工程番号', -1)] if '現在工程番号' in result_cols_after_sort else ''
@@ -773,39 +856,43 @@ class InspectorAssignmentManager:
                         shipping_date=shipping_date, allow_new_team_fallback=True
                     )
                     
-                    # 既に当日洗浄上がり品に割り当てられた検査員を除外（重複を避けるため）
-                    # ただし、既にこのロットに割り当てられた検査員は含める
+                    # 既にこの品番に割り当てられた検査員を除外（品番単位の制約）
+                    # 当日洗浄上がり品の場合は、既にこのロットに割り当てられた検査員でも、この品番に既に割り当てられている場合は含めない
                     filtered_candidates = []
                     for candidate in additional_candidates:
                         code = candidate['コード']
-                        # 既にこのロットに割り当てられた検査員は含める
-                        if code in assigned_codes:
-                            filtered_candidates.append(candidate)
-                        # まだ当日洗浄上がり品に割り当てられていない検査員は含める
-                        elif code not in already_assigned_to_cleaning:
-                            filtered_candidates.append(candidate)
-                        # 既に当日洗浄上がり品に割り当てられているが、必要人数に達しない場合は含める（優先度が高いため）
-                        elif len(assigned_inspectors) == 0:
-                            filtered_candidates.append(candidate)
+                        # 当日洗浄上がり品の場合は、品番単位の制約を優先
+                        # 既にこの品番に割り当てられている検査員は除外（このロットに既に割り当てられていても）
+                        if is_same_day_cleaning and code in already_assigned_to_this_product:
+                            # この品番に既に割り当てられている場合は除外
+                            continue
+                        # まだこの品番に割り当てられていない検査員は含める
+                        filtered_candidates.append(candidate)
+                        # 品番単位の制約を厳格に適用（既にこの品番に割り当てられている検査員は除外）
+                        # 注: 必要人数に達しない場合でも、品番単位の制約は維持する
                     
                     # 既に割り当てられた検査員も含めて、全候補で再割り当て
                     # 既に割り当てられた検査員の情報を保持
                     existing_assigned = copy.deepcopy(assigned_inspectors)
                     
-                    # 全候補を統合（既に割り当てられた検査員も含む）
-                    all_candidates = copy.deepcopy(filtered_candidates)
-                    # 既に割り当てられた検査員を追加（重複を避ける）
-                    for existing in existing_assigned:
-                        if existing['コード'] not in {c['コード'] for c in all_candidates}:
-                            all_candidates.append(existing)
+                    # 最新の状態を再取得（既にこの品番に割り当てられた検査員を取得）
+                    already_assigned_to_this_product = self.same_day_cleaning_inspectors.get(product_number, set())
                     
-                    # 候補を分散優先でソート（既に当日洗浄上がり品に割り当てられていない検査員を優先）
-                    # 最新の状態を再取得
-                    already_assigned_to_cleaning = set(self.same_day_cleaning_inspectors.keys())
+                    # 全候補を統合
+                    # 当日洗浄上がり品の場合は、既に割り当てられた検査員を追加しない（品番単位の制約を維持）
+                    all_candidates = copy.deepcopy(filtered_candidates)
+                    # 当日洗浄上がり品でない場合のみ、既に割り当てられた検査員を追加
+                    if not is_same_day_cleaning:
+                        for existing in existing_assigned:
+                            code = existing['コード']
+                            if code not in {c['コード'] for c in all_candidates}:
+                                all_candidates.append(existing)
+                    
+                    # 候補を分散優先でソート（既にこの品番に割り当てられていない検査員を優先）
                     def sort_key_for_distribution(candidate):
                         code = candidate['コード']
-                        # 既に当日洗浄上がり品に割り当てられていない検査員を優先
-                        if code not in already_assigned_to_cleaning:
+                        # 既にこの品番に割り当てられていない検査員を優先
+                        if code not in already_assigned_to_this_product:
                             return (0, candidate.get('_fairness_score', 0))
                         else:
                             return (1, candidate.get('_fairness_score', 0))
@@ -832,18 +919,18 @@ class InspectorAssignmentManager:
                         # 候補が不足している場合は、可能な限り多くの候補を使用
                         if max_available < min_required:
                             self.log_message(f"当日洗浄上がり品 {product_number}: 候補が不足しています（必要: {min_required}人、利用可能: {max_available}人）。可能な限り割り当てます。")
-                        # 既に当日洗浄上がり品に割り当てられていない検査員を優先的に選択
-                        # 最新の状態を再取得
-                        already_assigned_to_cleaning = set(self.same_day_cleaning_inspectors.keys())
-                        unassigned_candidates = [c for c in all_candidates if c['コード'] not in already_assigned_to_cleaning]
-                        assigned_candidates = [c for c in all_candidates if c['コード'] in already_assigned_to_cleaning]
-                        # 未割当の検査員を優先的に選択
-                        selected_candidates = unassigned_candidates[:max_available]
-                        # まだ必要人数に達しない場合は、既に割り当てられた検査員も含める
-                        if len(selected_candidates) < min_required:
-                            remaining_needed = min_required - len(selected_candidates)
-                            selected_candidates.extend(assigned_candidates[:remaining_needed])
-                        selected_candidates = selected_candidates[:max_available]
+                        # 当日洗浄上がり品の場合は、品番単位の制約を厳格に適用
+                        # 既にこの品番に割り当てられていない検査員のみ選択
+                        if is_same_day_cleaning:
+                            # 最新の状態を再取得
+                            already_assigned_to_this_product = self.same_day_cleaning_inspectors.get(product_number, set())
+                            # この品番に割り当てられていない検査員のみ選択
+                            selected_candidates = [c for c in all_candidates if c['コード'] not in already_assigned_to_this_product]
+                            selected_candidates = selected_candidates[:max_available]
+                        else:
+                            # 当日洗浄上がり品でない場合は、既存のロジックを使用
+                            unassigned_candidates = [c for c in all_candidates]
+                            selected_candidates = unassigned_candidates[:max_available]
                         reassigned_inspectors = []
                         reassigned_time_sum = 0.0
                         for candidate in selected_candidates:
@@ -876,13 +963,11 @@ class InspectorAssignmentManager:
                         remaining_time = reassigned_remaining
                         assigned_time_sum = reassigned_time_sum
                         self.log_message(f"当日洗浄上がり品 {product_number}: 再分配により {len(assigned_inspectors)}人を割り当てました（必要人数: {required_inspectors}人）")
-                        # 再分配処理が完了した時点で、当日洗浄上がり品の検査員を即座に追跡（次のロットの処理前に反映）
+                        # 再分配処理が完了した時点で、当日洗浄上がり品の検査員を即座に追跡（次のロットの処理前に反映、品番単位）
                         for inspector in assigned_inspectors:
                             if isinstance(inspector, dict) and 'コード' in inspector:
                                 code = inspector['コード']
-                                if code not in self.same_day_cleaning_inspectors:
-                                    self.same_day_cleaning_inspectors[code] = 0
-                                self.same_day_cleaning_inspectors[code] += 1
+                                self.same_day_cleaning_inspectors.setdefault(product_number, set()).add(code)
                     else:
                         # まだ必要人数に達しない場合、新製品チームも含めて再試行
                         assigned_codes = {insp['コード'] for insp in reassigned_inspectors}
@@ -914,17 +999,12 @@ class InspectorAssignmentManager:
                                     # 候補が不足している場合は、可能な限り多くの候補を使用
                                     if max_available < min_required:
                                         self.log_message(f"当日洗浄上がり品 {product_number}: 候補が不足しています（必要: {min_required}人、利用可能: {max_available}人）。可能な限り割り当てます。")
-                                    # 既に当日洗浄上がり品に割り当てられていない検査員を優先的に選択
+                                    # 当日洗浄上がり品の場合は、品番単位の制約を厳格に適用
+                                    # 既にこの品番に割り当てられていない検査員のみ選択
                                     # 最新の状態を再取得
-                                    already_assigned_to_cleaning = set(self.same_day_cleaning_inspectors.keys())
-                                    unassigned_candidates = [c for c in all_candidates_with_new_team if c['コード'] not in already_assigned_to_cleaning]
-                                    assigned_candidates = [c for c in all_candidates_with_new_team if c['コード'] in already_assigned_to_cleaning]
-                                    # 未割当の検査員を優先的に選択
-                                    selected_candidates = unassigned_candidates[:max_available]
-                                    # まだ必要人数に達しない場合は、既に割り当てられた検査員も含める
-                                    if len(selected_candidates) < min_required:
-                                        remaining_needed = min_required - len(selected_candidates)
-                                        selected_candidates.extend(assigned_candidates[:remaining_needed])
+                                    already_assigned_to_this_product = self.same_day_cleaning_inspectors.get(product_number, set())
+                                    # この品番に割り当てられていない検査員のみ選択
+                                    selected_candidates = [c for c in all_candidates_with_new_team if c['コード'] not in already_assigned_to_this_product]
                                     selected_candidates = selected_candidates[:max_available]
                                     final_assigned = []
                                     final_time_sum = 0.0
@@ -957,69 +1037,81 @@ class InspectorAssignmentManager:
                                     remaining_time = final_remaining
                                     assigned_time_sum = final_time_sum
                                     self.log_message(f"当日洗浄上がり品 {product_number}: 新製品チームを含めた再分配により {len(assigned_inspectors)}人を割り当てました（必要人数: {required_inspectors}人）")
-                                    # 再分配処理が完了した時点で、当日洗浄上がり品の検査員を即座に追跡（次のロットの処理前に反映）
+                                    # 再分配処理が完了した時点で、当日洗浄上がり品の検査員を即座に追跡（次のロットの処理前に反映、品番単位）
                                     for inspector in assigned_inspectors:
                                         if isinstance(inspector, dict) and 'コード' in inspector:
                                             code = inspector['コード']
-                                            if code not in self.same_day_cleaning_inspectors:
-                                                self.same_day_cleaning_inspectors[code] = 0
-                                            self.same_day_cleaning_inspectors[code] += 1
+                                            self.same_day_cleaning_inspectors.setdefault(product_number, set()).add(code)
                                 else:
                                     # 最終的に必要人数に達しない場合、再割り当て結果を使用
                                     assigned_inspectors = final_assigned
                                     remaining_time = final_remaining
                                     assigned_time_sum = final_time_sum
                                     self.log_message(f"当日洗浄上がり品 {product_number}: 新製品チームを含めても {len(assigned_inspectors)}人しか割り当てられませんでした（必要人数: {required_inspectors}人）")
-                                    # 再分配処理が完了した時点で、当日洗浄上がり品の検査員を即座に追跡（次のロットの処理前に反映）
+                                    # 再分配処理が完了した時点で、当日洗浄上がり品の検査員を即座に追跡（次のロットの処理前に反映、品番単位）
                                     for inspector in assigned_inspectors:
                                         if isinstance(inspector, dict) and 'コード' in inspector:
                                             code = inspector['コード']
-                                            if code not in self.same_day_cleaning_inspectors:
-                                                self.same_day_cleaning_inspectors[code] = 0
-                                            self.same_day_cleaning_inspectors[code] += 1
+                                            self.same_day_cleaning_inspectors.setdefault(product_number, set()).add(code)
                             else:
                                 # 新製品チームの候補がない場合、再割り当て結果を使用
                                 assigned_inspectors = reassigned_inspectors
                                 remaining_time = reassigned_remaining
                                 assigned_time_sum = reassigned_time_sum
-                                # 再分配処理が完了した時点で、当日洗浄上がり品の検査員を即座に追跡（次のロットの処理前に反映）
+                                # 再分配処理が完了した時点で、当日洗浄上がり品の検査員を即座に追跡（次のロットの処理前に反映、当日洗浄上がり品全体）
                                 if len(assigned_inspectors) > 0:
                                     for inspector in assigned_inspectors:
                                         if isinstance(inspector, dict) and 'コード' in inspector:
                                             code = inspector['コード']
-                                            if code not in self.same_day_cleaning_inspectors:
-                                                self.same_day_cleaning_inspectors[code] = 0
-                                            self.same_day_cleaning_inspectors[code] += 1
+                                            self.same_day_cleaning_inspectors.add(code)
                         else:
                             # 新製品チームがない場合、再割り当て結果を使用
                             assigned_inspectors = reassigned_inspectors
                             remaining_time = reassigned_remaining
                             assigned_time_sum = reassigned_time_sum
-                            # 再分配処理が完了した時点で、当日洗浄上がり品の検査員を即座に追跡（次のロットの処理前に反映）
+                            # 再分配処理が完了した時点で、当日洗浄上がり品の検査員を即座に追跡（次のロットの処理前に反映、当日洗浄上がり品全体）
                             if len(assigned_inspectors) > 0:
                                 for inspector in assigned_inspectors:
                                     if isinstance(inspector, dict) and 'コード' in inspector:
                                         code = inspector['コード']
-                                        if code not in self.same_day_cleaning_inspectors:
-                                            self.same_day_cleaning_inspectors[code] = 0
-                                        self.same_day_cleaning_inspectors[code] += 1
+                                        self.same_day_cleaning_inspectors.add(code)
                 
                 # 3時間基準の最低人数チェック: 検査時間が3時間を超える場合は最低2人必要
-                # 当日洗浄上がり品も含めて、3時間基準を満たす必要がある
+                # 当日洗浄上がり品の場合は優先順位が高いため、可能な限り割り当てる（未割当にしない）
                 if inspection_time > 3.0 and len(assigned_inspectors) < required_inspectors:
-                    # 当日洗浄上がり品でも、3時間基準違反の場合は未割当
-                    # ただし、優先度が高いため、可能な限り2人以上を割り当てるようにする
-                    self.log_message(f"⚠️ 警告: 品番 {product_number} (出荷予定日: {shipping_date}) は3時間基準違反のため未割当とします（検査時間: {inspection_time:.1f}h, 必要人数: {required_inspectors}人, 実際の割当人数: {len(assigned_inspectors)}人）")
-                    result_df.at[index, '検査員人数'] = 0
-                    result_df.at[index, '分割検査時間'] = 0.0
-                    for i in range(1, 6):
-                        result_df.at[index, f'検査員{i}'] = ''
-                    result_df.at[index, 'チーム情報'] = f'未割当(3時間基準違反: 必要{required_inspectors}人に対して{len(assigned_inspectors)}人)'
-                    result_df.at[index, 'remaining_work_hours'] = round(inspection_time, 2)
-                    result_df.at[index, 'assignability_status'] = 'logic_conflict'
-                    continue
+                    if is_same_day_cleaning:
+                        # 当日洗浄上がり品の場合は、3時間基準違反でも可能な限り割り当てる（未割当にしない）
+                        if len(assigned_inspectors) > 0:
+                            # 1人以上割り当てられている場合は、そのまま割り当てを維持
+                            self.log_message(f"⚠️ 警告: 当日洗浄上がり品 {product_number} は3時間基準違反ですが、優先順位が高いため {len(assigned_inspectors)}人を割り当てます（検査時間: {inspection_time:.1f}h, 必要人数: {required_inspectors}人, 実際の割当人数: {len(assigned_inspectors)}人）", level='warning')
+                        else:
+                            # 0人の場合は、制約を大幅に緩和して再試行
+                            self.log_message(f"⚠️ 警告: 当日洗浄上がり品 {product_number} は3時間基準違反で0人ですが、優先順位が高いため制約を大幅に緩和して再試行します（検査時間: {inspection_time:.1f}h, 必要人数: {required_inspectors}人）", level='warning')
+                            # 制約を大幅に緩和して再試行（未割当ロット再処理と同じロジック）
+                            # この処理は後続の未割当ロット再処理で行われるため、ここでは未割当のままにする
+                            # ただし、assignability_statusは'logic_conflict'ではなく、後続処理で再試行できるようにする
+                            result_df.at[index, '検査員人数'] = 0
+                            result_df.at[index, '分割検査時間'] = 0.0
+                            for i in range(1, 6):
+                                result_df.at[index, f'検査員{i}'] = ''
+                            result_df.at[index, 'チーム情報'] = f'未割当(3時間基準違反: 必要{required_inspectors}人に対して{len(assigned_inspectors)}人)'
+                            result_df.at[index, 'remaining_work_hours'] = round(inspection_time, 2)
+                            result_df.at[index, 'assignability_status'] = 'logic_conflict'
+                            continue
+                    else:
+                        # 当日洗浄上がり品以外の場合は、3時間基準違反で未割当
+                        self.log_message(f"⚠️ 警告: 品番 {product_number} (出荷予定日: {shipping_date}) は3時間基準違反のため未割当とします（検査時間: {inspection_time:.1f}h, 必要人数: {required_inspectors}人, 実際の割当人数: {len(assigned_inspectors)}人）")
+                        result_df.at[index, '検査員人数'] = 0
+                        result_df.at[index, '分割検査時間'] = 0.0
+                        for i in range(1, 6):
+                            result_df.at[index, f'検査員{i}'] = ''
+                        result_df.at[index, 'チーム情報'] = f'未割当(3時間基準違反: 必要{required_inspectors}人に対して{len(assigned_inspectors)}人)'
+                        result_df.at[index, 'remaining_work_hours'] = round(inspection_time, 2)
+                        result_df.at[index, 'assignability_status'] = 'logic_conflict'
+                        continue
                 
                 # 検査員が選択されなかった場合（ルール違反を避けるため未割当）
+                # 当日洗浄上がり品の場合は優先順位が高いため、未割当ロット再処理で再試行される
                 if len(assigned_inspectors) == 0:
                     # 詳細な原因を記録
                     reason_parts = []
@@ -1036,8 +1128,15 @@ class InspectorAssignmentManager:
                     
                     reason = " / ".join(reason_parts) if reason_parts else "未割当"
                     shipping_date = row[result_cols_after_sort.get('出荷予定日', -1)] if '出荷予定日' in result_cols_after_sort else 'N/A'
-                    self.log_message(f"⚠️ 警告: 品番 {product_number} (出荷予定日: {shipping_date}) は{reason}のため未割当とします")
-                    self.log_message(f"   詳細: 候補数={len(available_inspectors)}人, 検査時間={inspection_time:.1f}h, ロット数量={lot_quantity}")
+                    
+                    if is_same_day_cleaning:
+                        # 当日洗浄上がり品の場合は、未割当ロット再処理で再試行されるため、警告のみ
+                        self.log_message(f"⚠️ 警告: 当日洗浄上がり品 {product_number} は{reason}のため一時的に未割当としますが、優先順位が高いため後続の未割当ロット再処理で再試行します", level='warning')
+                        self.log_message(f"   詳細: 候補数={len(available_inspectors)}人, 検査時間={inspection_time:.1f}h, ロット数量={lot_quantity}")
+                    else:
+                        self.log_message(f"⚠️ 警告: 品番 {product_number} (出荷予定日: {shipping_date}) は{reason}のため未割当とします")
+                        self.log_message(f"   詳細: 候補数={len(available_inspectors)}人, 検査時間={inspection_time:.1f}h, ロット数量={lot_quantity}")
+                    
                     result_df.at[index, '検査員人数'] = 0
                     result_df.at[index, '分割検査時間'] = 0.0
                     for i in range(1, 6):
@@ -1104,14 +1203,20 @@ class InspectorAssignmentManager:
                 current_time = pd.Timestamp.now()
                 current_date = current_time.date()
                 
-                # 当日洗浄上がり品の検査員を追跡（重複を避けるため）
+                # 【重要】当日洗浄上がり品および先行検査品の検査員を追跡（品番単位）
+                # この追跡処理により、同一品番の複数ロットに同一検査員が割り当てられることを防ぐ
+                # 割り当てられた検査員コードをログに出力して、割当ての透明性を確保
                 if is_same_day_cleaning:
+                    assigned_codes_list = []
                     for inspector in assigned_inspectors:
                         if isinstance(inspector, dict) and 'コード' in inspector:
                             code = inspector['コード']
-                            if code not in self.same_day_cleaning_inspectors:
-                                self.same_day_cleaning_inspectors[code] = 0
-                            self.same_day_cleaning_inspectors[code] += 1
+                            assigned_codes_list.append(code)
+                            # 品番ごとに割り当てられた検査員コードを記録（品番単位の制約管理）
+                            self.same_day_cleaning_inspectors.setdefault(product_number, set()).add(code)
+                    if assigned_codes_list:
+                        # 割り当てられた検査員コードをログに出力（割当ての透明性確保）
+                        self.log_message(f"当日洗浄上がり品/先行検査品 {product_number}: 割り当てられた検査員コード: {', '.join(assigned_codes_list)}（品番単位の制約）")
                 
                 # 検査員名を設定
                 team_members = []
@@ -1386,8 +1491,12 @@ class InspectorAssignmentManager:
                 numeric_process_rows = []
                 other_process_rows = []
                 
-                for _, skill_row in skill_rows.iterrows():
-                    skill_process_number = skill_row.iloc[1]  # 工程番号列
+                # 工程番号列のインデックスを事前に取得（高速化：itertuples()を使用）
+                process_col_idx = 1  # iloc[1]に対応
+                for row_tuple in skill_rows.itertuples(index=True):
+                    row_idx = row_tuple[0]  # インデックス
+                    skill_process_number = row_tuple[process_col_idx + 1]  # itertuplesはインデックスを含むため+1
+                    skill_row = skill_rows.loc[row_idx]  # Seriesとして扱うために元の行を取得
                     
                     # 工程番号が空の行を優先
                     if pd.isna(skill_process_number) or skill_process_number == '':
@@ -1416,8 +1525,12 @@ class InspectorAssignmentManager:
                     filtered_skill_rows = other_process_rows
                     self.log_message(f"工程番号が空の行も数値の行も見つからず、その他の行を採用: {len(filtered_skill_rows)}件")
             else:
-                for _, skill_row in skill_rows.iterrows():
-                    skill_process_number = skill_row.iloc[1]  # 工程番号列
+                # 工程番号列のインデックスを事前に取得（高速化：itertuples()を使用）
+                process_col_idx = 1  # iloc[1]に対応
+                for row_tuple in skill_rows.itertuples(index=True):
+                    row_idx = row_tuple[0]  # インデックス
+                    skill_process_number = row_tuple[process_col_idx + 1]  # itertuplesはインデックスを含むため+1
+                    skill_row = skill_rows.loc[row_idx]  # Seriesとして扱うために元の行を取得
                     
                     # スキルマスタの工程番号が空欄の場合は、工程番号が一致しなくてもOK
                     if pd.isna(skill_process_number) or skill_process_number == '':
@@ -1605,10 +1718,19 @@ class InspectorAssignmentManager:
                     self.logged_warnings.add(warning_key)
                 return []
             
-            for _, inspector_row in new_product_team_rows.iterrows():
+            # 列インデックスを事前に取得（高速化：itertuples()を使用）
+            start_time_col_idx = new_product_team_rows.columns.get_loc('開始時刻')
+            end_time_col_idx = new_product_team_rows.columns.get_loc('終了時刻')
+            name_col_idx = new_product_team_rows.columns.get_loc('#氏名')
+            id_col_idx = new_product_team_rows.columns.get_loc('#ID')
+            
+            for row_tuple in new_product_team_rows.itertuples(index=True):
+                row_idx = row_tuple[0]  # インデックス
+                inspector_row = new_product_team_rows.loc[row_idx]  # Seriesとして扱うために元の行を取得
+                
                 # 勤務時間を事前チェック（0時間の検査員を除外）
-                start_time = inspector_row['開始時刻']
-                end_time = inspector_row['終了時刻']
+                start_time = row_tuple[start_time_col_idx + 1]  # itertuplesはインデックスを含むため+1
+                end_time = row_tuple[end_time_col_idx + 1]
                 
                 if pd.notna(start_time) and pd.notna(end_time):
                     try:
@@ -1633,10 +1755,11 @@ class InspectorAssignmentManager:
                         # 勤務時間が0以下の場合は候補から除外
                         if max_daily_hours <= 0:
                             # 重複警告を防ぐ
-                            warning_key = (f"勤務時間0時間_新製品チーム", inspector_row['#氏名'])
+                            inspector_name = row_tuple[name_col_idx + 1]
+                            warning_key = (f"勤務時間0時間_新製品チーム", inspector_name)
                             if warning_key not in self.logged_warnings:
                                 self.log_message(
-                                    f"警告: 新製品チームメンバー '{inspector_row['#氏名']}' の勤務時間が0時間以下です "
+                                    f"警告: 新製品チームメンバー '{inspector_name}' の勤務時間が0時間以下です "
                                     f"(開始: {start_time}, 終了: {end_time}) - 候補から除外",
                                     level='warning'
                                 )
@@ -1644,29 +1767,31 @@ class InspectorAssignmentManager:
                             continue
                             
                     except Exception as e:
-                        warning_key = (f"勤務時間計算失敗_新製品チーム", inspector_row['#氏名'])
+                        inspector_name = row_tuple[name_col_idx + 1]
+                        warning_key = (f"勤務時間計算失敗_新製品チーム", inspector_name)
                         if warning_key not in self.logged_warnings:
                             self.log_message(
-                                f"警告: 新製品チームメンバー '{inspector_row['#氏名']}' の勤務時間計算に失敗: {e} - 候補から除外",
+                                f"警告: 新製品チームメンバー '{inspector_name}' の勤務時間計算に失敗: {e} - 候補から除外",
                                 level='warning'
                             )
                             self.logged_warnings.add(warning_key)
                         continue
                 else:
-                    warning_key = (f"時刻情報不正_新製品チーム", inspector_row['#氏名'])
+                    inspector_name = row_tuple[name_col_idx + 1]
+                    warning_key = (f"時刻情報不正_新製品チーム", inspector_name)
                     if warning_key not in self.logged_warnings:
                         self.log_message(
-                            f"警告: 新製品チームメンバー '{inspector_row['#氏名']}' の時刻情報が不正です - 候補から除外",
+                            f"警告: 新製品チームメンバー '{inspector_name}' の時刻情報が不正です - 候補から除外",
                             level='warning'
                         )
                         self.logged_warnings.add(warning_key)
                     continue
                 
                 new_product_team_inspectors.append({
-                    '氏名': inspector_row['#氏名'],
+                    '氏名': row_tuple[name_col_idx + 1],
                     'スキル': 2,  # 新製品チームは中スキルとして扱う
-                    '就業時間': inspector_row['開始時刻'],
-                    'コード': inspector_row['#ID'],
+                    '就業時間': start_time,
+                    'コード': row_tuple[id_col_idx + 1],
                     'is_new_team': True  # 新規品チームフラグ
                 })
             # メンバー数は最初の1回だけ出力
@@ -3632,15 +3757,22 @@ class InspectorAssignmentManager:
                             
                             # この検査員が割り当てられているロットを取得（出荷予定日順）
                             assigned_lots = []
-                            for index, row in result_df_sorted.iterrows():
-                                product_number = row['品番']
-                                divided_time = row.get('分割検査時間', 0.0)
+                            # 列インデックスを事前に取得（高速化：itertuples()を使用）
+                            product_col_idx = result_df_sorted.columns.get_loc('品番')
+                            divided_time_col_idx = result_df_sorted.columns.get_loc('分割検査時間')
+                            inspector_col_indices = [result_df_sorted.columns.get_loc(f'検査員{i}') for i in range(1, 6)]
+                            
+                            for row_tuple in result_df_sorted.itertuples(index=True):
+                                index = row_tuple[0]  # インデックス
+                                product_number = row_tuple[product_col_idx + 1]  # itertuplesはインデックスを含むため+1
+                                divided_time = row_tuple[divided_time_col_idx + 1] if divided_time_col_idx < len(row_tuple) - 1 else 0.0
                                 
                                 # このロットにこの検査員が含まれているか確認
                                 for i in range(1, 6):
-                                    inspector_col = f'検査員{i}'
-                                    if pd.notna(row.get(inspector_col)) and str(row[inspector_col]).strip() != '':
-                                        inspector_name = str(row[inspector_col]).strip()
+                                    inspector_col_idx = inspector_col_indices[i - 1]
+                                    inspector_value = row_tuple[inspector_col_idx + 1] if inspector_col_idx < len(row_tuple) - 1 else None
+                                    if pd.notna(inspector_value) and str(inspector_value).strip() != '':
+                                        inspector_name = str(inspector_value).strip()
                                         if '(' in inspector_name:
                                             inspector_name = inspector_name.split('(')[0].strip()
                                         
@@ -3651,6 +3783,8 @@ class InspectorAssignmentManager:
                                         if not inspector_info.empty:
                                             lot_inspector_code = inspector_info.iloc[0]['#ID']
                                             if lot_inspector_code == overloaded_code:
+                                                # Seriesとして扱うために元の行を取得
+                                                row = result_df_sorted.loc[index]
                                                 assigned_lots.append((index, product_number, divided_time, i, row))
                                                 break
                             
@@ -3727,11 +3861,14 @@ class InspectorAssignmentManager:
                                     if candidate_code in current_codes:
                                         continue
                                     
-                                    # 当日洗浄上がり品のロットの場合、既に当日洗浄上がり品に割り当てられた検査員を除外（1ロット/日・人の制約）
+                                    # 当日洗浄上がり品のロットの場合、既にこの品番に割り当てられた検査員を除外（品番単位の制約）
                                     if is_same_day_cleaning_lot:
-                                        if candidate_code in self.same_day_cleaning_inspectors:
-                                            # 既に当日洗浄上がり品に割り当てられている場合は除外
-                                            continue
+                                        # この品番に既に割り当てられた検査員をチェック
+                                        lot_product_number = row.get('品番', '')
+                                        if lot_product_number in self.same_day_cleaning_inspectors:
+                                            if candidate_code in self.same_day_cleaning_inspectors[lot_product_number]:
+                                                # 既にこの品番に割り当てられている場合は除外
+                                                continue
                                     
                                     # 多忙な人（平均の110%以上）への再割当ては避ける
                                     candidate_total_hours = self.inspector_work_hours.get(candidate_code, 0.0)
@@ -3821,17 +3958,13 @@ class InspectorAssignmentManager:
                                             self.inspector_product_hours[new_code].get(product_number, 0.0) + divided_time
                                         )
                                         
-                                        # 当日洗浄上がり品のロットの場合、same_day_cleaning_inspectorsを更新
+                                        # 当日洗浄上がり品のロットの場合、same_day_cleaning_inspectorsを更新（品番単位）
                                         if is_same_day_cleaning_lot:
-                                            # 元の検査員が当日洗浄上がり品に割り当てられていた場合、削除
-                                            if overloaded_code in self.same_day_cleaning_inspectors:
-                                                self.same_day_cleaning_inspectors[overloaded_code] -= 1
-                                                if self.same_day_cleaning_inspectors[overloaded_code] <= 0:
-                                                    del self.same_day_cleaning_inspectors[overloaded_code]
-                                            # 新しい検査員を当日洗浄上がり品に割り当てられた検査員として記録
-                                            if new_code not in self.same_day_cleaning_inspectors:
-                                                self.same_day_cleaning_inspectors[new_code] = 0
-                                            self.same_day_cleaning_inspectors[new_code] += 1
+                                            # 元の検査員がこの品番に割り当てられていた場合、削除
+                                            if product_number in self.same_day_cleaning_inspectors:
+                                                self.same_day_cleaning_inspectors[product_number].discard(overloaded_code)
+                                            # 新しい検査員をこの品番に割り当てられた検査員として記録
+                                            self.same_day_cleaning_inspectors.setdefault(product_number, set()).add(new_code)
                                         
                                         # チーム情報を更新
                                         self.update_team_info(result_df_sorted, lot_index, inspector_master_df, show_skill_values)
@@ -3877,14 +4010,21 @@ class InspectorAssignmentManager:
             self.inspector_work_hours = {}
             self.inspector_product_hours = {}
             
-            for index, row in result_df.iterrows():
-                product_number = row['品番']
-                divided_time = row.get('分割検査時間', 0.0)
+            # 列インデックスを事前に取得（高速化：itertuples()を使用）
+            product_col_idx = result_df.columns.get_loc('品番')
+            divided_time_col_idx = result_df.columns.get_loc('分割検査時間')
+            inspector_col_indices = [result_df.columns.get_loc(f'検査員{i}') for i in range(1, 6)]
+            
+            for row_tuple in result_df.itertuples(index=True):
+                index = row_tuple[0]  # インデックス
+                product_number = row_tuple[product_col_idx + 1]  # itertuplesはインデックスを含むため+1
+                divided_time = row_tuple[divided_time_col_idx + 1] if divided_time_col_idx < len(row_tuple) - 1 else 0.0
                 
                 for i in range(1, 6):
-                    inspector_col = f'検査員{i}'
-                    if pd.notna(row.get(inspector_col)) and str(row[inspector_col]).strip() != '':
-                        inspector_name = str(row[inspector_col]).strip()
+                    inspector_col_idx = inspector_col_indices[i - 1]
+                    inspector_value = row_tuple[inspector_col_idx + 1] if inspector_col_idx < len(row_tuple) - 1 else None
+                    if pd.notna(inspector_value) and str(inspector_value).strip() != '':
+                        inspector_name = str(inspector_value).strip()
                         if '(' in inspector_name:
                             inspector_name = inspector_name.split('(')[0].strip()
                         if not inspector_name:
@@ -3911,14 +4051,16 @@ class InspectorAssignmentManager:
             
             # 勤務時間超過を再チェック
             phase2_5_violations = []
-            for index, row in result_df.iterrows():
-                product_number = row['品番']
-                divided_time = row.get('分割検査時間', 0.0)
+            for row_tuple in result_df.itertuples(index=True):
+                index = row_tuple[0]  # インデックス
+                product_number = row_tuple[product_col_idx + 1]  # itertuplesはインデックスを含むため+1
+                divided_time = row_tuple[divided_time_col_idx + 1] if divided_time_col_idx < len(row_tuple) - 1 else 0.0
                 
                 for i in range(1, 6):
-                    inspector_col = f'検査員{i}'
-                    if pd.notna(row.get(inspector_col)) and str(row[inspector_col]).strip() != '':
-                        inspector_name = str(row[inspector_col]).strip()
+                    inspector_col_idx = inspector_col_indices[i - 1]
+                    inspector_value = row_tuple[inspector_col_idx + 1] if inspector_col_idx < len(row_tuple) - 1 else None
+                    if pd.notna(inspector_value) and str(inspector_value).strip() != '':
+                        inspector_name = str(inspector_value).strip()
                         if '(' in inspector_name:
                             inspector_name = inspector_name.split('(')[0].strip()
                         if not inspector_name:
@@ -4215,14 +4357,21 @@ class InspectorAssignmentManager:
                 self.inspector_work_hours = {}
                 self.inspector_product_hours = {}
                 
-                for index, row in result_df.iterrows():
-                    product_number = row['品番']
-                    divided_time = row.get('分割検査時間', 0.0)
+                # 列インデックスを事前に取得（高速化：itertuples()を使用）
+                product_col_idx = result_df.columns.get_loc('品番')
+                divided_time_col_idx = result_df.columns.get_loc('分割検査時間')
+                inspector_col_indices = [result_df.columns.get_loc(f'検査員{i}') for i in range(1, 6)]
+                
+                for row_tuple in result_df.itertuples(index=True):
+                    index = row_tuple[0]  # インデックス
+                    product_number = row_tuple[product_col_idx + 1]  # itertuplesはインデックスを含むため+1
+                    divided_time = row_tuple[divided_time_col_idx + 1] if divided_time_col_idx < len(row_tuple) - 1 else 0.0
                     
                     for i in range(1, 6):
-                        inspector_col = f'検査員{i}'
-                        if pd.notna(row.get(inspector_col)) and str(row[inspector_col]).strip() != '':
-                            inspector_name = str(row[inspector_col]).strip()
+                        inspector_col_idx = inspector_col_indices[i - 1]
+                        inspector_value = row_tuple[inspector_col_idx + 1] if inspector_col_idx < len(row_tuple) - 1 else None
+                        if pd.notna(inspector_value) and str(inspector_value).strip() != '':
+                            inspector_name = str(inspector_value).strip()
                             if '(' in inspector_name:
                                 inspector_name = inspector_name.split('(')[0].strip()
                             if not inspector_name:
@@ -4254,8 +4403,12 @@ class InspectorAssignmentManager:
             
             # 未割当のロットを取得（出荷予定日順）
             unassigned_indices = []
-            for index, row in result_df.iterrows():
-                inspector_count = row.get('検査員人数', 0)
+            # 列インデックスを事前に取得（高速化：itertuples()を使用）
+            inspector_count_col_idx = result_df.columns.get_loc('検査員人数')
+            
+            for row_tuple in result_df.itertuples(index=True):
+                index = row_tuple[0]  # インデックス
+                inspector_count = row_tuple[inspector_count_col_idx + 1] if inspector_count_col_idx < len(row_tuple) - 1 else 0
                 if inspector_count == 0 or pd.isna(inspector_count) or inspector_count == 0:
                     unassigned_indices.append(index)
             
@@ -4330,6 +4483,17 @@ class InspectorAssignmentManager:
                                 is_near_shipping_date = True
                                 self.log_message(f"未割当ロット再処理: 品番 {product_number} の出荷予定日が近日（{shipping_date_date}）のため、制約を緩和して処理します")
                     
+                    # 当日洗浄上がり品かどうかを判定
+                    shipping_date_raw = row.get('出荷予定日', None)
+                    shipping_date_str = str(shipping_date_raw).strip() if pd.notna(shipping_date_raw) else ''
+                    is_same_day_cleaning = (
+                        shipping_date_str == "当日洗浄上がり品" or
+                        shipping_date_str == "当日洗浄品" or
+                        "当日洗浄" in shipping_date_str or
+                        shipping_date_str == "先行検査" or
+                        shipping_date_str == "当日先行検査"
+                    )
+                    
                     # 利用可能な検査員を取得
                     shipping_date = row.get('出荷予定日', None)
                     if is_new_product:
@@ -4348,6 +4512,35 @@ class InspectorAssignmentManager:
                             self.log_message(f"警告: 品番 {product_number} の検査員が見つかりません")
                         continue
                     
+                    # 当日洗浄上がり品の場合は、既にこの品番に割り当てられた検査員を除外（品番単位の制約）
+                    # ただし、候補が0人の場合は優先順位が高いため、制約を緩和して割り当てを試みる
+                    if is_same_day_cleaning:
+                        # この品番に既に割り当てられた検査員を取得（品番単位の制約）
+                        already_assigned_to_this_product = self.same_day_cleaning_inspectors.get(product_number, set())
+                        original_count = len(available_inspectors)
+                        # 既にこの品番に割り当てられた検査員を除外
+                        filtered_inspectors = [insp for insp in available_inspectors if insp['コード'] not in already_assigned_to_this_product]
+                        
+                        # 品番単位の制約を適用
+                        available_inspectors = filtered_inspectors
+                        if original_count > len(available_inspectors):
+                            self.log_message(f"未割当ロット再処理: 当日洗浄上がり品/先行検査品 {product_number}: 既にこの品番に割り当てられた検査員 {original_count - len(available_inspectors)}人を除外しました（品番単位の制約）")
+                        
+                        # 候補が0人の場合は、優先順位が高いため制約を緩和して元の候補を使用
+                        if len(available_inspectors) == 0:
+                            self.log_message(f"⚠️ 警告: 未割当ロット再処理: 当日洗浄上がり品 {product_number} の候補が0人ですが、優先順位が高いため品番単位の制約を緩和して再試行します", level='warning')
+                            # 元の候補を再取得（フィルタリング前）
+                            if is_new_product:
+                                available_inspectors = self.get_new_product_team_inspectors(inspector_master_df)
+                            else:
+                                available_inspectors = self.get_available_inspectors(
+                                    product_number, process_number, skill_master_df, inspector_master_df,
+                                    shipping_date=shipping_date, allow_new_team_fallback=True
+                                )
+                            self.log_message(f"未割当ロット再処理: 当日洗浄上がり品 {product_number}: 制約緩和後の候補数 {len(available_inspectors)}人")
+                        elif len(available_inspectors) < required_inspectors:
+                            self.log_message(f"⚠️ 警告: 未割当ロット再処理: 当日洗浄上がり品 {product_number} の候補が不足しています（必要: {required_inspectors}人、利用可能: {len(available_inspectors)}人）。可能な限り割り当てます。", level='warning')
+                    
                     # 未割当ロット再処理時は、4時間上限を緩和して再試行
                     # まず通常の条件で試行
                     assigned_inspectors = self.select_inspectors(
@@ -4356,12 +4549,18 @@ class InspectorAssignmentManager:
                     )
                     
                     # 割り当てできなかった場合、4時間上限を緩和（3.5h以上も許可）して再試行
+                    # ただし、当日洗浄上がり品の場合は品番単位の制約を維持
                     if not assigned_inspectors:
                         self.log_message(f"未割当ロット再処理: 品番 {product_number} の通常条件での割り当てに失敗。4時間上限を緩和して再試行します")
                         # 4時間上限を緩和した候補を取得
                         relaxed_candidates = []
+                        # 当日洗浄上がり品の場合は、既にこの品番に割り当てられた検査員を除外（品番単位の制約）
+                        already_assigned_to_this_product = self.same_day_cleaning_inspectors.get(product_number, set()) if is_same_day_cleaning else set()
                         for insp in available_inspectors:
                             code = insp['コード']
+                            # 当日洗浄上がり品の場合は、既にこの品番に割り当てられた検査員を除外
+                            if is_same_day_cleaning and code in already_assigned_to_this_product:
+                                continue
                             current = self.inspector_product_hours.get(code, {}).get(product_number, 0.0)
                             projected_hours = current + divided_time
                             # 4.0hを超える場合は除外（ただし、4.5h未満まで許可）
@@ -4382,14 +4581,20 @@ class InspectorAssignmentManager:
                                 self.log_message(f"未割当ロット再処理: 品番 {product_number} の上限緩和条件で割り当て成功")
                     
                     # まだ割り当てできず、かつ出荷予定日が近日の新規品の場合、勤務時間制約も緩和して再試行
+                    # ただし、当日洗浄上がり品の場合は品番単位の制約を維持
                     if not assigned_inspectors and is_new_product and is_near_shipping_date:
                         self.log_message(f"未割当ロット再処理: 品番 {product_number} の出荷予定日が近日のため、勤務時間制約も緩和して再試行します")
                         # 勤務時間制約を緩和した候補を取得
                         relaxed_work_hours_candidates = []
                         current_date = pd.Timestamp.now().date()
+                        # 当日洗浄上がり品の場合は、既に当日洗浄上がり品全体に割り当てられた検査員を除外（当日洗浄上がり品全体の制約）
+                        already_assigned_to_same_day_cleaning = self.same_day_cleaning_inspectors if is_same_day_cleaning else set()
                         
                         for insp in available_inspectors:
                             code = insp['コード']
+                            # 当日洗浄上がり品の場合は、既に当日洗浄上がり品全体に割り当てられた検査員を除外
+                            if is_same_day_cleaning and code in already_assigned_to_same_day_cleaning:
+                                continue
                             # 4時間上限チェック
                             current = self.inspector_product_hours.get(code, {}).get(product_number, 0.0)
                             projected_hours = current + divided_time
@@ -4430,6 +4635,60 @@ class InspectorAssignmentManager:
                             )
                             if assigned_inspectors:
                                 self.log_message(f"未割当ロット再処理: 品番 {product_number} の勤務時間制約緩和条件で割り当て成功")
+                    
+                    # 当日洗浄上がり品の場合は、候補が不足していても制約を大幅に緩和して割り当てを試みる
+                    if not assigned_inspectors and is_same_day_cleaning:
+                        self.log_message(f"未割当ロット再処理: 当日洗浄上がり品 {product_number} の通常条件での割り当てに失敗。制約を大幅に緩和して再試行します")
+                        # 当日洗浄上がり品の場合は、制約を大幅に緩和して候補を取得
+                        # 候補が0人の場合は、元の候補を再取得（当日洗浄上がり品全体の制約を緩和）
+                        if len(available_inspectors) == 0:
+                            self.log_message(f"未割当ロット再処理: 当日洗浄上がり品 {product_number} の候補が0人のため、元の候補を再取得します（当日洗浄上がり品全体の制約を緩和）")
+                            if is_new_product:
+                                available_inspectors = self.get_new_product_team_inspectors(inspector_master_df)
+                            else:
+                                available_inspectors = self.get_available_inspectors(
+                                    product_number, process_number, skill_master_df, inspector_master_df,
+                                    shipping_date=shipping_date, allow_new_team_fallback=True
+                                )
+                            self.log_message(f"未割当ロット再処理: 当日洗浄上がり品 {product_number}: 制約緩和後の候補数 {len(available_inspectors)}人")
+                        
+                        relaxed_same_day_candidates = []
+                        already_assigned_to_this_product = self.same_day_cleaning_inspectors.get(product_number, set())
+                        current_date = pd.Timestamp.now().date()
+                        
+                        # 元のavailable_inspectorsから、当日洗浄上がり品の制約を緩和した候補を取得
+                        # 候補が0人の場合は、品番単位の制約も緩和（既に割り当てられた検査員も含める）
+                        # 候補が0人でない場合は、品番単位の制約を維持
+                        use_original_candidates = len(available_inspectors) == 0
+                        for insp in available_inspectors:
+                            code = insp['コード']
+                            # 候補が0人の場合は、品番単位の制約を緩和（既に割り当てられた検査員も含める）
+                            # それ以外の場合は、品番単位の制約を維持
+                            if not use_original_candidates and code in already_assigned_to_this_product:
+                                continue
+                            
+                            # 4時間上限を大幅に緩和（4.5hまで許容）
+                            current = self.inspector_product_hours.get(code, {}).get(product_number, 0.0)
+                            projected_hours = current + divided_time
+                            if projected_hours >= 4.5:
+                                continue
+                            
+                            # 勤務時間を大幅に緩和（最大勤務時間の95%まで許容）
+                            daily_hours = self.inspector_daily_assignments.get(code, {}).get(current_date, 0.0)
+                            max_daily_hours = self.get_inspector_max_hours(code, inspector_master_df)
+                            if daily_hours + divided_time > max_daily_hours * 0.95:
+                                continue
+                            
+                            relaxed_same_day_candidates.append(insp)
+                        
+                        if relaxed_same_day_candidates:
+                            # 緩和条件で再試行
+                            assigned_inspectors = self.select_inspectors(
+                                relaxed_same_day_candidates, required_inspectors, divided_time, 
+                                inspector_master_df, product_number, is_new_product=is_new_product, relax_work_hours=True
+                            )
+                            if assigned_inspectors:
+                                self.log_message(f"未割当ロット再処理: 当日洗浄上がり品 {product_number} の制約緩和条件で割り当て成功")
                     
                     if assigned_inspectors:
                         # 割り当て成功
@@ -4479,6 +4738,15 @@ class InspectorAssignmentManager:
                             for insp in assigned_inspectors:
                                 if isinstance(insp, dict) and insp.get('over_product_limit') and 'コード' in insp:
                                     self.relaxed_product_limit_assignments.add((insp['コード'], product_number))
+                        
+                        # 当日洗浄上がり品の検査員を追跡（重複を避けるため、当日洗浄上がり品全体）
+                        if is_same_day_cleaning:
+                            for inspector in assigned_inspectors:
+                                if isinstance(inspector, dict) and 'コード' in inspector:
+                                    code = inspector['コード']
+                                    self.same_day_cleaning_inspectors.setdefault(product_number, set()).add(code)
+                            self.log_message(f"未割当ロット再処理: 当日洗浄上がり品/先行検査品 {product_number} の検査員を追跡しました（{len(assigned_inspectors)}人）")
+                        
                         self.log_message(f"未割当ロット再処理成功: 品番 {product_number}, 出荷予定日 {row['出荷予定日']}, {len(assigned_inspectors)}人割り当て")
                     else:
                         self.log_message(f"警告: 未割当ロット {product_number} の再処理に失敗しました（ルール違反を避けるため未割当のまま）")
@@ -4848,6 +5116,16 @@ class InspectorAssignmentManager:
                     
                     self.log_message(f"⚠️ ロットインデックス {index} (品番: {product_number}, 出荷予定日: {shipping_date}) の違反を是正します（{violation[3]}）")
                     
+                    # 当日洗浄上がり品かどうかを判定
+                    shipping_date_str = str(shipping_date).strip() if pd.notna(shipping_date) else ''
+                    is_same_day_cleaning = (
+                        shipping_date_str == "当日洗浄上がり品" or 
+                        shipping_date_str == "当日洗浄品" or
+                        "当日洗浄" in shipping_date_str or
+                        shipping_date_str == "先行検査" or
+                        shipping_date_str == "当日先行検査"
+                    )
+                    
                     # 違反を是正する処理を試みる
                     violation_resolved = self.fix_single_violation(
                         index, violation[1], violation[2], 
@@ -4860,9 +5138,15 @@ class InspectorAssignmentManager:
                         resolved_count += 1
                         self.log_message(f"✅ ロットインデックス {index} の違反を是正しました")
                     else:
-                        # 是正できなかった場合は未割当にする
-                        self.clear_assignment(result_df, index)
-                        self.log_message(f"⚠️ ロットインデックス {index} を未割当にしました（{violation[3]}）")
+                        # 当日洗浄上がり品の場合は割り当てを維持（優先順位が高いため保護）
+                        if is_same_day_cleaning:
+                            self.log_message(f"⚠️ 当日洗浄上がり品のため、ルール違反があっても割り当てを維持します（品番: {product_number}, 出荷予定日: {shipping_date_str}）", level='warning')
+                            # 割り当てを維持（未割当にしない）
+                            resolved_count += 1
+                        else:
+                            # 是正できなかった場合は未割当にする
+                            self.clear_assignment(result_df, index)
+                            self.log_message(f"⚠️ ロットインデックス {index} を未割当にしました（{violation[3]}）")
                 
                 self.log_message(f"フェーズ3.5違反是正結果: {resolved_count}件是正、{len(phase3_5_violations) - resolved_count}件未割当")
                 
@@ -5128,10 +5412,31 @@ class InspectorAssignmentManager:
                     # 既に割り当てられている人以外で、勤務時間に余裕がある人を探す
                     replacement_candidates = []
                     excluded_reasons = {}  # 除外理由を記録
+                    
+                    # 当日洗浄上がり品かどうかを判定
+                    shipping_date_raw = row.get('出荷予定日', None)
+                    shipping_date_str = str(shipping_date_raw).strip() if pd.notna(shipping_date_raw) else ''
+                    is_same_day_cleaning_lot = (
+                        shipping_date_str == "当日洗浄上がり品" or
+                        shipping_date_str == "当日洗浄品" or
+                        "当日洗浄" in shipping_date_str
+                    )
+                    
+                    # 当日洗浄上がり品の場合、既にこの品番に割り当てられた検査員を取得
+                    already_assigned_to_this_product = set()
+                    if is_same_day_cleaning_lot:
+                        already_assigned_to_this_product = self.same_day_cleaning_inspectors.get(product_number, set())
+                    
                     for insp in available_inspectors:
                         if insp['コード'] not in current_codes:
                             code = insp['コード']
                             insp_name = insp['氏名']
+                            
+                            # 当日洗浄上がり品の場合、既にこの品番に割り当てられた検査員を除外（品番単位の制約）
+                            if is_same_day_cleaning_lot and code in already_assigned_to_this_product:
+                                excluded_reasons[insp_name] = f"既にこの品番に割り当て済み（品番単位の制約）"
+                                continue
+                            
                             max_hours = inspector_max_hours.get(code, 8.0)
                             # 勤務時間チェック
                             if not self.check_work_hours_capacity(code, divided_time, max_hours, current_date):
@@ -5213,6 +5518,14 @@ class InspectorAssignmentManager:
                         if self.inspector_product_hours[new_code][product_number] > PRODUCT_LIMIT_HARD_THRESHOLD:
                             self.relaxed_product_limit_assignments.add((new_code, product_number))
                         
+                        # 当日洗浄上がり品のロットの場合、same_day_cleaning_inspectorsを更新（品番単位）
+                        if is_same_day_cleaning_lot:
+                            # 元の検査員がこの品番に割り当てられていた場合、削除
+                            if product_number in self.same_day_cleaning_inspectors:
+                                self.same_day_cleaning_inspectors[product_number].discard(old_code)
+                            # 新しい検査員をこの品番に割り当てられた検査員として記録
+                            self.same_day_cleaning_inspectors.setdefault(product_number, set()).add(new_code)
+                        
                         # チーム情報を更新
                         self.update_team_info(result_df, index, inspector_master_df, show_skill_values)
                         
@@ -5246,10 +5559,31 @@ class InspectorAssignmentManager:
                     # 置き換え候補を探す（同一品番の4時間上限チェックも含む）
                     replacement_candidates = []
                     excluded_reasons = {}  # 除外理由を記録
+                    
+                    # 当日洗浄上がり品かどうかを判定
+                    shipping_date_raw = row.get('出荷予定日', None)
+                    shipping_date_str = str(shipping_date_raw).strip() if pd.notna(shipping_date_raw) else ''
+                    is_same_day_cleaning_lot = (
+                        shipping_date_str == "当日洗浄上がり品" or
+                        shipping_date_str == "当日洗浄品" or
+                        "当日洗浄" in shipping_date_str
+                    )
+                    
+                    # 当日洗浄上がり品の場合、既にこの品番に割り当てられた検査員を取得
+                    already_assigned_to_this_product = set()
+                    if is_same_day_cleaning_lot:
+                        already_assigned_to_this_product = self.same_day_cleaning_inspectors.get(product_number, set())
+                    
                     for insp in available_inspectors:
                         if insp['コード'] not in current_codes:
                             code = insp['コード']
                             insp_name = insp['氏名']
+                            
+                            # 当日洗浄上がり品の場合、既にこの品番に割り当てられた検査員を除外（品番単位の制約）
+                            if is_same_day_cleaning_lot and code in already_assigned_to_this_product:
+                                excluded_reasons[insp_name] = f"既にこの品番に割り当て済み（品番単位の制約）"
+                                continue
+                            
                             max_hours = inspector_max_hours.get(code, 8.0)
                             # 勤務時間チェック
                             if not self.check_work_hours_capacity(code, inspection_time, max_hours, current_date):
@@ -5325,6 +5659,14 @@ class InspectorAssignmentManager:
                             self.inspector_product_hours[new_code].get(product_number, 0.0) + inspection_time
                         )
                         
+                        # 当日洗浄上がり品のロットの場合、same_day_cleaning_inspectorsを更新（品番単位）
+                        if is_same_day_cleaning_lot:
+                            # 元の検査員がこの品番に割り当てられていた場合、削除
+                            if product_number in self.same_day_cleaning_inspectors:
+                                self.same_day_cleaning_inspectors[product_number].discard(old_code)
+                            # 新しい検査員をこの品番に割り当てられた検査員として記録
+                            self.same_day_cleaning_inspectors.setdefault(product_number, set()).add(new_code)
+                        
                         result_df.at[index, '分割検査時間'] = round(inspection_time, 1)
                         
                         # チーム情報を更新
@@ -5356,10 +5698,31 @@ class InspectorAssignmentManager:
                     # 追加できる検査員を探す
                     addition_candidates = []
                     excluded_reasons = {}  # 除外理由を記録
+                    
+                    # 当日洗浄上がり品かどうかを判定
+                    shipping_date_raw = row.get('出荷予定日', None)
+                    shipping_date_str = str(shipping_date_raw).strip() if pd.notna(shipping_date_raw) else ''
+                    is_same_day_cleaning_lot = (
+                        shipping_date_str == "当日洗浄上がり品" or
+                        shipping_date_str == "当日洗浄品" or
+                        "当日洗浄" in shipping_date_str
+                    )
+                    
+                    # 当日洗浄上がり品の場合、既にこの品番に割り当てられた検査員を取得
+                    already_assigned_to_this_product = set()
+                    if is_same_day_cleaning_lot:
+                        already_assigned_to_this_product = self.same_day_cleaning_inspectors.get(product_number, set())
+                    
                     for insp in available_inspectors:
                         if insp['コード'] not in current_codes:
                             code = insp['コード']
                             insp_name = insp['氏名']
+                            
+                            # 当日洗浄上がり品の場合、既にこの品番に割り当てられた検査員を除外（品番単位の制約）
+                            if is_same_day_cleaning_lot and code in already_assigned_to_this_product:
+                                excluded_reasons[insp_name] = f"既にこの品番に割り当て済み（品番単位の制約）"
+                                continue
+                            
                             max_hours = inspector_max_hours.get(code, 8.0)
                             if not self.check_work_hours_capacity(code, divided_time, max_hours, current_date):
                                 daily_hours = self.inspector_daily_assignments.get(code, {}).get(current_date, 0.0)
@@ -5442,6 +5805,11 @@ class InspectorAssignmentManager:
                         self.inspector_product_hours[new_code][product_number] = (
                             self.inspector_product_hours[new_code].get(product_number, 0.0) + new_divided_time
                         )
+                        
+                        # 当日洗浄上がり品のロットの場合、same_day_cleaning_inspectorsを更新（品番単位）
+                        if is_same_day_cleaning_lot:
+                            # 新しい検査員をこの品番に割り当てられた検査員として記録
+                            self.same_day_cleaning_inspectors.setdefault(product_number, set()).add(new_code)
                         
                         result_df.at[index, '分割検査時間'] = round(actual_divided_time, 1)
                         
