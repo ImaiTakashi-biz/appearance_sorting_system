@@ -1,5 +1,5 @@
 ﻿"""
-出荷検査データ抽出システム - メインUI
+外観検査振分支援システム - メインUI
 近未来的なデザインで出荷予定日を指定してデータを抽出する
 """
 
@@ -12,6 +12,7 @@ from datetime import datetime, date, timedelta
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
+import sys
 from pathlib import Path
 import json
 from loguru import logger
@@ -25,6 +26,7 @@ from app.services.cleaning_request_service import get_cleaning_lots
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import matplotlib.font_manager as fm
+from PIL import Image
 
 
 class ModernDataExtractorUI:
@@ -47,9 +49,18 @@ class ModernDataExtractorUI:
         
         # メインウィンドウの作成
         self.root = ctk.CTk()
-        self.root.title("出荷検査データ抽出システム")
+        self.root.title("外観検査振分支援システム")
         self.root.geometry("1200x800")  # 初期サイズを設定
         self.root.minsize(1000, 700)
+        
+        # ウィンドウのアイコンを設定（exe化対応）
+        try:
+            icon_path = self._get_icon_path("appearance_sorting_system.ico")
+            if icon_path and Path(icon_path).exists():
+                self.root.iconbitmap(icon_path)
+                logger.info(f"ウィンドウアイコンを設定しました: {icon_path}")
+        except Exception as e:
+            logger.warning(f"ウィンドウアイコンの設定に失敗しました: {e}")
         
         # ウィンドウの背景色を白に設定
         self.root.configure(fg_color=("white", "white"))
@@ -329,20 +340,114 @@ class ModernDataExtractorUI:
         # メインスクロールをバインド
         self.bind_main_scroll()
     
+    def _get_icon_path(self, icon_filename: str) -> str:
+        """
+        アイコンファイルのパスを解決（exe化対応）
+        
+        Args:
+            icon_filename: アイコンファイル名
+            
+        Returns:
+            解決されたアイコンファイルのパス
+        """
+        if getattr(sys, 'frozen', False):
+            # exe化されている場合
+            # まず一時ディレクトリ（sys._MEIPASS）を確認（埋め込まれたファイル）
+            temp_dir = Path(sys._MEIPASS)
+            temp_file = temp_dir / icon_filename
+            if temp_file.exists():
+                return str(temp_file)
+            
+            # 次にexeと同じ階層を確認
+            exe_dir = Path(sys.executable).parent
+            exe_file = exe_dir / icon_filename
+            if exe_file.exists():
+                return str(exe_file)
+            
+            # 見つからない場合は元のパスを返す
+            return icon_filename
+        else:
+            # 通常のPython実行の場合：スクリプトの場所を基準にする
+            script_dir = Path(__file__).parent.parent.parent
+            icon_path = script_dir / icon_filename
+            if icon_path.exists():
+                return str(icon_path)
+            return icon_filename
+    
+    def _get_image_path(self, image_filename: str) -> str:
+        """
+        画像ファイルのパスを解決（exe化対応）
+        
+        Args:
+            image_filename: 画像ファイル名
+            
+        Returns:
+            解決された画像ファイルのパス
+        """
+        if getattr(sys, 'frozen', False):
+            # exe化されている場合
+            # まず一時ディレクトリ（sys._MEIPASS）を確認（埋め込まれたファイル）
+            temp_dir = Path(sys._MEIPASS)
+            temp_file = temp_dir / image_filename
+            if temp_file.exists():
+                return str(temp_file)
+            
+            # 次にexeと同じ階層を確認
+            exe_dir = Path(sys.executable).parent
+            exe_file = exe_dir / image_filename
+            if exe_file.exists():
+                return str(exe_file)
+            
+            # 見つからない場合は元のパスを返す
+            return image_filename
+        else:
+            # 通常のPython実行の場合：スクリプトの場所を基準にする
+            script_dir = Path(__file__).parent.parent.parent
+            image_path = script_dir / image_filename
+            if image_path.exists():
+                return str(image_path)
+            return image_filename
+    
     def create_title_section(self, parent):
         """タイトルセクションの作成"""
-        title_frame = ctk.CTkFrame(parent, height=60, fg_color="white", corner_radius=0)
-        title_frame.pack(fill="x", pady=(10, 15))
+        title_frame = ctk.CTkFrame(parent, height=70, fg_color="white", corner_radius=0)
+        title_frame.pack(fill="x", pady=(5, 15))  # 上部の余白を5pxに削減
         title_frame.pack_propagate(False)
         
-        # メインタイトル
+        # タイトルと画像を中央配置するコンテナ
+        title_container = ctk.CTkFrame(title_frame, fg_color="white", corner_radius=0)
+        title_container.place(relx=0.5, rely=0.5, anchor="center")  # 中央配置
+        
+        # 画像を読み込む
+        image_filename = "ChatGPT Image 2025年11月13日 16_05_27.png"
+        image_path = self._get_image_path(image_filename)
+        
+        try:
+            # 画像を読み込んでリサイズ（サイズを大きく）
+            pil_image = Image.open(image_path)
+            # タイトルに合わせたサイズにリサイズ（高さ50pxに拡大）
+            pil_image = pil_image.resize((50, 50), Image.Resampling.LANCZOS)
+            ctk_image = ctk.CTkImage(light_image=pil_image, dark_image=pil_image, size=(50, 50))
+            
+            # 画像ラベル
+            image_label = ctk.CTkLabel(
+                title_container,
+                image=ctk_image,
+                text=""  # テキストなし
+            )
+            image_label.pack(side="left", padx=(0, 12))  # 画像とテキストの間隔を調整
+        except Exception as e:
+            logger.warning(f"画像の読み込みに失敗しました: {e}")
+            # 画像が読み込めない場合は画像なしで続行
+        
+        # メインタイトル（サイズを大きく、中央配置）
         title_label = ctk.CTkLabel(
-            title_frame,
-            text="出荷検査データ抽出システム",
-            font=ctk.CTkFont(family="Yu Gothic", size=28, weight="bold"),
+            title_container,
+            text="外観検査振分支援システム",
+            font=ctk.CTkFont(family="Yu Gothic", size=32, weight="bold"),  # 28から32に拡大
             text_color="#1E3A8A"  # 濃い青
         )
-        title_label.pack(pady=(10, 5))
+        title_label.pack(side="left", pady=0)
         
     
     def create_date_section(self, parent):
@@ -1856,7 +1961,8 @@ class ModernDataExtractorUI:
             self.current_extraction_date = extraction_date
             
             vacation_sheets_url = os.getenv("GOOGLE_SHEETS_URL_VACATION")
-            credentials_path = os.getenv("GOOGLE_SHEETS_CREDENTIALS_PATH")
+            # config.pyで解決されたパスを使用（exe化対応）
+            credentials_path = self.config.google_sheets_credentials_path
             
             vacation_data_for_date = {}  # 初期化
             inspector_master_df = None  # 初期化
@@ -3399,7 +3505,7 @@ class ModernDataExtractorUI:
     def run(self):
         """アプリケーションの実行"""
         try:
-            self.log_message("出荷検査データ抽出システムを起動しました")
+            self.log_message("外観検査振分支援システムを起動しました")
             self.log_message("設定を確認してください")
             
             # 設定情報の表示
