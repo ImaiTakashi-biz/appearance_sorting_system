@@ -24,6 +24,8 @@ MANIFEST
 # PyInstaller
 *.manifest
 *.spec
+# 生成されたアイコンファイル（convert_icon.pyから生成される）
+appearance_sorting_system.ico
 
 # Installer logs
 pip-log.txt

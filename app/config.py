@@ -4,6 +4,7 @@
 """
 
 import os
+import sys
 from pathlib import Path
 from app.env_loader import load_env_file
 from loguru import logger
@@ -19,8 +20,46 @@ class DatabaseConfig:
         Args:
             env_file_path (str): 環境変数ファイルのパス
         """
-        self.env_file_path = env_file_path
+        # exe化されている場合とそうでない場合でconfig.envのパスを決定
+        if getattr(sys, 'frozen', False):
+            # exe化されている場合：exeファイルの場所を基準にする
+            application_path = Path(sys.executable).parent
+            self.env_file_path = str(application_path / env_file_path)
+        else:
+            # 通常のPython実行の場合：相対パスまたは絶対パスを使用
+            self.env_file_path = env_file_path
+        
         self._load_config()
+    
+    def _get_resource_path(self, file_path: str) -> str:
+        """
+        exe化されている場合とそうでない場合でリソースファイルのパスを解決
+        
+        Args:
+            file_path: ファイルパス（相対パスまたはファイル名）
+            
+        Returns:
+            解決されたファイルパス
+        """
+        if getattr(sys, 'frozen', False):
+            # exe化されている場合
+            # まず一時ディレクトリ（sys._MEIPASS）を確認（埋め込まれたファイル）
+            temp_dir = Path(sys._MEIPASS)
+            temp_file = temp_dir / Path(file_path).name
+            if temp_file.exists():
+                return str(temp_file)
+            
+            # 次にexeと同じ階層を確認
+            exe_dir = Path(sys.executable).parent
+            exe_file = exe_dir / Path(file_path).name
+            if exe_file.exists():
+                return str(exe_file)
+            
+            # 見つからない場合は元のパスを返す
+            return file_path
+        else:
+            # 通常のPython実行の場合
+            return file_path
 
     def _load_config(self):
         """設定ファイルを読み込み"""
@@ -41,7 +80,14 @@ class DatabaseConfig:
             self.skill_master_path = os.getenv("SKILL_MASTER_PATH")
             self.inspection_target_csv_path = os.getenv("INSPECTION_TARGET_CSV_PATH")
             self.google_sheets_url = os.getenv("GOOGLE_SHEETS_URL")
-            self.google_sheets_credentials_path = os.getenv("GOOGLE_SHEETS_CREDENTIALS_PATH")
+            
+            # Google認証情報ファイルのパスを解決（exe化対応）
+            credentials_path = os.getenv("GOOGLE_SHEETS_CREDENTIALS_PATH")
+            if credentials_path:
+                self.google_sheets_credentials_path = self._get_resource_path(credentials_path)
+            else:
+                self.google_sheets_credentials_path = None
+            
             self.google_sheets_url_cleaning = os.getenv("GOOGLE_SHEETS_URL_CLEANING")
             self.google_sheets_url_cleaning_instructions = os.getenv("GOOGLE_SHEETS_URL_CLEANING_INSTRUCTIONS")
 

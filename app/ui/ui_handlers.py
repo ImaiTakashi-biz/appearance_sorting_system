@@ -198,19 +198,38 @@ class ModernDataExtractorUI:
         except Exception as e:
             logger.error(f"メインスクロールバインド中にエラーが発生しました: {str(e)}")
     
-    def setup_logging(self):
-        """ログ設定"""
+    def setup_logging(self, execution_id: str = None):
+        """ログ設定
+        
+        Args:
+            execution_id: 実行ID（指定された場合、そのIDを含むファイル名でログを作成）
+        """
         from pathlib import Path
         from datetime import datetime
+        import sys
         
         logger.remove()  # デフォルトのハンドラーを削除
         
+        # exe化されている場合とそうでない場合でログディレクトリを決定
+        if getattr(sys, 'frozen', False):
+            # exe化されている場合：exeファイルの場所を基準にする
+            application_path = Path(sys.executable).parent
+        else:
+            # 通常のPython実行の場合：スクリプトの場所を基準にする
+            application_path = Path(__file__).parent.parent.parent
+        
         # ログディレクトリを作成
-        log_dir = Path("logs")
+        log_dir = application_path / "logs"
         log_dir.mkdir(exist_ok=True)
         
-        # ログファイルのパス（日付ごとにファイルを分ける）
-        log_file = log_dir / f"app_{datetime.now().strftime('%Y%m%d')}.log"
+        # ログファイルのパス
+        if execution_id:
+            # 実行ごとにファイルを作成（日時を含む）
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            log_file = log_dir / f"app_{timestamp}_{execution_id}.log"
+        else:
+            # 初期起動時は日付ごとにファイルを分ける（後方互換性のため）
+            log_file = log_dir / f"app_{datetime.now().strftime('%Y%m%d')}.log"
         
         # コンソール出力用のフィルタ関数
         def console_filter(record):
@@ -1818,6 +1837,10 @@ class ModernDataExtractorUI:
         """データ抽出のスレッド処理"""
         connection = None
         try:
+            # データ抽出実行ごとに新しいログファイルを作成
+            execution_id = f"{start_date}_{end_date}".replace("-", "").replace(" ", "_").replace(":", "")
+            self.setup_logging(execution_id=execution_id)
+            
             self.log_message(f"データ抽出を開始します")
             self.log_message(f"抽出期間: {start_date} ～ {end_date}")
             
