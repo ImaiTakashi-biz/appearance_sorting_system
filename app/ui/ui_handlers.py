@@ -89,6 +89,9 @@ class ModernDataExtractorUI:
         # 検査員割当てマネージャーの初期化
         self.inspector_manager = InspectorAssignmentManager(log_callback=self.log_message)
         
+        # 休暇情報テーブル用の変数
+        self.vacation_info_frame = None
+        
         # データ保存用変数
         self.current_main_data = None
         self.current_assignment_data = None
@@ -450,13 +453,12 @@ class ModernDataExtractorUI:
         )
         list_title.pack(pady=(8, 5))
         
-        # 登録リストコンテナ（スクロール可能）
-        self.registered_list_container = ctk.CTkScrollableFrame(
+        # 登録リストコンテナ（スクロールバーなし、リスト分のみ表示）
+        self.registered_list_container = ctk.CTkFrame(
             self.registered_products_frame,
-            fg_color="transparent",
-            height=200
+            fg_color="transparent"
         )
-        self.registered_list_container.pack(fill="both", expand=True, padx=10, pady=(0, 8))
+        self.registered_list_container.pack(fill="x", padx=10, pady=(0, 8))
         
         # 初期状態では登録リストを非表示
         self.registered_products_frame.pack_forget()
@@ -1827,10 +1829,15 @@ class ModernDataExtractorUI:
             # データ抽出開始日付を取得
             extraction_date = start_date if isinstance(start_date, date_type) else pd.to_datetime(start_date).date()
             
+            # インスタンス変数として保存（休暇情報テーブル表示用）
+            self.current_extraction_date = extraction_date
+            
             vacation_sheets_url = os.getenv("GOOGLE_SHEETS_URL_VACATION")
             credentials_path = os.getenv("GOOGLE_SHEETS_CREDENTIALS_PATH")
             
-            vacation_data_for_date = {}
+            vacation_data_for_date = {}  # 初期化
+            inspector_master_df = None  # 初期化
+            
             if vacation_sheets_url and credentials_path:
                 try:
                     # 月全体の休暇予定を読み込む
@@ -1845,17 +1852,42 @@ class ModernDataExtractorUI:
                     vacation_data_for_date = get_vacation_for_date(vacation_data, extraction_date)
                     
                     self.log_message(f"休暇予定を取得しました: {len(vacation_data_for_date)}名")
+                    
+                    # 検査員マスタを読み込む（休暇情報のフィルタリング用）
+                    if inspector_master_df is None:
+                        try:
+                            inspector_master_df = self.load_inspector_master()
+                        except Exception as e:
+                            self.log_message(f"警告: 検査員マスタの読み込みに失敗しました: {str(e)}")
+                    
+                    # 休暇情報テーブルを表示（検査員マスタと日付を渡す）
+                    self.root.after(0, lambda vd=vacation_data_for_date, ed=extraction_date, imd=inspector_master_df: self.display_vacation_info_table(vd, ed, imd))
                 except Exception as e:
                     self.log_message(f"警告: 休暇予定の取得に失敗しました: {str(e)}")
+                    # エラー時も空のテーブルを表示
+                    if inspector_master_df is None:
+                        try:
+                            inspector_master_df = self.load_inspector_master()
+                        except:
+                            pass
+                    self.root.after(0, lambda ed=extraction_date, imd=inspector_master_df: self.display_vacation_info_table({}, ed, imd))
             else:
                 self.log_message("休暇予定スプレッドシートの設定がありません")
+                # 設定がない場合も空のテーブルを表示
+                if inspector_master_df is None:
+                    try:
+                        inspector_master_df = self.load_inspector_master()
+                    except:
+                        pass
+                self.root.after(0, lambda ed=extraction_date, imd=inspector_master_df: self.display_vacation_info_table({}, ed, imd))
             
             # 検査員マスタを読み込む（休暇情報のマッピング用）
-            inspector_master_df = None
-            try:
-                inspector_master_df = self.load_inspector_master()
-            except Exception as e:
-                self.log_message(f"警告: 検査員マスタの読み込みに失敗しました: {str(e)}")
+            # 既に読み込まれている場合は再利用
+            if inspector_master_df is None:
+                try:
+                    inspector_master_df = self.load_inspector_master()
+                except Exception as e:
+                    self.log_message(f"警告: 検査員マスタの読み込みに失敗しました: {str(e)}")
             
             # 検査員割当てマネージャーに休暇情報を設定
             self.inspector_manager.set_vacation_data(
@@ -3743,6 +3775,175 @@ class ModernDataExtractorUI:
             logger.error(error_msg)
             return None
     
+    def display_vacation_info_table(self, vacation_data, extraction_date, inspector_master_df=None):
+        """休暇情報テーブルを表示"""
+        try:
+            # 既存の休暇情報テーブルがあれば削除
+            if hasattr(self, 'vacation_info_frame') and self.vacation_info_frame:
+                try:
+                    self.vacation_info_frame.destroy()
+                except:
+                    pass
+            
+            # 休暇情報セクションを作成
+            vacation_frame = ctk.CTkFrame(self.main_scroll_frame, fg_color="#EFF6FF", corner_radius=12)
+            vacation_frame.table_section = True
+            vacation_frame.vacation_section = True  # 休暇情報テーブルのマーカー
+            vacation_frame.pack(fill="x", padx=20, pady=(10, 10))
+            self.vacation_info_frame = vacation_frame
+            
+            # タイトルフレーム
+            title_frame = ctk.CTkFrame(vacation_frame, fg_color="transparent")
+            title_frame.pack(fill="x", padx=15, pady=(15, 5))
+            
+            # タイトル
+            title_label = ctk.CTkLabel(
+                title_frame,
+                text="休暇情報",
+                font=ctk.CTkFont(family="Yu Gothic", size=16, weight="bold")
+            )
+            title_label.pack(side="left")
+            
+            # 対象日表示フレーム
+            date_frame = ctk.CTkFrame(vacation_frame, fg_color="transparent")
+            date_frame.pack(fill="x", padx=15, pady=(0, 10))
+            
+            # 対象日表示（日付の処理を改善）
+            # extraction_dateがNoneの場合は、インスタンス変数から取得を試みる
+            if extraction_date is None and hasattr(self, 'current_extraction_date'):
+                extraction_date = self.current_extraction_date
+            
+            # extraction_dateがNoneの場合は今日の日付を使用
+            if extraction_date is None:
+                extraction_date = date.today()
+            
+            date_str = ""
+            if extraction_date is not None:
+                try:
+                    # date型の場合
+                    if hasattr(extraction_date, 'strftime'):
+                        date_str = extraction_date.strftime('%Y/%m/%d')
+                    # 文字列の場合
+                    elif isinstance(extraction_date, str):
+                        date_obj = pd.to_datetime(extraction_date).date()
+                        date_str = date_obj.strftime('%Y/%m/%d')
+                    # datetime型の場合
+                    elif hasattr(extraction_date, 'date'):
+                        date_obj = extraction_date.date()
+                        date_str = date_obj.strftime('%Y/%m/%d')
+                    else:
+                        # その他の型の場合は文字列に変換してから処理
+                        try:
+                            date_obj = pd.to_datetime(str(extraction_date)).date()
+                            date_str = date_obj.strftime('%Y/%m/%d')
+                        except:
+                            date_str = str(extraction_date)
+                            logger.debug(f"extraction_dateの型が不明です: {type(extraction_date)}, 値: {extraction_date}")
+                except Exception as e:
+                    logger.error(f"日付のフォーマット処理でエラーが発生しました: {str(e)}, extraction_date: {extraction_date}, 型: {type(extraction_date)}")
+                    # エラー時も今日の日付を表示
+                    date_str = date.today().strftime('%Y/%m/%d')
+            else:
+                # 念のため、今日の日付を表示
+                date_str = date.today().strftime('%Y/%m/%d')
+            
+            date_label = ctk.CTkLabel(
+                date_frame,
+                text=f"対象日: {date_str}",
+                font=ctk.CTkFont(family="Yu Gothic", size=14, weight="bold"),
+                text_color="#374151"
+            )
+            date_label.pack(side="left")
+            
+            # 検査員マスタから検査員名のリストを取得
+            inspector_names_set = set()
+            if inspector_master_df is not None and '#氏名' in inspector_master_df.columns:
+                inspector_names_set = set(inspector_master_df['#氏名'].dropna().astype(str).str.strip())
+                inspector_names_set = {name for name in inspector_names_set if name}  # 空文字列を除外
+            
+            # 検査員マスタに存在する検査員のみをフィルタリング
+            filtered_vacation_data = {}
+            if vacation_data and inspector_names_set:
+                for employee_name, vacation_info in vacation_data.items():
+                    # 検査員マスタに存在する検査員のみを追加
+                    if employee_name in inspector_names_set:
+                        filtered_vacation_data[employee_name] = vacation_info
+            elif vacation_data:
+                # 検査員マスタが読み込めない場合は全員表示
+                filtered_vacation_data = vacation_data
+            
+            # テーブルフレーム
+            table_frame = tk.Frame(vacation_frame)
+            table_frame.pack(fill="both", expand=True, padx=15, pady=(0, 15))
+            
+            # 列の定義（検査員名と休暇内容）
+            vacation_columns = ["検査員名", "休暇内容"]
+            
+            # Treeviewの作成
+            row_count = len(filtered_vacation_data) if filtered_vacation_data else 1
+            vacation_tree = ttk.Treeview(table_frame, columns=vacation_columns, show="headings", height=min(10, max(3, row_count)))
+            
+            # スタイルを適用
+            style = ttk.Style()
+            style.configure("Vacation.Treeview", 
+                           background="white",
+                           foreground="#374151",
+                           fieldbackground="white",
+                           font=("MS Gothic", 10, "bold"))
+            style.map("Vacation.Treeview",
+                     background=[('selected', '#3B82F6')],
+                     foreground=[('selected', 'white')])
+            
+            # 列の設定
+            vacation_tree.heading("検査員名", text="検査員名", anchor="center")
+            vacation_tree.heading("休暇内容", text="休暇内容", anchor="center")
+            vacation_tree.column("検査員名", width=200, anchor="w")
+            vacation_tree.column("休暇内容", width=300, anchor="w")
+            
+            # データの挿入
+            if filtered_vacation_data:
+                for idx, (inspector_name, vacation_info) in enumerate(sorted(filtered_vacation_data.items())):
+                    # 休暇内容を取得
+                    vacation_content = vacation_info.get('interpretation', '')
+                    if not vacation_content:
+                        vacation_content = vacation_info.get('code', '')
+                    
+                    tag = "even" if idx % 2 == 0 else "odd"
+                    vacation_tree.insert("", "end", values=(inspector_name, vacation_content), tags=(tag,))
+            else:
+                vacation_tree.insert("", "end", values=("休暇予定なし", ""))
+            
+            # タグの設定（交互行色）
+            vacation_tree.tag_configure("even", background="#F9FAFB")
+            vacation_tree.tag_configure("odd", background="#FFFFFF")
+            
+            # スクロールバー
+            # スクロールバーは不要のため削除
+            vacation_tree.grid(row=0, column=0, sticky="nsew")
+            
+            table_frame.grid_rowconfigure(0, weight=1)
+            table_frame.grid_columnconfigure(0, weight=1)
+            
+            # マウスホイールイベントのバインド（メイン画面のスクロールを有効化）
+            def on_vacation_mousewheel(event):
+                # テーブル内ではメインスクロールを使用
+                if hasattr(self.main_scroll_frame, '_parent_canvas'):
+                    canvas = self.main_scroll_frame._parent_canvas
+                    if canvas:
+                        scroll_amount = int(-1 * (event.delta / 120)) * 14
+                        canvas.yview_scroll(scroll_amount, "units")
+                return "break"
+            
+            vacation_tree.bind("<MouseWheel>", on_vacation_mousewheel)
+            table_frame.bind("<MouseWheel>", on_vacation_mousewheel)
+            
+            self.log_message(f"休暇情報テーブルを表示しました: {len(filtered_vacation_data)}名")
+            
+        except Exception as e:
+            error_msg = f"休暇情報テーブルの表示に失敗しました: {str(e)}"
+            self.log_message(error_msg)
+            logger.error(error_msg)
+    
     
     def display_inspector_assignment_table(self, inspector_df, preserve_scroll_position=False, target_row_index=None):
         """検査員割振りテーブルを表示
@@ -3797,13 +3998,14 @@ class ModernDataExtractorUI:
                 except Exception as e:
                     logger.debug(f"スクロール位置の保存に失敗: {str(e)}")
             
-            # 既存のテーブルセクションを削除
+            # 既存のテーブルセクションを削除（検査員割振りテーブルのみ）
             self.hide_current_table()
             
             # 検査員割振りセクションを作成
             inspector_frame = ctk.CTkFrame(self.main_scroll_frame, fg_color="#EFF6FF", corner_radius=12)
             inspector_frame.table_section = True
-            inspector_frame.pack(fill="x", padx=20, pady=(10, 20))
+            inspector_frame.inspector_section = True  # 検査員割振りテーブルのマーカー
+            inspector_frame.pack(fill="x", padx=20, pady=(10, 20))  # 休暇情報テーブルの下に表示
             
             # タイトルとスキル表示切り替えボタンのフレーム
             title_frame = ctk.CTkFrame(inspector_frame, fg_color="transparent")
@@ -5487,11 +5689,11 @@ class ModernDataExtractorUI:
             logger.error(error_msg)
     
     def hide_current_table(self):
-        """現在表示中のテーブルを非表示にする"""
+        """現在表示中のテーブルを非表示にする（検査員割振りテーブルのみ）"""
         try:
-            # 既存のテーブルセクションを削除
+            # 既存の検査員割振りテーブルセクションのみを削除（休暇情報テーブルは保持）
             for widget in self.main_scroll_frame.winfo_children():
-                if hasattr(widget, 'table_section'):
+                if hasattr(widget, 'table_section') and hasattr(widget, 'inspector_section'):
                     widget.destroy()
         except Exception as e:
             logger.error(f"テーブル非表示中にエラーが発生しました: {str(e)}")
