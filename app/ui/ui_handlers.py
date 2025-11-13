@@ -665,7 +665,7 @@ class ModernDataExtractorUI:
                 button_frame,
                 text="検査員固定",
                 command=lambda idx=idx: self.fix_inspectors_for_product(idx),
-                font=ctk.CTkFont(family="Yu Gothic", size=12),
+                font=ctk.CTkFont(family="Yu Gothic", size=12, weight="bold"),
                 width=100,
                 height=32,
                 fg_color="#10B981" if item['固定検査員'] else "#6B7280",
@@ -679,7 +679,7 @@ class ModernDataExtractorUI:
                 button_frame,
                 text="登録削除",
                 command=lambda idx=idx: self.delete_registered_product(idx),
-                font=ctk.CTkFont(family="Yu Gothic", size=12),
+                font=ctk.CTkFont(family="Yu Gothic", size=12, weight="bold"),
                 width=100,
                 height=32,
                 fg_color="#EF4444",
@@ -890,7 +890,7 @@ class ModernDataExtractorUI:
         """期間選択UIの作成"""
         # 出荷予定日ラベル
         label_frame = ctk.CTkFrame(parent, fg_color="transparent")
-        label_frame.pack(fill="x", padx=15, pady=(15, 8))
+        label_frame.pack(fill="x", padx=15, pady=(8, 4))
         
         date_label = ctk.CTkLabel(
             label_frame,
@@ -902,7 +902,7 @@ class ModernDataExtractorUI:
         
         # 日付入力フレーム
         date_input_frame = ctk.CTkFrame(parent, fg_color="transparent")
-        date_input_frame.pack(fill="x", padx=15, pady=(0, 15))
+        date_input_frame.pack(fill="x", padx=15, pady=(0, 8))
         
         # 開始日入力
         start_date_frame = ctk.CTkFrame(date_input_frame, fg_color="white", corner_radius=8)
@@ -917,7 +917,7 @@ class ModernDataExtractorUI:
             fg_color="white",
             text_color="#374151"
         )
-        self.start_date_entry.pack(side="left", fill="x", expand=True, padx=10, pady=10)
+        self.start_date_entry.pack(side="left", fill="x", expand=True, padx=10, pady=5)
         
         # 開始日カレンダーボタン
         start_calendar_button = ctk.CTkButton(
@@ -931,7 +931,7 @@ class ModernDataExtractorUI:
             hover_color="#F3F4F6",
             text_color="#6B7280"
         )
-        start_calendar_button.pack(side="right", padx=(0, 8), pady=8)
+        start_calendar_button.pack(side="right", padx=(0, 8), pady=5)
         
         # ～ セパレーター
         separator_label = ctk.CTkLabel(
@@ -955,7 +955,7 @@ class ModernDataExtractorUI:
             fg_color="white",
             text_color="#374151"
         )
-        self.end_date_entry.pack(side="left", fill="x", expand=True, padx=10, pady=10)
+        self.end_date_entry.pack(side="left", fill="x", expand=True, padx=10, pady=5)
         
         # 終了日カレンダーボタン
         end_calendar_button = ctk.CTkButton(
@@ -969,7 +969,7 @@ class ModernDataExtractorUI:
             hover_color="#F3F4F6",
             text_color="#6B7280"
         )
-        end_calendar_button.pack(side="right", padx=(0, 8), pady=8)
+        end_calendar_button.pack(side="right", padx=(0, 8), pady=5)
         
         # カレンダーポップアップ用の変数
         self.calendar_popup = None
@@ -1515,134 +1515,83 @@ class ModernDataExtractorUI:
     def create_button_section(self, parent):
         """ボタンセクションの作成"""
         button_frame = ctk.CTkFrame(parent, fg_color="white", corner_radius=0)
-        button_frame.pack(fill="x", pady=(10, 10), padx=20)
+        button_frame.pack(fill="x", pady=(5, 5), padx=20)
         
-        # ボタンフレーム
+        # ボタンフレーム（左右配置用）
         buttons_frame = ctk.CTkFrame(button_frame, fg_color="transparent")
-        buttons_frame.pack(fill="x", pady=10)
+        buttons_frame.pack(expand=True, fill="x", pady=5)
         
-        # データ抽出ボタン
+        # 左側のボタングループ（主要操作）
+        left_buttons_frame = ctk.CTkFrame(buttons_frame, fg_color="transparent")
+        left_buttons_frame.pack(side="left", expand=True, fill="x")
+        
+        # 右側のボタングループ（出力・終了）
+        right_buttons_frame = ctk.CTkFrame(buttons_frame, fg_color="transparent")
+        right_buttons_frame.pack(side="right", expand=True, fill="x")
+        
+        # データ抽出ボタン（左側）
         self.extract_button = ctk.CTkButton(
-            buttons_frame,
+            left_buttons_frame,
             text="データ抽出開始",
             command=self.start_extraction,
-            font=ctk.CTkFont(family="Yu Gothic", size=12),
-            height=35,
-            width=120,
+            font=ctk.CTkFont(family="Yu Gothic", size=15, weight="bold"),
+            height=45,
+            width=160,
             fg_color="#3B82F6",
             hover_color="#2563EB",
-            corner_radius=6
+            corner_radius=10,
+            border_width=0,
+            text_color="white"
         )
-        self.extract_button.pack(side="left", padx=(0, 10))
+        self.extract_button.pack(side="left", padx=(0, 15))
         
-        # 設定リロードボタン
+        # 設定リロードボタン（左側）
         self.reload_button = ctk.CTkButton(
-            buttons_frame,
+            left_buttons_frame,
             text="設定リロード",
             command=self.reload_config,
-            font=ctk.CTkFont(family="Yu Gothic", size=12),
-            height=35,
-            width=100,
+            font=ctk.CTkFont(family="Yu Gothic", size=15, weight="bold"),
+            height=45,
+            width=140,
             fg_color="#6B7280",
             hover_color="#4B5563",
-            corner_radius=6
+            corner_radius=10,
+            border_width=0,
+            text_color="white"
         )
-        self.reload_button.pack(side="left", padx=(0, 10))
+        self.reload_button.pack(side="left", padx=(0, 15))
         
-        # Excel出力ボタン
-        self.export_button = ctk.CTkButton(
-            buttons_frame,
-            text="Excel出力",
-            command=self.export_selected_table,
-            font=ctk.CTkFont(family="Yu Gothic", size=12),
-            height=35,
-            width=80,
-            fg_color="#10B981",
-            hover_color="#059669",
-            corner_radius=6
-        )
-        self.export_button.pack(side="left", padx=(0, 10))
-        
-        # テーブル選択フレーム
-        table_selection_frame = ctk.CTkFrame(buttons_frame, fg_color="transparent")
-        table_selection_frame.pack(side="left", padx=(20, 10))
-        
-        # テーブル選択ラベル
-        table_label = ctk.CTkLabel(
-            table_selection_frame,
-            text="表示テーブル:",
-            font=ctk.CTkFont(family="Yu Gothic", size=14, weight="bold"),
-            text_color="#1E3A8A"
-        )
-        table_label.pack(side="left", padx=(0, 5))
-        
-        # テーブル選択ボタン
-        self.main_data_button = ctk.CTkButton(
-            table_selection_frame,
-            text="抽出データ",
-            command=lambda: self.show_table("main"),
-            font=ctk.CTkFont(family="Yu Gothic", size=12),
-            height=35,
-            width=80,
-            fg_color="#6B7280",
-            hover_color="#4B5563",
-            corner_radius=6
-        )
-        self.main_data_button.pack(side="left", padx=(0, 5))
-        
-        self.assignment_button = ctk.CTkButton(
-            table_selection_frame,
-            text="ロット割当",
-            command=lambda: self.show_table("assignment"),
-            font=ctk.CTkFont(family="Yu Gothic", size=12),
-            height=35,
-            width=80,
-            fg_color="#6B7280",
-            hover_color="#4B5563",
-            corner_radius=6
-        )
-        self.assignment_button.pack(side="left", padx=(0, 5))
-        
-        self.inspector_button = ctk.CTkButton(
-            table_selection_frame,
-            text="検査員割振",
-            command=lambda: self.show_table("inspector"),
-            font=ctk.CTkFont(family="Yu Gothic", size=12),
-            height=35,
-            width=80,
-            fg_color="#6B7280",
-            hover_color="#4B5563",
-            corner_radius=6
-        )
-        self.inspector_button.pack(side="left", padx=(0, 5))
-        
-        # 終了ボタン
+        # アプリ終了ボタン（右側）
         self.exit_button = ctk.CTkButton(
-            buttons_frame,
-            text="終了",
+            right_buttons_frame,
+            text="アプリ終了",
             command=self.quit_application,
-            font=ctk.CTkFont(family="Yu Gothic", size=12),
-            height=35,
-            width=80,
+            font=ctk.CTkFont(family="Yu Gothic", size=15, weight="bold"),
+            height=45,
+            width=120,
             fg_color="#EF4444",
             hover_color="#DC2626",
-            corner_radius=6
+            corner_radius=10,
+            border_width=0,
+            text_color="white"
         )
-        self.exit_button.pack(side="right")
+        self.exit_button.pack(side="right", padx=(15, 0))
         
-        # Googleスプレッドシート出力ボタン
+        # Googleスプレッドシート出力ボタン（右側）
         self.google_sheets_button = ctk.CTkButton(
-            buttons_frame,
+            right_buttons_frame,
             text="Googleスプレッドシートへ出力",
             command=self.export_to_google_sheets,
-            font=ctk.CTkFont(family="Yu Gothic", size=12),
-            height=35,
-            width=200,
+            font=ctk.CTkFont(family="Yu Gothic", size=15, weight="bold"),
+            height=45,
+            width=240,
             fg_color="#10B981",
             hover_color="#059669",
-            corner_radius=6
+            corner_radius=10,
+            border_width=0,
+            text_color="white"
         )
-        self.google_sheets_button.pack(side="right", padx=(0, 20))
+        self.google_sheets_button.pack(side="right", padx=(0, 0))
     
     def create_progress_section(self, parent):
         """進捗セクションの作成"""
@@ -2029,7 +1978,7 @@ class ModernDataExtractorUI:
                 f"抽出件数: {len(df)}件\n"
                 f"ロット割り当て: {len(self.current_assignment_data) if self.current_assignment_data is not None else 0}件\n"
                 f"検査員割振り: {len(self.current_inspector_data) if self.current_inspector_data is not None else 0}件\n\n"
-                f"「表示テーブル」ボタンでテーブルを選択してください"
+                f"検査員割振り結果を自動表示しました"
             ))
             
         except Exception as e:
@@ -3161,6 +3110,9 @@ class ModernDataExtractorUI:
             self.update_progress(1.0, "検査員割振り処理が完了しました")
             self.log_message(f"検査員割振り処理が完了しました: {len(inspector_df)}件")
             
+            # データ抽出完了後に自動で検査員割振りテーブルを表示
+            self.root.after(0, lambda: self.show_table("inspector"))
+            
         except Exception as e:
             self.log_message(f"検査員割振り処理中にエラーが発生しました: {str(e)}")
     
@@ -3905,7 +3857,7 @@ class ModernDataExtractorUI:
             inspector_columns = [
                 "出荷予定日", "品番", "品名", "客先", "生産ロットID", "ロット数量", 
                 "指示日", "号機", "現在工程名", "秒/個", "検査時間",
-                "検査員人数", "分割検査時間", "チーム情報", "検査員1", "検査員2", "検査員3", "検査員4", "検査員5"
+                "検査員人数", "分割検査時間", "検査員1", "検査員2", "検査員3", "検査員4", "検査員5"
             ]
             
             # Treeviewの作成
@@ -5513,15 +5465,19 @@ class ModernDataExtractorUI:
             if table_type == "main" and self.current_main_data is not None:
                 self.display_data(self.current_main_data)
                 self.current_display_table = "main"
-                self.update_button_states("main")
+                # テーブル選択ボタンが存在する場合のみ状態を更新
+                if hasattr(self, 'main_data_button'):
+                    self.update_button_states("main")
             elif table_type == "assignment" and self.current_assignment_data is not None:
                 self.display_lot_assignment_table(self.current_assignment_data)
                 self.current_display_table = "assignment"
-                self.update_button_states("assignment")
+                if hasattr(self, 'assignment_button'):
+                    self.update_button_states("assignment")
             elif table_type == "inspector" and self.current_inspector_data is not None:
                 self.display_inspector_assignment_table(self.current_inspector_data)
                 self.current_display_table = "inspector"
-                self.update_button_states("inspector")
+                if hasattr(self, 'inspector_button'):
+                    self.update_button_states("inspector")
             else:
                 self.log_message(f"{table_type}テーブルのデータがありません")
                 
@@ -5543,6 +5499,10 @@ class ModernDataExtractorUI:
     def update_button_states(self, active_table):
         """テーブル選択ボタンの状態を更新"""
         try:
+            # ボタンが存在しない場合は処理をスキップ
+            if not (hasattr(self, 'main_data_button') and hasattr(self, 'assignment_button') and hasattr(self, 'inspector_button')):
+                return
+                
             # すべてのボタンを非アクティブ状態に
             self.main_data_button.configure(fg_color="#6B7280", hover_color="#4B5563")
             self.assignment_button.configure(fg_color="#6B7280", hover_color="#4B5563")
