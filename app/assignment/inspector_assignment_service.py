@@ -87,6 +87,9 @@ class InspectorAssignmentManager:
         # 【追加】swap実施率追跡用
         self.swap_count = 0  # swapが実行された回数
         self.violation_count = 0  # 総違反件数（swap対象となった違反の数）
+        # 【追加】固定検査員情報を保持（品番ごとの固定検査員リスト）
+        # 形式: {品番: [検査員名1, 検査員名2, ...]}
+        self.fixed_inspectors_by_product = {}
     
     def log_message(self, message, debug=False, level='info'):
         """
@@ -484,6 +487,15 @@ class InspectorAssignmentManager:
             # 日付形式を統一してからソート（当日洗浄品は文字列として保持）
             result_df['出荷予定日'] = result_df['出荷予定日'].apply(convert_shipping_date)
             
+            # 【追加】固定検査員が設定されている品番を最優先にするソートキーを追加
+            # 登録済み品番リストの固定検査員が設定されている品番は、出荷予定日よりも優先して割り当てる
+            def has_fixed_inspectors(row):
+                product_number = row['品番']
+                fixed_inspector_names = self.fixed_inspectors_by_product.get(product_number, [])
+                return len(fixed_inspector_names) > 0
+            
+            result_df['_has_fixed_inspectors'] = result_df.apply(has_fixed_inspectors, axis=1)
+            
             # 新規品かどうかを判定する列を追加（ソート前に）
             def is_new_product_row(row):
                 product_number = row['品番']
@@ -637,11 +649,19 @@ class InspectorAssignmentManager:
             )
             
             result_df['_sort_product_id'] = result_df['品番'].astype(str)
+            # 【変更】固定検査員が設定されている品番を最優先にソート
+            # 登録済み品番リストの固定検査員が設定されている品番は、出荷予定日よりも優先して割り当てる
             result_df = result_df.sort_values(
-                ['_shipping_priority', 'feasible_inspector_count', '出荷予定日', '_sort_product_id'],
-                ascending=[True, True, True, True],
+                ['_has_fixed_inspectors', '_shipping_priority', 'feasible_inspector_count', '出荷予定日', '_sort_product_id'],
+                ascending=[False, True, True, True, True],  # _has_fixed_inspectors: False=固定検査員ありを優先（False < TrueなのでFalseが先）
                 na_position='last'
             ).reset_index(drop=True)
+            
+            # 固定検査員が設定されている品番のロット数をログ出力
+            fixed_inspector_lots = result_df[result_df['_has_fixed_inspectors'] == True]
+            if not fixed_inspector_lots.empty:
+                fixed_products = fixed_inspector_lots['品番'].unique()
+                self.log_message(f"固定検査員が設定されている品番のロットを最優先で割り当てます: {len(fixed_inspector_lots)}ロット（品番: {list(fixed_products)}）")
             
             # 一時列を削除
             result_df = result_df.drop(columns=['_shipping_priority'], errors='ignore')
@@ -693,6 +713,54 @@ class InspectorAssignmentManager:
                 if not isinstance(base_candidates, list):
                     base_candidates = []
                 available_inspectors = copy.deepcopy(base_candidates)
+                
+                # 【追加】固定検査員が設定されている品番の場合、固定検査員を優先的に配置
+                # 登録済み品番リストの固定検査員が設定されている品番は、出荷予定日よりも優先して割り当てる
+                fixed_inspector_names = self.fixed_inspectors_by_product.get(product_number, [])
+                if fixed_inspector_names:
+                    # 固定検査員とそれ以外に分離
+                    fixed_inspectors = []
+                    other_inspectors = []
+                    available_inspector_names = {insp['氏名'] for insp in available_inspectors}
+                    
+                    for inspector in available_inspectors:
+                        inspector_name = inspector.get('氏名', '')
+                        if inspector_name in fixed_inspector_names:
+                            fixed_inspectors.append(inspector)
+                        else:
+                            other_inspectors.append(inspector)
+                    
+                    # 【追加】base_candidatesに含まれていない固定検査員を追加
+                    missing_fixed_inspectors = [name for name in fixed_inspector_names if name not in available_inspector_names]
+                    if missing_fixed_inspectors:
+                        # get_available_inspectorsを再度呼び出して、固定検査員を含める
+                        process_number = row[result_cols_after_sort.get('現在工程番号', -1)] if '現在工程番号' in result_cols_after_sort else ''
+                        if process_number == -1:
+                            process_number = ''
+                        shipping_date = row[result_cols_after_sort.get('出荷予定日', -1)] if '出荷予定日' in result_cols_after_sort else None
+                        
+                        # 固定検査員を含む完全な候補リストを取得
+                        complete_candidates = self.get_available_inspectors(
+                            product_number, process_number, skill_master_df, inspector_master_df,
+                            shipping_date=shipping_date, allow_new_team_fallback=False
+                        )
+                        
+                        # 追加された固定検査員を確認
+                        complete_inspector_names = {insp['氏名'] for insp in complete_candidates}
+                        for missing_name in missing_fixed_inspectors:
+                            if missing_name in complete_inspector_names:
+                                # complete_candidatesから該当する検査員を取得
+                                for insp in complete_candidates:
+                                    if insp.get('氏名', '') == missing_name:
+                                        fixed_inspectors.append(insp)
+                                        available_inspector_names.add(missing_name)
+                                        self.log_message(f"固定検査員 '{missing_name}' をbase_candidatesから追加しました（登録済み品番の特別処置）")
+                                        break
+                    
+                    # 固定検査員を優先的にリストの先頭に配置
+                    if fixed_inspectors:
+                        available_inspectors = fixed_inspectors + other_inspectors
+                        self.log_message(f"固定検査員を優先配置（初期割当）: 品番 '{product_number}' の固定検査員 {len(fixed_inspectors)}名を先頭に配置（設定: {len(fixed_inspector_names)}名）")
                 
                 # 必要な検査員人数を計算（先に計算してから、当日洗浄上がり品の制約を適用）
                 # 1人の検査員に3時間を超えないようにする制約を考慮
@@ -1317,6 +1385,8 @@ class InspectorAssignmentManager:
                 result_df = result_df.drop(columns=['_sort_product_id'])
             if '_is_new_product' in result_df.columns:
                 result_df = result_df.drop(columns=['_is_new_product'])
+            if '_has_fixed_inspectors' in result_df.columns:
+                result_df = result_df.drop(columns=['_has_fixed_inspectors'])
             
             # 最終的な表示用ソート: 出荷予定日、品番、指示日の順
             # 出荷予定日のソートキー関数
@@ -1691,13 +1761,143 @@ class InspectorAssignmentManager:
                             # 検査員マスタの全コードを表示
                             self.log_message(f"検査員マスタの利用可能なコード: {list(inspector_master_df['#ID'].values)}")
             
+            # 【追加】固定検査員を優先的に配置
+            fixed_inspector_names = self.fixed_inspectors_by_product.get(product_number, [])
+            if fixed_inspector_names:
+                self.log_message(f"品番 '{product_number}' の固定検査員: {fixed_inspector_names}")
+                # 固定検査員とそれ以外に分離
+                fixed_inspectors = []
+                other_inspectors = []
+                available_inspector_names = {insp['氏名'] for insp in available_inspectors}
+                
+                for inspector in available_inspectors:
+                    inspector_name = inspector['氏名']
+                    if inspector_name in fixed_inspector_names:
+                        fixed_inspectors.append(inspector)
+                    else:
+                        other_inspectors.append(inspector)
+                
+                # 【特別処置】固定検査員が候補に含まれていない場合、検査員マスタから直接追加
+                # これは登録済み品番リストの固定検査員の特別処置です
+                missing_fixed_inspectors = [name for name in fixed_inspector_names if name not in available_inspector_names]
+                if missing_fixed_inspectors:
+                    self.log_message(
+                        f"⚠️ 警告: 品番 '{product_number}' の固定検査員のうち、以下の検査員が候補に含まれていません: {missing_fixed_inspectors}",
+                        level='warning'
+                    )
+                    self.log_message(
+                        f"   理由: スキルマスタに該当品番のスキル情報がないか、スキル値が1,2,3以外の可能性があります"
+                    )
+                    self.log_message(
+                        f"   特別処置: 固定検査員として設定されているため、スキルマスタに含まれていなくても候補に追加します"
+                    )
+                    
+                    # 検査員マスタから固定検査員の情報を取得して追加
+                    for missing_name in missing_fixed_inspectors:
+                        inspector_info = inspector_master_df[inspector_master_df['#氏名'] == missing_name]
+                        if not inspector_info.empty:
+                            inspector_data = inspector_info.iloc[0]
+                            inspector_code = inspector_data['#ID']
+                            
+                            # 【特別処置】固定検査員として選択されていれば、新規品対応チームメンバーでも振り分ける
+                            # （通常のスキルマスタベースの処理では新規品対応チームメンバーは除外されるが、
+                            #  固定検査員として設定されている場合は特別処置として含める）
+                            is_new_team_member = inspector_code in new_team_codes
+                            if is_new_team_member:
+                                self.log_message(
+                                    f"   固定検査員 '{missing_name}' は新規品対応チームメンバーですが、固定検査員として設定されているため特別処置として含めます"
+                                )
+                            
+                            # 勤務時間をチェック
+                            start_time = inspector_data['開始時刻']
+                            end_time = inspector_data['終了時刻']
+                            
+                            if pd.notna(start_time) and pd.notna(end_time):
+                                try:
+                                    # 時刻文字列を時間に変換
+                                    if isinstance(start_time, str):
+                                        start_hour = float(start_time.split(':')[0]) + float(start_time.split(':')[1]) / 60.0
+                                    else:
+                                        start_hour = start_time.hour + start_time.minute / 60.0
+                                        
+                                    if isinstance(end_time, str):
+                                        end_hour = float(end_time.split(':')[0]) + float(end_time.split(':')[1]) / 60.0
+                                    else:
+                                        end_hour = end_time.hour + end_time.minute / 60.0
+                                    
+                                    # 基本勤務時間を計算
+                                    max_daily_hours = end_hour - start_hour
+                                    
+                                    # 休憩時間（12:15～13:00）を含む場合は1時間を差し引く
+                                    if start_hour <= 12.25 and end_hour >= 13.0:
+                                        max_daily_hours -= 1.0
+                                    
+                                    # 勤務時間が0以下の場合は除外
+                                    if max_daily_hours <= 0:
+                                        self.log_message(
+                                            f"   固定検査員 '{missing_name}' の勤務時間が0時間以下のため除外します",
+                                            level='warning'
+                                        )
+                                        continue
+                                        
+                                except Exception as e:
+                                    self.log_message(
+                                        f"   固定検査員 '{missing_name}' の勤務時間計算に失敗: {e} - 除外します",
+                                        level='warning'
+                                    )
+                                    continue
+                            else:
+                                self.log_message(
+                                    f"   固定検査員 '{missing_name}' の時刻情報が不正のため除外します",
+                                    level='warning'
+                                )
+                                continue
+                            
+                            # 休暇情報をチェック（終日休みの場合は除外）
+                            vacation_info = self.get_vacation_info(missing_name)
+                            if vacation_info:
+                                code = vacation_info.get("code", "")
+                                if code in ["休", "出", "当"]:
+                                    interpretation = vacation_info.get("interpretation", "")
+                                    self.log_message(
+                                        f"   固定検査員 '{missing_name}' は終日休暇のため除外します "
+                                        f"(休暇コード: {code}, 解釈: {interpretation})",
+                                        level='warning'
+                                    )
+                                    continue
+                            
+                            # 固定検査員を候補に追加（スキル値はデフォルトで1とする）
+                            fixed_inspectors.append({
+                                '氏名': missing_name,
+                                'スキル': 1,  # スキルマスタにない場合はデフォルトで1
+                                '就業時間': inspector_data['開始時刻'],
+                                'コード': inspector_code,
+                                'is_new_team': is_new_team_member,  # 新規品対応チームメンバーの場合はTrue
+                                'is_fixed_inspector': True  # 固定検査員フラグ
+                            })
+                            team_mark = " (新規品対応チーム)" if is_new_team_member else ""
+                            self.log_message(
+                                f"   固定検査員 '{missing_name}' (コード: {inspector_code}){team_mark} を特別処置として候補に追加しました"
+                            )
+                        else:
+                            self.log_message(
+                                f"   固定検査員 '{missing_name}' が検査員マスタに見つかりません",
+                                level='warning'
+                            )
+                
+                # 固定検査員を優先的にリストの先頭に配置
+                available_inspectors = fixed_inspectors + other_inspectors
+                self.log_message(f"固定検査員を優先配置: {len(fixed_inspectors)}名を先頭に配置（設定: {len(fixed_inspector_names)}名）")
+            
             self.log_message(f"利用可能な検査員: {len(available_inspectors)}人")
             
             # 利用可能な検査員の詳細をログ出力
             if available_inspectors:
                 self.log_message("=== 利用可能な検査員一覧 ===")
                 for insp in available_inspectors:
-                    self.log_message(f"  {insp['氏名']} (コード: {insp['コード']}, スキル: {insp['スキル']})")
+                    is_fixed = insp['氏名'] in fixed_inspector_names if fixed_inspector_names else False
+                    fixed_mark = " [固定]" if is_fixed else ""
+                    self.log_message(f"  {insp['氏名']}{fixed_mark} (コード: {insp['コード']}, スキル: {insp['スキル']})")
                 self.log_message("=============================")
             else:
                 self.log_message("警告: 利用可能な検査員が0人です")
@@ -1864,9 +2064,16 @@ class InspectorAssignmentManager:
             assignments = []
             
             # 各検査員の利用可能容量を計算
+            # 【追加】固定検査員情報を取得（登録済み品番の特別処置）
+            fixed_inspector_names = self.fixed_inspectors_by_product.get(product_number, [])
+            
             candidates_with_capacity = []
             for inspector in available_inspectors:
                 code = inspector['コード']
+                inspector_name = inspector.get('氏名', '')
+                
+                # 【追加】固定検査員フラグを設定
+                is_fixed_inspector = inspector_name in fixed_inspector_names
                 
                 # 残り勤務時間を計算
                 daily_hours = self.inspector_daily_assignments.get(code, {}).get(current_date, 0.0)
@@ -1884,6 +2091,7 @@ class InspectorAssignmentManager:
                     inspector_copy = inspector.copy()
                     inspector_copy['_remaining_capacity'] = cap
                     inspector_copy['_product_room'] = product_room_to_4h
+                    inspector_copy['_is_fixed_inspector'] = is_fixed_inspector  # 固定検査員フラグ
                     candidates_with_capacity.append(inspector_copy)
             
             if not candidates_with_capacity:
@@ -1914,7 +2122,10 @@ class InspectorAssignmentManager:
                 product_hours = self.inspector_product_hours.get(code, {}).get(product_number, 0.0)
                 candidate['_product_hours'] = product_hours  # 同一品番の累計時間を記録
             
+            # 【変更】固定検査員を最優先にソート
+            # 登録済み品番リストの固定検査員が設定されている品番は、出荷予定日よりも優先して割り当てる
             candidates_with_capacity.sort(key=lambda x: (
+                not x.get('_is_fixed_inspector', False),  # False=固定検査員を最優先（False < TrueなのでFalseが先）
                 -x['_remaining_capacity'],  # 容量の大きい順
                 x['_product_hours'],  # 同一品番の累計時間が少ない順（4時間上限の分散化）
                 x['_fairness_score'],  # 公平性スコア（小さい順）
@@ -1927,6 +2138,9 @@ class InspectorAssignmentManager:
                 if remaining <= 0:
                     break
                 
+                # 【追加】max_inspectors制約をチェック
+                if max_inspectors is not None and len(assignments) >= max_inspectors:
+                    break
                 
                 cap = candidate['_remaining_capacity']
                 if cap <= 0:
@@ -1945,6 +2159,11 @@ class InspectorAssignmentManager:
                 assignment = candidate.copy()
                 assignment['割当時間'] = take
                 assignments.append(assignment)
+                
+                # 【追加】固定検査員が選択された場合のログ
+                if candidate.get('_is_fixed_inspector', False):
+                    inspector_name = candidate.get('氏名', '')
+                    self.log_message(f"固定検査員 '{inspector_name}' を優先的に割り当てました（登録済み品番の特別処置）")
                 
                 # 残り時間を更新
                 remaining -= take
@@ -2030,7 +2249,7 @@ class InspectorAssignmentManager:
             
             # スキル組み合わせロジックを適用
             selected_inspectors = self.select_inspectors_with_skill_combination(
-                filtered_by_product, required_count, divided_time, current_time, current_date, inspector_master_df
+                filtered_by_product, required_count, divided_time, current_time, current_date, inspector_master_df, product_number
             )
             
             return selected_inspectors
@@ -2039,12 +2258,17 @@ class InspectorAssignmentManager:
             self.log_message(f"検査員選択中にエラーが発生しました: {str(e)}")
             return []
     
-    def select_inspectors_with_skill_combination(self, available_inspectors, required_count, divided_time, current_time, current_date, inspector_master_df):
+    def select_inspectors_with_skill_combination(self, available_inspectors, required_count, divided_time, current_time, current_date, inspector_master_df, product_number=None):
         """スキル組み合わせを考慮した検査員選択"""
         try:
             # 特例: 一ロットで検査員が5名以上必要になる場合、5名に制限
             if required_count > 5:
                 required_count = 5
+            
+            # 【追加】固定検査員情報を取得（登録済み品番の特別処置）
+            fixed_inspector_names = []
+            if product_number:
+                fixed_inspector_names = self.fixed_inspectors_by_product.get(product_number, [])
             
             # スキルレベル別に検査員を分類
             skill_groups = {
@@ -2056,6 +2280,10 @@ class InspectorAssignmentManager:
             skill_order_map = {1: 0, 2: 1, 3: 2, 'new': 3}
             
             for inspector in available_inspectors:
+                # 固定検査員フラグを設定
+                inspector_name = inspector.get('氏名', '')
+                inspector['__is_fixed'] = inspector_name in fixed_inspector_names if fixed_inspector_names else False
+                
                 if inspector.get('is_new_team', False):
                     skill_groups['new'].append(inspector)
                 else:
@@ -2116,7 +2344,7 @@ class InspectorAssignmentManager:
             
             if required_count == 1:
                 # 1人の場合は公平性を最優先に選択（バランス重視版）
-                # 優先順位: 1)未使用検査員優先, 2)総勤務時間が少ない, 3)スキルレベル, 4)割り当て回数が少ない, 5)4時間上限に近い場合は優先度を下げる
+                # 【追加】優先順位: 0)固定検査員を最優先（登録済み品番の特別処置）, 1)未使用検査員優先, 2)総勤務時間が少ない, 3)スキルレベル, 4)割り当て回数が少ない, 5)4時間上限に近い場合は優先度を下げる
                 all_inspectors_with_priority = []
                 for skill_level, inspectors in skill_groups.items():
                     for insp in inspectors:
@@ -2126,9 +2354,11 @@ class InspectorAssignmentManager:
                         last_assignment = self.inspector_last_assignment.get(code, pd.Timestamp.min)
                         is_unused = (assignment_count == 0)
                         near_limit = insp.get('__near_product_limit', False)  # 4時間上限に近い場合は優先度を下げる
+                        is_fixed = insp.get('__is_fixed', False)  # 固定検査員フラグ
                         
-                        # 未使用検査員を優先し、総勤務時間のバランスを重視
+                        # 固定検査員を最優先し、その他の公平性指標を考慮
                         priority = (
+                            not is_fixed,  # False=固定検査員を最優先（登録済み品番の特別処置）
                             not is_unused,  # False=未使用を優先
                             total_hours,   # 総勤務時間が少ない順
                             skill_order_map.get(skill_level, 99),  # スキルレベル（1>2>3>new、1が最高スキル）
@@ -2140,18 +2370,22 @@ class InspectorAssignmentManager:
                 
                 all_inspectors_with_priority.sort(key=lambda x: x[0])
                 if all_inspectors_with_priority:
-                    selected_inspectors.append(all_inspectors_with_priority[0][1])
+                    selected_inspector = all_inspectors_with_priority[0][1]
+                    if selected_inspector.get('__is_fixed', False):
+                        self.log_message(f"  固定検査員 '{selected_inspector['氏名']}' を優先的に選択しました（登録済み品番の特別処置）")
+                    selected_inspectors.append(selected_inspector)
 
             elif required_count == 2:
                 # 2人の場合の組み合わせロジック
-                selected_inspectors = self.select_two_inspectors_with_skill_combination(skill_groups)
+                selected_inspectors = self.select_two_inspectors_with_skill_combination(skill_groups, product_number)
             
             elif required_count == 3:
                 # 3人の場合の組み合わせロジック
-                selected_inspectors = self.select_three_inspectors_with_skill_combination(skill_groups)
+                selected_inspectors = self.select_three_inspectors_with_skill_combination(skill_groups, product_number)
             
             else:
                 # 4人以上の場合は公平な割り当て（バランス重視版）
+                # 【追加】固定検査員を優先的に選択（登録済み品番の特別処置）
                 all_inspectors_with_priority = []
                 for skill_level, inspectors in skill_groups.items():
                     for insp in inspectors:
@@ -2161,9 +2395,11 @@ class InspectorAssignmentManager:
                         last_assignment = self.inspector_last_assignment.get(code, pd.Timestamp.min)
                         is_unused = (assignment_count == 0)
                         near_limit = insp.get('__near_product_limit', False)  # 4時間上限に近い場合は優先度を下げる
+                        is_fixed = insp.get('__is_fixed', False)  # 固定検査員フラグ
                         
-                        # 未使用検査員を優先し、総勤務時間のバランスを重視
+                        # 固定検査員を最優先し、その他の公平性指標を考慮
                         priority = (
+                            not is_fixed,  # False=固定検査員を最優先（登録済み品番の特別処置）
                             not is_unused,  # False=未使用を優先
                             total_hours,   # 総勤務時間が少ない順
                             skill_order_map.get(skill_level, 99),  # スキルレベル（1>2>3>new、1が最高スキル）
@@ -2177,6 +2413,10 @@ class InspectorAssignmentManager:
                 # 特例: 一ロットで検査員が5名以上必要になる場合、5名に制限
                 max_count = min(5, required_count)
                 selected_inspectors = [insp for _, insp in all_inspectors_with_priority[:max_count]]
+                # 固定検査員が選択された場合のログ
+                for insp in selected_inspectors:
+                    if insp.get('__is_fixed', False):
+                        self.log_message(f"  固定検査員 '{insp['氏名']}' を優先的に選択しました（登録済み品番の特別処置）")
             
             # 選択された検査員の履歴を更新
             for insp in selected_inspectors:
@@ -2199,7 +2439,7 @@ class InspectorAssignmentManager:
             self.log_message(f"スキル組み合わせ選択中にエラーが発生しました: {str(e)}")
             return []
     
-    def select_two_inspectors_with_skill_combination(self, skill_groups):
+    def select_two_inspectors_with_skill_combination(self, skill_groups, product_number=None):
         """2人の検査員をスキル組み合わせ考慮で選択（バランス重視版）"""
         try:
             selected = []
@@ -2222,7 +2462,7 @@ class InspectorAssignmentManager:
                         self.log_message(f"  選択: {inspector['氏名']} (スキル: {inspector.get('スキル', '新製品')})")
                 return selected
             
-            # バランス重視の選択ロジック: 未使用検査員 > 総勤務時間のバランス > スキルレベル
+            # バランス重視の選択ロジック: 【追加】固定検査員 > 未使用検査員 > 総勤務時間のバランス > スキルレベル
             all_candidates = []
             for skill_level, inspectors in skill_groups.items():
                 for insp in inspectors:
@@ -2231,10 +2471,12 @@ class InspectorAssignmentManager:
                     total_hours = self.inspector_work_hours.get(code, 0.0)
                     last_assignment = self.inspector_last_assignment.get(code, pd.Timestamp.min)
                     is_unused = (assignment_count == 0)
+                    is_fixed = insp.get('__is_fixed', False)  # 固定検査員フラグ
                     
-                    # 優先順位: 1)未使用検査員優先, 2)総勤務時間が少ない, 3)スキルレベル(1>2>3>new、1が最高スキル), 4)割り当て回数が少ない, 5)4時間上限に近い場合は優先度を下げる
+                    # 【追加】優先順位: 0)固定検査員を最優先（登録済み品番の特別処置）, 1)未使用検査員優先, 2)総勤務時間が少ない, 3)スキルレベル(1>2>3>new、1が最高スキル), 4)割り当て回数が少ない, 5)4時間上限に近い場合は優先度を下げる
                     near_limit = insp.get('__near_product_limit', False)  # 4時間上限に近い場合は優先度を下げる
                     priority = (
+                        not is_fixed,  # False=固定検査員を最優先（登録済み品番の特別処置）
                         not is_unused,  # False=未使用を優先
                         total_hours,   # 総勤務時間が少ない順
                         skill_order_map.get(skill_level, 99),  # スキル1を優先（ただし未使用・時間バランスより優先度低、1が最高スキル）
@@ -2246,40 +2488,51 @@ class InspectorAssignmentManager:
             
             # スキル1がいる場合、バランスを考慮しつつスキル1を1人含める組み合わせを探す
             if skill_groups[1]:
-                # スキル1の候補から最適な1人を選択（未使用・時間バランスを優先）
+                # スキル1の候補から最適な1人を選択（固定検査員 > 未使用・時間バランスを優先）
                 skill1_candidates = [(p, i, sl) for p, i, sl in all_candidates if sl == 1]
                 if skill1_candidates:
                     skill1_candidates.sort(key=lambda x: x[0])
                     best_skill1 = skill1_candidates[0][1]
                     selected.append(best_skill1)
                     code = best_skill1['コード']
-                    self.log_message(f"  スキル1選択: {best_skill1['氏名']} (総勤務時間: {self.inspector_work_hours.get(code, 0.0):.1f}h, 割当回数: {self.inspector_assignment_count.get(code, 0)})")
+                    fixed_mark = " [固定検査員]" if best_skill1.get('__is_fixed', False) else ""
+                    self.log_message(f"  スキル1選択: {best_skill1['氏名']}{fixed_mark} (総勤務時間: {self.inspector_work_hours.get(code, 0.0):.1f}h, 割当回数: {self.inspector_assignment_count.get(code, 0)})")
                     
-                    # 2人目を選択：スキル3がいる場合は優先的に組み合わせる（教育のため）
+                    # 2人目を選択：固定検査員 > スキル3がいる場合は優先的に組み合わせる（教育のため）
                     remaining_candidates = [(p, i, sl) for p, i, sl in all_candidates if i != best_skill1]
                     if remaining_candidates:
-                        # スキル3の候補を優先的に探す
-                        skill3_candidates = [(p, i, sl) for p, i, sl in remaining_candidates if sl == 3]
-                        if skill3_candidates:
-                            # スキル3がいる場合、優先的に選択（バランスを考慮してソート）
-                            skill3_candidates.sort(key=lambda x: x[0])
-                            selected.append(skill3_candidates[0][1])
-                            code = skill3_candidates[0][1]['コード']
-                            self.log_message(f"  スキル3選択（教育のため）: {skill3_candidates[0][1]['氏名']} (総勤務時間: {self.inspector_work_hours.get(code, 0.0):.1f}h, 割当回数: {self.inspector_assignment_count.get(code, 0)})")
+                        # 固定検査員を優先的に探す
+                        fixed_candidates = [(p, i, sl) for p, i, sl in remaining_candidates if i.get('__is_fixed', False)]
+                        if fixed_candidates:
+                            # 固定検査員がいる場合、優先的に選択（バランスを考慮してソート）
+                            fixed_candidates.sort(key=lambda x: x[0])
+                            selected.append(fixed_candidates[0][1])
+                            code = fixed_candidates[0][1]['コード']
+                            self.log_message(f"  固定検査員選択（登録済み品番の特別処置）: {fixed_candidates[0][1]['氏名']} (総勤務時間: {self.inspector_work_hours.get(code, 0.0):.1f}h, 割当回数: {self.inspector_assignment_count.get(code, 0)})")
                         else:
-                            # スキル3がいない場合、バランスを考慮して選択
-                            remaining_candidates.sort(key=lambda x: x[0])
-                            selected.append(remaining_candidates[0][1])
-                            code = remaining_candidates[0][1]['コード']
-                            self.log_message(f"  2人目選択: {remaining_candidates[0][1]['氏名']} (総勤務時間: {self.inspector_work_hours.get(code, 0.0):.1f}h, 割当回数: {self.inspector_assignment_count.get(code, 0)})")
+                            # スキル3の候補を優先的に探す
+                            skill3_candidates = [(p, i, sl) for p, i, sl in remaining_candidates if sl == 3]
+                            if skill3_candidates:
+                                # スキル3がいる場合、優先的に選択（バランスを考慮してソート）
+                                skill3_candidates.sort(key=lambda x: x[0])
+                                selected.append(skill3_candidates[0][1])
+                                code = skill3_candidates[0][1]['コード']
+                                self.log_message(f"  スキル3選択（教育のため）: {skill3_candidates[0][1]['氏名']} (総勤務時間: {self.inspector_work_hours.get(code, 0.0):.1f}h, 割当回数: {self.inspector_assignment_count.get(code, 0)})")
+                            else:
+                                # スキル3がいない場合、バランスを考慮して選択
+                                remaining_candidates.sort(key=lambda x: x[0])
+                                selected.append(remaining_candidates[0][1])
+                                code = remaining_candidates[0][1]['コード']
+                                self.log_message(f"  2人目選択: {remaining_candidates[0][1]['氏名']} (総勤務時間: {self.inspector_work_hours.get(code, 0.0):.1f}h, 割当回数: {self.inspector_assignment_count.get(code, 0)})")
             else:
-                # スキル1がいない場合、バランスを最優先に2人選択
+                # スキル1がいない場合、バランスを最優先に2人選択（固定検査員を優先）
                 all_candidates.sort(key=lambda x: x[0])
                 for i in range(min(2, len(all_candidates))):
                     selected.append(all_candidates[i][1])
                     code = all_candidates[i][1]['コード']
                     skill_info = f"スキル{all_candidates[i][2]}" if all_candidates[i][2] != 'new' else "新製品"
-                    self.log_message(f"  選択{i+1}: {all_candidates[i][1]['氏名']} ({skill_info}, 総勤務時間: {self.inspector_work_hours.get(code, 0.0):.1f}h, 割当回数: {self.inspector_assignment_count.get(code, 0)})")
+                    fixed_mark = " [固定検査員]" if all_candidates[i][1].get('__is_fixed', False) else ""
+                    self.log_message(f"  選択{i+1}: {all_candidates[i][1]['氏名']}{fixed_mark} ({skill_info}, 総勤務時間: {self.inspector_work_hours.get(code, 0.0):.1f}h, 割当回数: {self.inspector_assignment_count.get(code, 0)})")
             
             return selected
             
@@ -2287,7 +2540,7 @@ class InspectorAssignmentManager:
             self.log_message(f"2人選択中にエラーが発生しました: {str(e)}")
             return []
     
-    def select_three_inspectors_with_skill_combination(self, skill_groups):
+    def select_three_inspectors_with_skill_combination(self, skill_groups, product_number=None):
         """3人の検査員をスキル組み合わせ考慮で選択（バランス重視版）"""
         try:
             selected = []
@@ -2305,7 +2558,7 @@ class InspectorAssignmentManager:
                         selected.append(inspector)
                 return selected
             
-            # バランス重視の選択ロジック: 未使用検査員 > 総勤務時間のバランス > スキルレベル
+            # バランス重視の選択ロジック: 【追加】固定検査員 > 未使用検査員 > 総勤務時間のバランス > スキルレベル
             all_candidates = []
             for skill_level, inspectors in skill_groups.items():
                 for insp in inspectors:
@@ -2314,10 +2567,12 @@ class InspectorAssignmentManager:
                     total_hours = self.inspector_work_hours.get(code, 0.0)
                     last_assignment = self.inspector_last_assignment.get(code, pd.Timestamp.min)
                     is_unused = (assignment_count == 0)
+                    is_fixed = insp.get('__is_fixed', False)  # 固定検査員フラグ
                     
-                    # 優先順位: 1)未使用検査員優先, 2)総勤務時間が少ない, 3)スキルレベル(1>2>3>new、1が最高スキル), 4)割り当て回数が少ない, 5)4時間上限に近い場合は優先度を下げる
+                    # 【追加】優先順位: 0)固定検査員を最優先（登録済み品番の特別処置）, 1)未使用検査員優先, 2)総勤務時間が少ない, 3)スキルレベル(1>2>3>new、1が最高スキル), 4)割り当て回数が少ない, 5)4時間上限に近い場合は優先度を下げる
                     near_limit = insp.get('__near_product_limit', False)  # 4時間上限に近い場合は優先度を下げる
                     priority = (
+                        not is_fixed,  # False=固定検査員を最優先（登録済み品番の特別処置）
                         not is_unused,  # False=未使用を優先
                         total_hours,   # 総勤務時間が少ない順
                         skill_order_map.get(skill_level, 99),  # スキル1を優先（ただし未使用・時間バランスより優先度低、1が最高スキル）
@@ -2329,51 +2584,96 @@ class InspectorAssignmentManager:
             
             # スキル1がいる場合、バランスを考慮しつつスキル1を1人含める組み合わせを探す
             if skill_groups[1]:
-                # スキル1の候補から最適な1人を選択（未使用・時間バランスを優先）
+                # スキル1の候補から最適な1人を選択（固定検査員 > 未使用・時間バランスを優先）
                 skill1_candidates = [(p, i, sl) for p, i, sl in all_candidates if sl == 1]
                 if skill1_candidates:
                     skill1_candidates.sort(key=lambda x: x[0])
                     best_skill1 = skill1_candidates[0][1]
                     selected.append(best_skill1)
                     code = best_skill1['コード']
-                    self.log_message(f"  スキル1選択: {best_skill1['氏名']} (総勤務時間: {self.inspector_work_hours.get(code, 0.0):.1f}h, 割当回数: {self.inspector_assignment_count.get(code, 0)})")
+                    fixed_mark = " [固定検査員]" if best_skill1.get('__is_fixed', False) else ""
+                    self.log_message(f"  スキル1選択: {best_skill1['氏名']}{fixed_mark} (総勤務時間: {self.inspector_work_hours.get(code, 0.0):.1f}h, 割当回数: {self.inspector_assignment_count.get(code, 0)})")
                     
-                    # 残り2人を選択：スキル3がいる場合は優先的に組み合わせる（教育のため）
+                    # 残り2人を選択：固定検査員 > スキル3がいる場合は優先的に組み合わせる（教育のため）
                     remaining_candidates = [(p, i, sl) for p, i, sl in all_candidates if i != best_skill1]
                     if remaining_candidates:
-                        # スキル3の候補を優先的に探す
-                        skill3_candidates = [(p, i, sl) for p, i, sl in remaining_candidates if sl == 3]
-                        if skill3_candidates:
-                            # スキル3がいる場合、優先的に1人選択（バランスを考慮してソート）
-                            skill3_candidates.sort(key=lambda x: x[0])
-                            selected.append(skill3_candidates[0][1])
-                            code = skill3_candidates[0][1]['コード']
-                            self.log_message(f"  スキル3選択（教育のため）: {skill3_candidates[0][1]['氏名']} (総勤務時間: {self.inspector_work_hours.get(code, 0.0):.1f}h, 割当回数: {self.inspector_assignment_count.get(code, 0)})")
+                        # 固定検査員を優先的に探す
+                        fixed_candidates = [(p, i, sl) for p, i, sl in remaining_candidates if i.get('__is_fixed', False)]
+                        if fixed_candidates:
+                            # 固定検査員がいる場合、優先的に選択（バランスを考慮してソート）
+                            fixed_candidates.sort(key=lambda x: x[0])
+                            selected.append(fixed_candidates[0][1])
+                            code = fixed_candidates[0][1]['コード']
+                            self.log_message(f"  固定検査員選択（登録済み品番の特別処置）: {fixed_candidates[0][1]['氏名']} (総勤務時間: {self.inspector_work_hours.get(code, 0.0):.1f}h, 割当回数: {self.inspector_assignment_count.get(code, 0)})")
                             
-                            # 残り1人を選択（スキル1とスキル3以外から、バランスを考慮）
-                            remaining_after_skill3 = [(p, i, sl) for p, i, sl in remaining_candidates if i != skill3_candidates[0][1]]
-                            if remaining_after_skill3:
-                                remaining_after_skill3.sort(key=lambda x: x[0])
-                                selected.append(remaining_after_skill3[0][1])
-                                code = remaining_after_skill3[0][1]['コード']
-                                skill_info = f"スキル{remaining_after_skill3[0][2]}" if remaining_after_skill3[0][2] != 'new' else "新製品"
-                                self.log_message(f"  3人目選択: {remaining_after_skill3[0][1]['氏名']} ({skill_info}, 総勤務時間: {self.inspector_work_hours.get(code, 0.0):.1f}h, 割当回数: {self.inspector_assignment_count.get(code, 0)})")
+                            # 残り1人を選択（固定検査員以外から、固定検査員 > スキル3 > バランスを考慮）
+                            remaining_after_fixed = [(p, i, sl) for p, i, sl in remaining_candidates if i != fixed_candidates[0][1]]
+                            if remaining_after_fixed:
+                                # 残りの固定検査員を優先的に探す
+                                remaining_fixed = [(p, i, sl) for p, i, sl in remaining_after_fixed if i.get('__is_fixed', False)]
+                                if remaining_fixed:
+                                    remaining_fixed.sort(key=lambda x: x[0])
+                                    selected.append(remaining_fixed[0][1])
+                                    code = remaining_fixed[0][1]['コード']
+                                    self.log_message(f"  固定検査員選択（登録済み品番の特別処置）: {remaining_fixed[0][1]['氏名']} (総勤務時間: {self.inspector_work_hours.get(code, 0.0):.1f}h, 割当回数: {self.inspector_assignment_count.get(code, 0)})")
+                                else:
+                                    # スキル3の候補を優先的に探す
+                                    skill3_candidates = [(p, i, sl) for p, i, sl in remaining_after_fixed if sl == 3]
+                                    if skill3_candidates:
+                                        skill3_candidates.sort(key=lambda x: x[0])
+                                        selected.append(skill3_candidates[0][1])
+                                        code = skill3_candidates[0][1]['コード']
+                                        self.log_message(f"  スキル3選択（教育のため）: {skill3_candidates[0][1]['氏名']} (総勤務時間: {self.inspector_work_hours.get(code, 0.0):.1f}h, 割当回数: {self.inspector_assignment_count.get(code, 0)})")
+                                    else:
+                                        remaining_after_fixed.sort(key=lambda x: x[0])
+                                        selected.append(remaining_after_fixed[0][1])
+                                        code = remaining_after_fixed[0][1]['コード']
+                                        skill_info = f"スキル{remaining_after_fixed[0][2]}" if remaining_after_fixed[0][2] != 'new' else "新製品"
+                                        self.log_message(f"  3人目選択: {remaining_after_fixed[0][1]['氏名']} ({skill_info}, 総勤務時間: {self.inspector_work_hours.get(code, 0.0):.1f}h, 割当回数: {self.inspector_assignment_count.get(code, 0)})")
                         else:
-                            # スキル3がいない場合、バランスを考慮して2人選択
-                            remaining_candidates.sort(key=lambda x: x[0])
-                            for i in range(min(2, len(remaining_candidates))):
-                                selected.append(remaining_candidates[i][1])
-                                code = remaining_candidates[i][1]['コード']
-                                skill_info = f"スキル{remaining_candidates[i][2]}" if remaining_candidates[i][2] != 'new' else "新製品"
-                                self.log_message(f"  選択{i+2}: {remaining_candidates[i][1]['氏名']} ({skill_info}, 総勤務時間: {self.inspector_work_hours.get(code, 0.0):.1f}h, 割当回数: {self.inspector_assignment_count.get(code, 0)})")
+                            # スキル3の候補を優先的に探す
+                            skill3_candidates = [(p, i, sl) for p, i, sl in remaining_candidates if sl == 3]
+                            if skill3_candidates:
+                                # スキル3がいる場合、優先的に1人選択（バランスを考慮してソート）
+                                skill3_candidates.sort(key=lambda x: x[0])
+                                selected.append(skill3_candidates[0][1])
+                                code = skill3_candidates[0][1]['コード']
+                                self.log_message(f"  スキル3選択（教育のため）: {skill3_candidates[0][1]['氏名']} (総勤務時間: {self.inspector_work_hours.get(code, 0.0):.1f}h, 割当回数: {self.inspector_assignment_count.get(code, 0)})")
+                                
+                                # 残り1人を選択（スキル1とスキル3以外から、固定検査員 > バランスを考慮）
+                                remaining_after_skill3 = [(p, i, sl) for p, i, sl in remaining_candidates if i != skill3_candidates[0][1]]
+                                if remaining_after_skill3:
+                                    # 固定検査員を優先的に探す
+                                    remaining_fixed = [(p, i, sl) for p, i, sl in remaining_after_skill3 if i.get('__is_fixed', False)]
+                                    if remaining_fixed:
+                                        remaining_fixed.sort(key=lambda x: x[0])
+                                        selected.append(remaining_fixed[0][1])
+                                        code = remaining_fixed[0][1]['コード']
+                                        self.log_message(f"  固定検査員選択（登録済み品番の特別処置）: {remaining_fixed[0][1]['氏名']} (総勤務時間: {self.inspector_work_hours.get(code, 0.0):.1f}h, 割当回数: {self.inspector_assignment_count.get(code, 0)})")
+                                    else:
+                                        remaining_after_skill3.sort(key=lambda x: x[0])
+                                        selected.append(remaining_after_skill3[0][1])
+                                        code = remaining_after_skill3[0][1]['コード']
+                                        skill_info = f"スキル{remaining_after_skill3[0][2]}" if remaining_after_skill3[0][2] != 'new' else "新製品"
+                                        self.log_message(f"  3人目選択: {remaining_after_skill3[0][1]['氏名']} ({skill_info}, 総勤務時間: {self.inspector_work_hours.get(code, 0.0):.1f}h, 割当回数: {self.inspector_assignment_count.get(code, 0)})")
+                            else:
+                                # スキル3がいない場合、バランスを考慮して2人選択（固定検査員を優先）
+                                remaining_candidates.sort(key=lambda x: x[0])
+                                for i in range(min(2, len(remaining_candidates))):
+                                    selected.append(remaining_candidates[i][1])
+                                    code = remaining_candidates[i][1]['コード']
+                                    skill_info = f"スキル{remaining_candidates[i][2]}" if remaining_candidates[i][2] != 'new' else "新製品"
+                                    fixed_mark = " [固定検査員]" if remaining_candidates[i][1].get('__is_fixed', False) else ""
+                                    self.log_message(f"  選択{i+2}: {remaining_candidates[i][1]['氏名']}{fixed_mark} ({skill_info}, 総勤務時間: {self.inspector_work_hours.get(code, 0.0):.1f}h, 割当回数: {self.inspector_assignment_count.get(code, 0)})")
             else:
-                # スキル1がいない場合、バランスを最優先に3人選択
+                # スキル1がいない場合、バランスを最優先に3人選択（固定検査員を優先）
                 all_candidates.sort(key=lambda x: x[0])
                 for i in range(min(3, len(all_candidates))):
                     selected.append(all_candidates[i][1])
                     code = all_candidates[i][1]['コード']
                     skill_info = f"スキル{all_candidates[i][2]}" if all_candidates[i][2] != 'new' else "新製品"
-                    self.log_message(f"  選択{i+1}: {all_candidates[i][1]['氏名']} ({skill_info}, 総勤務時間: {self.inspector_work_hours.get(code, 0.0):.1f}h, 割当回数: {self.inspector_assignment_count.get(code, 0)})")
+                    fixed_mark = " [固定検査員]" if all_candidates[i][1].get('__is_fixed', False) else ""
+                    self.log_message(f"  選択{i+1}: {all_candidates[i][1]['氏名']}{fixed_mark} ({skill_info}, 総勤務時間: {self.inspector_work_hours.get(code, 0.0):.1f}h, 割当回数: {self.inspector_assignment_count.get(code, 0)})")
             
             return selected
             
@@ -2477,6 +2777,25 @@ class InspectorAssignmentManager:
                     f"(今日: {daily_hours:.1f}h + {additional_hours:.1f}h = {daily_hours + additional_hours:.1f}h, "
                     f"最大勤務時間: {max_daily_hours:.1f}h, 品番累計予定: {projected_hours:.1f}h)"
                 )
+
+            # 【追加】固定検査員を優先的に配置
+            fixed_inspector_names = self.fixed_inspectors_by_product.get(product_number, [])
+            if fixed_inspector_names:
+                # 固定検査員とそれ以外に分離
+                fixed_inspectors = []
+                other_inspectors = []
+                
+                for inspector in filtered_inspectors:
+                    inspector_name = inspector['氏名']
+                    if inspector_name in fixed_inspector_names:
+                        fixed_inspectors.append(inspector)
+                    else:
+                        other_inspectors.append(inspector)
+                
+                # 固定検査員を優先的にリストの先頭に配置
+                filtered_inspectors = fixed_inspectors + other_inspectors
+                if fixed_inspectors:
+                    self.log_message(f"固定検査員を優先配置（フィルタ後）: {len(fixed_inspectors)}名を先頭に配置")
 
             return filtered_inspectors
 
@@ -3898,6 +4217,23 @@ class InspectorAssignmentManager:
                                 if reassignment_count >= max_reassignments:
                                     break
                                 
+                                # 【追加】固定検査員を保護：このロットに固定検査員が割り当てられている場合は再割当てをスキップ
+                                fixed_inspector_names = self.fixed_inspectors_by_product.get(product_number, [])
+                                if fixed_inspector_names:
+                                    # 現在割り当てられている検査員名を取得
+                                    current_inspector_value = row.get(f'検査員{inspector_col_num}', '')
+                                    if pd.notna(current_inspector_value) and str(current_inspector_value).strip() != '':
+                                        current_inspector_name = str(current_inspector_value).strip()
+                                        if '(' in current_inspector_name:
+                                            current_inspector_name = current_inspector_name.split('(')[0].strip()
+                                        
+                                        if current_inspector_name in fixed_inspector_names:
+                                            # 固定検査員が割り当てられている場合は再割当てをスキップ
+                                            self.log_message(
+                                                f"偏り是正: 品番 '{product_number}' の固定検査員 '{current_inspector_name}' は保護のため再割当てをスキップします",
+                                            )
+                                            continue
+                                
                                 # 再割当て可能かチェック（出荷予定日が古い順に処理）
                                 process_number = row.get('現在工程番号', '')
                                 
@@ -3961,6 +4297,13 @@ class InspectorAssignmentManager:
                                 replacement_candidates = []
                                 for insp in available_inspectors:
                                     candidate_code = insp['コード']
+                                    candidate_name = insp['氏名']
+                                    
+                                    # 【追加】固定検査員を保護：置き換え先として固定検査員を選択しない
+                                    # （固定検査員は既に優先的に割り当てられているため、他のロットから奪うべきではない）
+                                    if fixed_inspector_names and candidate_name in fixed_inspector_names:
+                                        # 固定検査員は置き換え先候補から除外
+                                        continue
                                     
                                     # 既に割り当てられている人は除外
                                     if candidate_code in current_codes:

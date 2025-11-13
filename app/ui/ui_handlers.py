@@ -494,6 +494,9 @@ class ModernDataExtractorUI:
             if item['品番'] == product_code:
                 # 既に登録されている場合は更新
                 item['ロット数'] = lots
+                # 検査員情報がない場合は初期化
+                if '固定検査員' not in item:
+                    item['固定検査員'] = []
                 self.update_registered_list()
                 # ファイルに保存
                 self.save_registered_products()
@@ -506,7 +509,8 @@ class ModernDataExtractorUI:
         # 新規登録
         self.registered_products.append({
             '品番': product_code,
-            'ロット数': lots
+            'ロット数': lots,
+            '固定検査員': []  # 検査員固定情報を追加
         })
         
         # リストを更新
@@ -532,10 +536,14 @@ class ModernDataExtractorUI:
             return
         
         # 登録リストを表示
-        self.registered_products_frame.pack(fill="x", padx=10, pady=(8, 8))  # 上部に8pxの余白を追加
+        self.registered_products_frame.pack(fill="x", padx=10, pady=(8, 8))
         
         # 各登録項目を表示
         for idx, item in enumerate(self.registered_products):
+            # 検査員情報がない場合は初期化
+            if '固定検査員' not in item:
+                item['固定検査員'] = []
+            
             item_frame = ctk.CTkFrame(self.registered_list_container, fg_color="#F3F4F6", corner_radius=6)
             item_frame.pack(fill="x", pady=(0, 4), padx=5)
             
@@ -563,12 +571,12 @@ class ModernDataExtractorUI:
                 text=item['品番'],
                 font=ctk.CTkFont(family="Yu Gothic", size=14),
                 text_color="#374151",
-                width=150,  # 固定幅で位置を揃える
+                width=150,
                 anchor="w"
             )
             product_value.pack(side="left")
             
-            # 検査可能ロット数／日のラベル（位置が揃う）
+            # 検査可能ロット数／日のラベル
             lots_label = ctk.CTkLabel(
                 single_row,
                 text="検査可能ロット数／日：",
@@ -588,9 +596,87 @@ class ModernDataExtractorUI:
             )
             lots_value.pack(side="left")
             
+            # 固定検査員の表示
+            fixed_inspectors_label = ctk.CTkLabel(
+                single_row,
+                text="固定検査員：",
+                font=ctk.CTkFont(family="Yu Gothic", size=14),
+                text_color="#374151",
+                anchor="w"
+            )
+            fixed_inspectors_label.pack(side="left", padx=(20, 5))
+            
+            # 固定検査員の値（テーブルに入りきるまで表示）
+            # 表示可能な幅を計算（より広い幅を確保、日本語1文字あたり約12pxを想定）
+            max_display_width = 900  # ピクセル単位の最大表示幅（拡大）
+            char_width = 12  # 日本語1文字あたりの幅（概算、より小さめに設定）
+            max_chars = max_display_width // char_width  # 約75文字分
+            
+            if item['固定検査員']:
+                # 表示可能な検査員名を動的に計算
+                displayed_names = []
+                current_length = 0
+                ellipsis_length = len(" ... (+99)")  # 省略記号の長さ（最大件数を考慮）
+                
+                for inspector_name in item['固定検査員']:
+                    # 検査員名の長さ（カンマとスペースを含む）
+                    name_length = len(inspector_name) + 2 if displayed_names else len(inspector_name)
+                    
+                    # 省略記号を含めた場合の長さ
+                    if displayed_names:
+                        total_length_with_ellipsis = current_length + name_length + ellipsis_length
+                    else:
+                        total_length_with_ellipsis = name_length + ellipsis_length
+                    
+                    # 表示可能な範囲内かチェック（より寛容に）
+                    if total_length_with_ellipsis <= max_chars:
+                        displayed_names.append(inspector_name)
+                        current_length += name_length
+                    else:
+                        # これ以上表示できない場合は省略
+                        break
+                
+                if displayed_names:
+                    fixed_inspectors_text = ", ".join(displayed_names)
+                    remaining_count = len(item['固定検査員']) - len(displayed_names)
+                    if remaining_count > 0:
+                        fixed_inspectors_text += f" ... (+{remaining_count})"
+                else:
+                    # 最初の1名も表示できない場合は件数のみ表示
+                    fixed_inspectors_text = f"... (+{len(item['固定検査員'])})"
+            else:
+                fixed_inspectors_text = "未設定"
+            
+            fixed_inspectors_value = ctk.CTkLabel(
+                single_row,
+                text=fixed_inspectors_text,
+                font=ctk.CTkFont(family="Yu Gothic", size=14),
+                text_color="#059669" if item['固定検査員'] else "#6B7280",
+                anchor="w"
+            )
+            fixed_inspectors_value.pack(side="left", fill="x", expand=True)
+            
+            # ボタンフレーム
+            button_frame = ctk.CTkFrame(item_frame, fg_color="transparent")
+            button_frame.pack(side="right", padx=10, pady=6)
+            
+            # 検査員固定ボタン
+            inspector_button = ctk.CTkButton(
+                button_frame,
+                text="検査員固定",
+                command=lambda idx=idx: self.fix_inspectors_for_product(idx),
+                font=ctk.CTkFont(family="Yu Gothic", size=12),
+                width=100,
+                height=32,
+                fg_color="#10B981" if item['固定検査員'] else "#6B7280",
+                hover_color="#059669" if item['固定検査員'] else "#4B5563",
+                text_color="white"
+            )
+            inspector_button.pack(side="left", padx=(0, 5))
+            
             # 削除ボタン
             delete_button = ctk.CTkButton(
-                item_frame,
+                button_frame,
                 text="登録削除",
                 command=lambda idx=idx: self.delete_registered_product(idx),
                 font=ctk.CTkFont(family="Yu Gothic", size=12),
@@ -600,7 +686,7 @@ class ModernDataExtractorUI:
                 hover_color="#DC2626",
                 text_color="white"
             )
-            delete_button.pack(side="right", padx=10, pady=6)
+            delete_button.pack(side="left")
     
     def delete_registered_product(self, index):
         """登録された品番を削除"""
@@ -610,12 +696,179 @@ class ModernDataExtractorUI:
             # ファイルに保存
             self.save_registered_products()
     
+    def fix_inspectors_for_product(self, index):
+        """品番に対する検査員を固定するダイアログを表示"""
+        try:
+            if index < 0 or index >= len(self.registered_products):
+                return
+            
+            item = self.registered_products[index]
+            product_number = item['品番']
+            
+            # 検査員マスタを読み込む
+            inspector_master_df = self.load_inspector_master()
+            if inspector_master_df is None or inspector_master_df.empty:
+                self.log_message("エラー: 検査員マスタを読み込めません")
+                return
+            
+            # 検査員選択ダイアログを作成
+            dialog = ctk.CTkToplevel(self.root)
+            dialog.title(f"検査員固定 - {product_number}")
+            dialog.geometry("500x600")
+            dialog.transient(self.root)
+            dialog.grab_set()
+            
+            # ラベル
+            label = ctk.CTkLabel(
+                dialog,
+                text=f"品番「{product_number}」の固定検査員を選択してください",
+                font=ctk.CTkFont(family="Yu Gothic", size=14)
+            )
+            label.pack(pady=10)
+            
+            # 現在の固定検査員を表示
+            current_fixed = item.get('固定検査員', [])
+            if current_fixed:
+                current_label = ctk.CTkLabel(
+                    dialog,
+                    text=f"現在: {', '.join(current_fixed)}",
+                    font=ctk.CTkFont(family="Yu Gothic", size=12),
+                    text_color="#6B7280"
+                )
+                current_label.pack(pady=5)
+            
+            # スクロール可能なフレーム
+            scroll_frame = ctk.CTkScrollableFrame(dialog)
+            scroll_frame.pack(fill="both", expand=True, padx=20, pady=10)
+            
+            # 選択された検査員を保持（セットで管理）
+            selected_inspectors = set(current_fixed)
+            
+            # 検査員リストを作成
+            inspector_names = inspector_master_df['#氏名'].dropna().astype(str).str.strip()
+            inspector_names = inspector_names[inspector_names != ''].unique().tolist()
+            
+            # 各検査員にチェックボックスを作成
+            inspector_checkboxes = {}
+            for inspector_name in sorted(inspector_names):
+                # チェックボックスを作成
+                checkbox_var = tk.BooleanVar(value=inspector_name in selected_inspectors)
+                checkbox = ctk.CTkCheckBox(
+                    scroll_frame,
+                    text=inspector_name,
+                    variable=checkbox_var,
+                    command=lambda name=inspector_name, var=checkbox_var: self._update_selected_inspectors(name, var, selected_inspectors),
+                    font=ctk.CTkFont(family="Yu Gothic", size=12)
+                )
+                checkbox.pack(anchor="w", pady=2)
+                inspector_checkboxes[inspector_name] = checkbox_var
+            
+            # ボタンフレーム
+            button_frame = ctk.CTkFrame(dialog, fg_color="transparent")
+            button_frame.pack(pady=10)
+            
+            def on_ok():
+                # 固定検査員を更新
+                item['固定検査員'] = sorted(list(selected_inspectors))
+                self.update_registered_list()
+                self.save_registered_products()
+                self.log_message(f"品番「{product_number}」の固定検査員を設定しました: {', '.join(item['固定検査員']) if item['固定検査員'] else 'なし'}")
+                dialog.destroy()
+            
+            def on_cancel():
+                dialog.destroy()
+            
+            def on_clear():
+                selected_inspectors.clear()
+                for var in inspector_checkboxes.values():
+                    var.set(False)
+            
+            ok_button = ctk.CTkButton(
+                button_frame,
+                text="OK",
+                command=on_ok,
+                width=100,
+                height=30
+            )
+            ok_button.pack(side="left", padx=5)
+            
+            clear_button = ctk.CTkButton(
+                button_frame,
+                text="クリア",
+                command=on_clear,
+                width=100,
+                height=30,
+                fg_color="#F59E0B",
+                hover_color="#D97706"
+            )
+            clear_button.pack(side="left", padx=5)
+            
+            cancel_button = ctk.CTkButton(
+                button_frame,
+                text="キャンセル",
+                command=on_cancel,
+                width=100,
+                height=30,
+                fg_color="#6B7280",
+                hover_color="#4B5563"
+            )
+            cancel_button.pack(side="left", padx=5)
+            
+            # ダイアログを中央に配置
+            dialog.update_idletasks()
+            x = (dialog.winfo_screenwidth() // 2) - (dialog.winfo_width() // 2)
+            y = (dialog.winfo_screenheight() // 2) - (dialog.winfo_height() // 2)
+            dialog.geometry(f"+{x}+{y}")
+            
+        except Exception as e:
+            self.log_message(f"検査員固定ダイアログの表示に失敗しました: {str(e)}")
+            logger.error(f"検査員固定ダイアログの表示に失敗しました: {str(e)}", exc_info=True)
+    
+    def _update_selected_inspectors(self, name, var, selected_set):
+        """選択された検査員を更新"""
+        if var.get():
+            selected_set.add(name)
+        else:
+            selected_set.discard(name)
+    
+    def _set_fixed_inspectors_to_manager(self):
+        """登録済み品番の固定検査員情報をInspectorAssignmentManagerに設定"""
+        try:
+            if not hasattr(self, 'inspector_manager') or self.inspector_manager is None:
+                return
+            
+            # 固定検査員情報を辞書形式で構築
+            fixed_inspectors_dict = {}
+            for item in self.registered_products:
+                product_number = item.get('品番', '')
+                fixed_inspectors = item.get('固定検査員', [])
+                if product_number and fixed_inspectors:
+                    fixed_inspectors_dict[product_number] = fixed_inspectors
+            
+            # InspectorAssignmentManagerに設定
+            self.inspector_manager.fixed_inspectors_by_product = fixed_inspectors_dict
+            
+            if fixed_inspectors_dict:
+                self.log_message(f"固定検査員情報を設定しました: {len(fixed_inspectors_dict)}品番")
+                for product, inspectors in fixed_inspectors_dict.items():
+                    self.log_message(f"  品番 '{product}': {', '.join(inspectors)}")
+            else:
+                self.log_message("固定検査員情報は設定されていません")
+                
+        except Exception as e:
+            self.log_message(f"固定検査員情報の設定に失敗しました: {str(e)}")
+            logger.error(f"固定検査員情報の設定に失敗しました: {str(e)}", exc_info=True)
+    
     def load_registered_products(self):
         """登録済み品番リストをファイルから読み込む"""
         try:
             if self.registered_products_file.exists():
                 with open(self.registered_products_file, 'r', encoding='utf-8') as f:
                     self.registered_products = json.load(f)
+                # 後方互換性: 検査員情報がない場合は初期化
+                for item in self.registered_products:
+                    if '固定検査員' not in item:
+                        item['固定検査員'] = []
                 # UIが構築されている場合はリストを更新
                 if self.registered_list_container is not None:
                     self.update_registered_list()
@@ -2882,6 +3135,9 @@ class ModernDataExtractorUI:
                 # 再読み込みは次の処理で行うため、ここではログのみ
                 pass
             
+            # 固定検査員情報を設定
+            self._set_fixed_inspectors_to_manager()
+            
             # 検査員を割り当て（スキル値付きで保存）
             self.update_progress(assign_progress, "検査員を割り当て中...")
             inspector_df_with_skills = self.inspector_manager.assign_inspectors(inspector_df, inspector_master_df, skill_master_df, True)
@@ -3536,9 +3792,59 @@ class ModernDataExtractorUI:
             return None
     
     
-    def display_inspector_assignment_table(self, inspector_df):
-        """検査員割振りテーブルを表示"""
+    def display_inspector_assignment_table(self, inspector_df, preserve_scroll_position=False, target_row_index=None):
+        """検査員割振りテーブルを表示
+        
+        Args:
+            inspector_df: 表示するデータフレーム
+            preserve_scroll_position: スクロール位置を保持するかどうか
+            target_row_index: 選択・表示する行のインデックス（DataFrameのインデックス）
+        """
         try:
+            # 既存のテーブルがある場合、スクロール位置を保存
+            saved_scroll_position = None
+            saved_first_visible_row_data = None  # 最初に表示されている行のデータを保存
+            saved_main_scroll_position = None
+            
+            if preserve_scroll_position and hasattr(self, 'current_inspector_tree') and self.current_inspector_tree:
+                try:
+                    # メインスクロールフレームの位置を先に保存（テーブル削除前に）
+                    try:
+                        if hasattr(self.main_scroll_frame, '_parent_canvas'):
+                            canvas = self.main_scroll_frame._parent_canvas
+                            if canvas:
+                                saved_main_scroll_position = canvas.yview()
+                    except:
+                        pass
+                    
+                    # テーブル内のスクロール位置を取得
+                    saved_scroll_position = self.current_inspector_tree.yview()
+                    
+                    # 表示されている最初の行のデータを保存（より確実な方法）
+                    try:
+                        visible_items = self.current_inspector_tree.get_children()
+                        if visible_items:
+                            scroll_top = saved_scroll_position[0]
+                            total_items = len(visible_items)
+                            if total_items > 0:
+                                # スクロール位置から最初に表示される行のインデックスを計算
+                                first_visible_index = int(scroll_top * total_items)
+                                if first_visible_index < len(visible_items):
+                                    first_item = visible_items[first_visible_index]
+                                    # その行のデータを取得（品番とロットIDを保存）
+                                    item_values = self.current_inspector_tree.item(first_item, 'values')
+                                    if item_values and len(item_values) > 4:
+                                        # 列の順序: 出荷予定日(0), 品番(1), 品名(2), 客先(3), 生産ロットID(4), ...
+                                        saved_first_visible_row_data = {
+                                            'product_number': item_values[1] if len(item_values) > 1 else None,  # 品番
+                                            'lot_id': item_values[4] if len(item_values) > 4 else None,  # 生産ロットID
+                                            'scroll_pos': saved_scroll_position[0]
+                                        }
+                    except Exception as e:
+                        logger.debug(f"最初の行データの保存に失敗: {str(e)}")
+                except Exception as e:
+                    logger.debug(f"スクロール位置の保存に失敗: {str(e)}")
+            
             # 既存のテーブルセクションを削除
             self.hide_current_table()
             
@@ -3637,6 +3943,7 @@ class ModernDataExtractorUI:
             
             # データの挿入
             row_index = 0
+            target_tree_item = None  # 選択する行のTreeviewアイテム
             # 列名から列インデックスへのマッピングを作成（高速化：itertuples()を使用）
             inspector_col_idx_map = {col: inspector_df.columns.get_loc(col) for col in inspector_columns if col in inspector_df.columns}
             
@@ -3692,7 +3999,12 @@ class ModernDataExtractorUI:
                 
                 # 交互行色を適用
                 tag = "even" if row_index % 2 == 0 else "odd"
-                inspector_tree.insert("", "end", values=values, tags=(tag,))
+                tree_item = inspector_tree.insert("", "end", values=values, tags=(tag,))
+                
+                # 対象行を記録
+                if target_row_index is not None and row_idx == target_row_index:
+                    target_tree_item = tree_item
+                
                 row_index += 1
             
             # タグの設定（交互行色）
@@ -3721,12 +4033,589 @@ class ModernDataExtractorUI:
             table_frame.bind("<Enter>", on_inspector_enter)
             table_frame.bind("<Leave>", on_inspector_leave)
             
+            # 【追加】右クリックメニューの実装
+            def show_inspector_context_menu(event):
+                """検査員列の右クリックメニューを表示"""
+                try:
+                    # クリックされた位置のアイテムと列を取得
+                    item = inspector_tree.identify_row(event.y)
+                    column = inspector_tree.identify_column(event.x)
+                    
+                    if not item or not column:
+                        return
+                    
+                    # 列名を取得（列番号から列名に変換）
+                    col_index = int(column.replace('#', '')) - 1
+                    if col_index < 0 or col_index >= len(inspector_columns):
+                        return
+                    
+                    col_name = inspector_columns[col_index]
+                    
+                    # 検査員列（検査員1～5）の場合のみメニューを表示
+                    if not col_name.startswith('検査員'):
+                        return
+                    
+                    # 現在の値を取得
+                    item_values = inspector_tree.item(item, 'values')
+                    current_inspector = item_values[col_index] if col_index < len(item_values) else ''
+                    
+                    # 行インデックスを取得（テーブルの行番号）
+                    row_index_in_tree = inspector_tree.index(item)
+                    
+                    # メニューを作成
+                    context_menu = tk.Menu(self.root, tearoff=0)
+                    context_menu.add_command(
+                        label=f"検査員を変更（現在: {current_inspector if current_inspector else '未割当'}）",
+                        command=lambda: self.change_inspector_dialog(row_index_in_tree, col_name, col_index, current_inspector, inspector_df)
+                    )
+                    context_menu.add_separator()
+                    context_menu.add_command(
+                        label="検査員を削除",
+                        command=lambda: self.remove_inspector_from_table(row_index_in_tree, col_name, col_index, inspector_df)
+                    )
+                    
+                    # メニューを表示
+                    try:
+                        context_menu.tk_popup(event.x_root, event.y_root)
+                    finally:
+                        context_menu.grab_release()
+                
+                except Exception as e:
+                    self.log_message(f"右クリックメニューの表示に失敗しました: {str(e)}")
+                    logger.error(f"右クリックメニューの表示に失敗しました: {str(e)}", exc_info=True)
+            
+            inspector_tree.bind("<Button-3>", show_inspector_context_menu)  # 右クリック
+            
+            # スクロール位置を復元（選択行の表示より優先）
+            if preserve_scroll_position and (saved_scroll_position or saved_first_visible_row_data):
+                try:
+                    saved_pos = saved_scroll_position[0] if saved_scroll_position else None
+                    saved_row_data = saved_first_visible_row_data
+                    saved_main_pos = saved_main_scroll_position[0] if saved_main_scroll_position else None
+                    target_item = target_tree_item  # クロージャで使用するため変数に保存
+                    
+                    # 少し遅延を入れてからスクロール位置を復元（テーブルが完全に描画された後）
+                    def restore_scroll():
+                        try:
+                            # メインスクロールフレームの位置を先に復元
+                            if saved_main_pos is not None:
+                                try:
+                                    if hasattr(self.main_scroll_frame, '_parent_canvas'):
+                                        canvas = self.main_scroll_frame._parent_canvas
+                                        if canvas:
+                                            canvas.yview_moveto(saved_main_pos)
+                                except:
+                                    pass
+                            
+                            # テーブル内のスクロール位置を復元
+                            if saved_row_data:
+                                # 保存した行のデータから該当行を探す
+                                try:
+                                    all_items = inspector_tree.get_children()
+                                    target_item_found = None
+                                    
+                                    # 品番とロットIDで一致する行を検索
+                                    for item in all_items:
+                                        item_values = inspector_tree.item(item, 'values')
+                                        if len(item_values) > 4:
+                                            product_match = (saved_row_data['product_number'] and 
+                                                           item_values[1] == saved_row_data['product_number'])
+                                            lot_match = (saved_row_data['lot_id'] and 
+                                                        item_values[4] == saved_row_data['lot_id'])
+                                            
+                                            # 品番またはロットIDが一致する場合
+                                            if product_match or lot_match:
+                                                target_item_found = item
+                                                break
+                                    
+                                    if target_item_found:
+                                        # 保存したスクロール位置を直接使用
+                                        if saved_pos is not None:
+                                            inspector_tree.yview_moveto(saved_pos)
+                                        else:
+                                            # スクロール位置が保存されていない場合は、行の位置から計算
+                                            item_index = inspector_tree.index(target_item_found)
+                                            total_items = len(all_items)
+                                            if total_items > 0:
+                                                target_scroll_pos = max(0.0, min(1.0, item_index / total_items))
+                                                inspector_tree.yview_moveto(target_scroll_pos)
+                                except Exception as e:
+                                    logger.debug(f"行データからのスクロール位置復元に失敗: {str(e)}")
+                                    # フォールバック: 保存したスクロール位置を使用
+                                    if saved_pos is not None:
+                                        inspector_tree.yview_moveto(saved_pos)
+                            elif saved_pos is not None:
+                                # 行データがない場合は、保存したスクロール位置を直接使用
+                                inspector_tree.yview_moveto(saved_pos)
+                            
+                            # 対象行を選択（スクロール位置は変更しない）
+                            if target_item:
+                                inspector_tree.selection_set(target_item)
+                                inspector_tree.focus(target_item)
+                                # see()は呼ばない（スクロール位置を保持するため）
+                            
+                            # 復元後に再確認して、必要に応じて再試行
+                            if saved_pos is not None:
+                                self.root.after(50, lambda: self._verify_and_restore_scroll(inspector_tree, saved_pos))
+                        except Exception as e:
+                            logger.debug(f"スクロール位置の復元に失敗: {str(e)}")
+                    # テーブルが完全に描画されるまで待つ（遅延を増やす）
+                    self.root.after(250, restore_scroll)  # 遅延を250msに増やす
+                except:
+                    pass
+            else:
+                # スクロール位置を保持しない場合は、対象行を表示
+                if target_tree_item:
+                    try:
+                        def select_target_row():
+                            try:
+                                inspector_tree.selection_set(target_tree_item)
+                                inspector_tree.focus(target_tree_item)
+                                # 行が見えるようにスクロール
+                                inspector_tree.see(target_tree_item)
+                            except:
+                                pass
+                        self.root.after(20, select_target_row)
+                    except:
+                        pass
+            
+            # テーブルとデータフレームを保持（後で更新するため）
+            self.current_inspector_tree = inspector_tree
+            self.current_inspector_df = inspector_df
+            
             self.log_message(f"検査員割振りテーブルを表示しました: {len(inspector_df)}件")
             
         except Exception as e:
             error_msg = f"検査員割振りテーブルの表示に失敗しました: {str(e)}"
             self.log_message(error_msg)
             logger.error(error_msg)
+    
+    def _verify_and_restore_scroll(self, tree, target_pos, retry_count=0):
+        """スクロール位置が正しく復元されたか確認し、必要に応じて再試行"""
+        try:
+            current_pos = tree.yview()[0]
+            if abs(current_pos - target_pos) > 0.01 and retry_count < 3:  # 0.01以上の差がある場合、最大3回再試行
+                tree.yview_moveto(target_pos)
+                self.root.after(20, lambda: self._verify_and_restore_scroll(tree, target_pos, retry_count + 1))
+        except:
+            pass
+    
+    def change_inspector_dialog(self, row_index_in_tree, col_name, col_index, current_inspector, inspector_df):
+        """検査員を変更するダイアログを表示"""
+        try:
+            # 元のDataFrameのインデックスを取得
+            if inspector_df is None or inspector_df.empty:
+                self.log_message("エラー: 検査員割当てデータが見つかりません")
+                return
+            
+            # 行インデックスを取得
+            if row_index_in_tree >= len(inspector_df):
+                self.log_message(f"エラー: 行インデックスが範囲外です: {row_index_in_tree}")
+                return
+            
+            original_index = inspector_df.index[row_index_in_tree]
+            row = inspector_df.iloc[original_index]
+            
+            # 検査員マスタを読み込む
+            inspector_master_df = self.load_inspector_master()
+            if inspector_master_df is None or inspector_master_df.empty:
+                self.log_message("エラー: 検査員マスタを読み込めません")
+                return
+            
+            # 検査員選択ダイアログを作成
+            dialog = ctk.CTkToplevel(self.root)
+            dialog.title("検査員を選択")
+            dialog.geometry("400x500")
+            dialog.transient(self.root)
+            dialog.grab_set()
+            
+            # ラベル
+            label = ctk.CTkLabel(
+                dialog,
+                text=f"検査員列「{col_name}」の検査員を選択してください",
+                font=ctk.CTkFont(family="Yu Gothic", size=14)
+            )
+            label.pack(pady=10)
+            
+            # 現在の検査員を表示
+            if current_inspector:
+                current_label = ctk.CTkLabel(
+                    dialog,
+                    text=f"現在: {current_inspector}",
+                    font=ctk.CTkFont(family="Yu Gothic", size=12),
+                    text_color="#6B7280"
+                )
+                current_label.pack(pady=5)
+            
+            # スクロール可能なフレーム
+            scroll_frame = ctk.CTkScrollableFrame(dialog)
+            scroll_frame.pack(fill="both", expand=True, padx=20, pady=10)
+            
+            # 選択された検査員を保持
+            selected_inspector = {'name': None, 'code': None}
+            
+            # 検査員リストを作成
+            inspector_names = inspector_master_df['#氏名'].dropna().astype(str).str.strip()
+            inspector_names = inspector_names[inspector_names != ''].unique().tolist()
+            
+            # 各検査員にラジオボタンを作成
+            for inspector_name in sorted(inspector_names):
+                # 検査員コードを取得
+                inspector_info = inspector_master_df[inspector_master_df['#氏名'] == inspector_name]
+                if inspector_info.empty:
+                    continue
+                
+                inspector_code = inspector_info.iloc[0]['#ID']
+                
+                # ラジオボタンを作成
+                radio = ctk.CTkRadioButton(
+                    scroll_frame,
+                    text=inspector_name,
+                    value=inspector_name,
+                    command=lambda name=inspector_name, code=inspector_code: set_selected(name, code),
+                    font=ctk.CTkFont(family="Yu Gothic", size=12)
+                )
+                radio.pack(anchor="w", pady=2)
+                
+                # 現在の検査員を選択状態にする
+                if current_inspector:
+                    current_name_clean = current_inspector.split('(')[0].strip()
+                    if inspector_name == current_name_clean:
+                        radio.select()
+                        selected_inspector['name'] = inspector_name
+                        selected_inspector['code'] = inspector_code
+            
+            def set_selected(name, code):
+                selected_inspector['name'] = name
+                selected_inspector['code'] = code
+            
+            # ボタンフレーム
+            button_frame = ctk.CTkFrame(dialog, fg_color="transparent")
+            button_frame.pack(pady=10)
+            
+            def on_ok():
+                if selected_inspector['name']:
+                    # 検査員を変更
+                    self.update_inspector_assignment(
+                        original_index, col_name, col_index,
+                        selected_inspector['name'], selected_inspector['code'],
+                        current_inspector, row, inspector_df
+                    )
+                dialog.destroy()
+            
+            def on_cancel():
+                dialog.destroy()
+            
+            ok_button = ctk.CTkButton(
+                button_frame,
+                text="OK",
+                command=on_ok,
+                width=100,
+                height=30
+            )
+            ok_button.pack(side="left", padx=5)
+            
+            cancel_button = ctk.CTkButton(
+                button_frame,
+                text="キャンセル",
+                command=on_cancel,
+                width=100,
+                height=30,
+                fg_color="#6B7280",
+                hover_color="#4B5563"
+            )
+            cancel_button.pack(side="left", padx=5)
+            
+            # ダイアログを中央に配置
+            dialog.update_idletasks()
+            x = (dialog.winfo_screenwidth() // 2) - (dialog.winfo_width() // 2)
+            y = (dialog.winfo_screenheight() // 2) - (dialog.winfo_height() // 2)
+            dialog.geometry(f"+{x}+{y}")
+            
+        except Exception as e:
+            self.log_message(f"検査員選択ダイアログの表示に失敗しました: {str(e)}")
+            logger.error(f"検査員選択ダイアログの表示に失敗しました: {str(e)}", exc_info=True)
+    
+    def update_inspector_assignment(self, original_index, col_name, col_index, new_inspector_name, new_inspector_code, old_inspector_name, row, inspector_df):
+        """検査員割当てを更新"""
+        try:
+            from datetime import date as date_type
+            
+            if inspector_df is None:
+                self.log_message("エラー: 検査員割当てデータが見つかりません")
+                return
+            
+            # データフレームの行を取得
+            df = inspector_df.copy()
+            divided_time = row.get('分割検査時間', 0.0)
+            product_number = row.get('品番', '')
+            current_date = pd.Timestamp.now().date()
+            
+            # 検査員マスタを読み込む
+            inspector_master_df = self.load_inspector_master()
+            if inspector_master_df is None:
+                self.log_message("エラー: 検査員マスタを読み込めません")
+                return
+            
+            # 旧検査員のコードを取得
+            old_inspector_code = None
+            if old_inspector_name:
+                old_name_clean = old_inspector_name.split('(')[0].strip()
+                old_info = inspector_master_df[inspector_master_df['#氏名'] == old_name_clean]
+                if not old_info.empty:
+                    old_inspector_code = old_info.iloc[0]['#ID']
+            
+            # 新検査員が空の場合は削除処理のみ実行
+            if not new_inspector_name or not new_inspector_code:
+                # 検査員を削除（未割当にする）処理
+                # 旧検査員から時間を引く
+                if old_inspector_code:
+                    if old_inspector_code in self.inspector_manager.inspector_daily_assignments:
+                        if current_date in self.inspector_manager.inspector_daily_assignments[old_inspector_code]:
+                            self.inspector_manager.inspector_daily_assignments[old_inspector_code][current_date] = max(
+                                0.0,
+                                self.inspector_manager.inspector_daily_assignments[old_inspector_code][current_date] - divided_time
+                            )
+                    
+                    if old_inspector_code in self.inspector_manager.inspector_work_hours:
+                        self.inspector_manager.inspector_work_hours[old_inspector_code] = max(
+                            0.0,
+                            self.inspector_manager.inspector_work_hours[old_inspector_code] - divided_time
+                        )
+                    
+                    # 品番別累計時間も更新
+                    if old_inspector_code in self.inspector_manager.inspector_product_hours:
+                        if product_number in self.inspector_manager.inspector_product_hours[old_inspector_code]:
+                            self.inspector_manager.inspector_product_hours[old_inspector_code][product_number] = max(
+                                0.0,
+                                self.inspector_manager.inspector_product_hours[old_inspector_code][product_number] - divided_time
+                            )
+                
+                # データフレームを更新（空文字列を設定）
+                df.at[original_index, col_name] = ''
+                
+                # 検査員人数と分割検査時間を再計算
+                self._recalculate_inspector_count_and_divided_time(df, original_index)
+                
+                # 当日洗浄上がり品の制約を更新
+                shipping_date_str = str(row.get('出荷予定日', '')).strip()
+                is_same_day_cleaning = (
+                    shipping_date_str == "当日洗浄上がり品" or
+                    shipping_date_str == "当日洗浄品" or
+                    "当日洗浄" in shipping_date_str or
+                    shipping_date_str == "先行検査" or
+                    shipping_date_str == "当日先行検査"
+                )
+                
+                if is_same_day_cleaning and old_inspector_code:
+                    # 旧検査員を削除
+                    if product_number in self.inspector_manager.same_day_cleaning_inspectors:
+                        self.inspector_manager.same_day_cleaning_inspectors[product_number].discard(old_inspector_code)
+                
+                # データフレームを更新
+                self.current_inspector_data = df
+                
+                # テーブルを再描画（スクロール位置と選択行を保持）
+                self.display_inspector_assignment_table(df, preserve_scroll_position=True, target_row_index=original_index)
+                
+                # 詳細表示ポップアップが開いている場合は更新
+                self.update_detail_popup_if_open()
+                
+                self.log_message(
+                    f"検査員を削除しました: {old_inspector_name} → 未割当 "
+                    f"(品番: {product_number}, {col_name})"
+                )
+                return
+            
+            # 新検査員の情報を取得
+            new_info = inspector_master_df[inspector_master_df['#ID'] == new_inspector_code]
+            if new_info.empty:
+                self.log_message(f"エラー: 検査員コード {new_inspector_code} が見つかりません")
+                return
+            
+            # 制約チェック（簡易版）
+            # 1. 勤務時間チェック
+            max_hours = self.inspector_manager.get_inspector_max_hours(new_inspector_code, inspector_master_df)
+            daily_hours = self.inspector_manager.inspector_daily_assignments.get(new_inspector_code, {}).get(current_date, 0.0)
+            
+            if daily_hours + divided_time > max_hours:
+                self.log_message(
+                    f"警告: 検査員 '{new_inspector_name}' の勤務時間が超過します "
+                    f"({daily_hours:.1f}h + {divided_time:.1f}h > {max_hours:.1f}h)。"
+                    f"変更を続行します。",
+                    level='warning'
+                )
+            
+            # 2. 同一品番4時間上限チェック
+            product_hours = self.inspector_manager.inspector_product_hours.get(new_inspector_code, {}).get(product_number, 0.0)
+            if product_hours + divided_time > 4.0:
+                self.log_message(
+                    f"警告: 検査員 '{new_inspector_name}' の同一品番累計時間が4時間を超過します "
+                    f"({product_hours:.1f}h + {divided_time:.1f}h = {product_hours + divided_time:.1f}h)。"
+                    f"変更を続行します。",
+                    level='warning'
+                )
+            
+            # 旧検査員から時間を引く
+            if old_inspector_code:
+                if old_inspector_code in self.inspector_manager.inspector_daily_assignments:
+                    if current_date in self.inspector_manager.inspector_daily_assignments[old_inspector_code]:
+                        self.inspector_manager.inspector_daily_assignments[old_inspector_code][current_date] = max(
+                            0.0,
+                            self.inspector_manager.inspector_daily_assignments[old_inspector_code][current_date] - divided_time
+                        )
+                
+                if old_inspector_code in self.inspector_manager.inspector_work_hours:
+                    self.inspector_manager.inspector_work_hours[old_inspector_code] = max(
+                        0.0,
+                        self.inspector_manager.inspector_work_hours[old_inspector_code] - divided_time
+                    )
+                
+                # 品番別累計時間も更新
+                if old_inspector_code in self.inspector_manager.inspector_product_hours:
+                    if product_number in self.inspector_manager.inspector_product_hours[old_inspector_code]:
+                        self.inspector_manager.inspector_product_hours[old_inspector_code][product_number] = max(
+                            0.0,
+                            self.inspector_manager.inspector_product_hours[old_inspector_code][product_number] - divided_time
+                        )
+            
+            # 新検査員に時間を追加
+            if new_inspector_code not in self.inspector_manager.inspector_daily_assignments:
+                self.inspector_manager.inspector_daily_assignments[new_inspector_code] = {}
+            if current_date not in self.inspector_manager.inspector_daily_assignments[new_inspector_code]:
+                self.inspector_manager.inspector_daily_assignments[new_inspector_code][current_date] = 0.0
+            
+            self.inspector_manager.inspector_daily_assignments[new_inspector_code][current_date] += divided_time
+            
+            if new_inspector_code not in self.inspector_manager.inspector_work_hours:
+                self.inspector_manager.inspector_work_hours[new_inspector_code] = 0.0
+            self.inspector_manager.inspector_work_hours[new_inspector_code] += divided_time
+            
+            # 品番別累計時間も更新
+            if new_inspector_code not in self.inspector_manager.inspector_product_hours:
+                self.inspector_manager.inspector_product_hours[new_inspector_code] = {}
+            self.inspector_manager.inspector_product_hours[new_inspector_code][product_number] = (
+                self.inspector_manager.inspector_product_hours[new_inspector_code].get(product_number, 0.0) + divided_time
+            )
+            
+            # データフレームを更新
+            # スキル表示の設定に応じて検査員名を設定
+            if self.show_skill_values:
+                # スキル値を取得（簡易版：スキルマスタから取得する必要がある）
+                new_inspector_display = new_inspector_name
+            else:
+                new_inspector_display = new_inspector_name
+            
+            df.at[original_index, col_name] = new_inspector_display
+            
+            # 検査員人数と分割検査時間を再計算
+            self._recalculate_inspector_count_and_divided_time(df, original_index)
+            
+            # 当日洗浄上がり品の制約を更新
+            shipping_date_str = str(row.get('出荷予定日', '')).strip()
+            is_same_day_cleaning = (
+                shipping_date_str == "当日洗浄上がり品" or
+                shipping_date_str == "当日洗浄品" or
+                "当日洗浄" in shipping_date_str or
+                shipping_date_str == "先行検査" or
+                shipping_date_str == "当日先行検査"
+            )
+            
+            if is_same_day_cleaning:
+                # 旧検査員を削除
+                if old_inspector_code and product_number in self.inspector_manager.same_day_cleaning_inspectors:
+                    self.inspector_manager.same_day_cleaning_inspectors[product_number].discard(old_inspector_code)
+                
+                # 新検査員を追加
+                self.inspector_manager.same_day_cleaning_inspectors.setdefault(product_number, set()).add(new_inspector_code)
+            
+            # データフレームを更新
+            self.current_inspector_data = df
+            
+            # テーブルを再描画（スクロール位置と選択行を保持）
+            self.display_inspector_assignment_table(df, preserve_scroll_position=True, target_row_index=original_index)
+            
+            # 詳細表示ポップアップが開いている場合は更新
+            self.update_detail_popup_if_open()
+            
+            self.log_message(
+                f"検査員を変更しました: {old_inspector_name if old_inspector_name else '未割当'} → {new_inspector_name} "
+                f"(品番: {product_number}, {col_name})"
+            )
+            
+        except Exception as e:
+            self.log_message(f"検査員割当ての更新に失敗しました: {str(e)}")
+            logger.error(f"検査員割当ての更新に失敗しました: {str(e)}", exc_info=True)
+    
+    def _recalculate_inspector_count_and_divided_time(self, df, row_index):
+        """検査員人数と分割検査時間を再計算"""
+        try:
+            row = df.loc[row_index]
+            
+            # 検査員1～5の列を確認して、実際に割り当てられている検査員数をカウント
+            inspector_count = 0
+            for i in range(1, 6):
+                inspector_col = f'検査員{i}'
+                if inspector_col in df.columns:
+                    inspector_value = row.get(inspector_col, '')
+                    if pd.notna(inspector_value) and str(inspector_value).strip() != '':
+                        inspector_count += 1
+            
+            # 検査員人数を更新
+            if '検査員人数' in df.columns:
+                df.at[row_index, '検査員人数'] = inspector_count
+            
+            # 分割検査時間を再計算
+            if '分割検査時間' in df.columns and '検査時間' in df.columns:
+                inspection_time = row.get('検査時間', 0.0)
+                if pd.notna(inspection_time) and inspector_count > 0:
+                    # 検査時間を検査員人数で割る
+                    divided_time = inspection_time / inspector_count
+                    df.at[row_index, '分割検査時間'] = round(divided_time, 1)
+                else:
+                    df.at[row_index, '分割検査時間'] = 0.0
+            
+        except Exception as e:
+            logger.debug(f"検査員人数と分割検査時間の再計算に失敗: {str(e)}")
+    
+    def remove_inspector_from_table(self, row_index_in_tree, col_name, col_index, inspector_df):
+        """検査員を削除（未割当にする）"""
+        try:
+            if inspector_df is None or inspector_df.empty:
+                return
+            
+            if row_index_in_tree >= len(inspector_df):
+                self.log_message(f"エラー: 行インデックスが範囲外です: {row_index_in_tree}")
+                return
+            
+            original_index = inspector_df.index[row_index_in_tree]
+            row = inspector_df.iloc[original_index]
+            
+            # 現在の検査員名を取得
+            current_inspector = row.get(col_name, '')
+            if not current_inspector or pd.isna(current_inspector):
+                self.log_message("既に未割当です")
+                return
+            
+            # 確認ダイアログ
+            result = messagebox.askyesno(
+                "確認",
+                f"検査員列「{col_name}」の検査員「{current_inspector}」を削除（未割当にする）してもよろしいですか？"
+            )
+            
+            if not result:
+                return
+            
+            # 検査員を削除（未割当にする）
+            self.update_inspector_assignment(
+                original_index, col_name, col_index,
+                '', '',  # 新検査員なし
+                current_inspector, row, inspector_df
+            )
+            
+        except Exception as e:
+            self.log_message(f"検査員の削除に失敗しました: {str(e)}")
+            logger.error(f"検査員の削除に失敗しました: {str(e)}", exc_info=True)
     
     def toggle_skill_display(self):
         """スキル表示の切り替え"""
@@ -3957,6 +4846,50 @@ class ModernDataExtractorUI:
                 self.detail_popup = None
         except Exception as e:
             logger.error(f"詳細表示ポップアップ閉じる中にエラーが発生しました: {str(e)}")
+    
+    def update_detail_popup_if_open(self):
+        """詳細表示ポップアップが開いている場合は更新"""
+        try:
+            if hasattr(self, 'detail_popup') and self.detail_popup is not None:
+                try:
+                    # ポップアップが存在し、破棄されていないか確認
+                    if self.detail_popup.winfo_exists():
+                        # 現在のタブを取得
+                        tabview = None
+                        for widget in self.detail_popup.winfo_children():
+                            if isinstance(widget, ctk.CTkFrame):
+                                for child in widget.winfo_children():
+                                    if isinstance(child, ctk.CTkTabview):
+                                        tabview = child
+                                        break
+                                if tabview:
+                                    break
+                        
+                        if tabview:
+                            current_tab = tabview.get()
+                            
+                            # タブの内容を再描画
+                            # グラフタブの場合
+                            if current_tab == "グラフ表示":
+                                graph_frame = tabview.tab("グラフ表示")
+                                # 既存のグラフを削除
+                                for widget in graph_frame.winfo_children():
+                                    widget.destroy()
+                                # グラフを再作成
+                                self.create_detail_graph(graph_frame)
+                            
+                            # ロット一覧タブの場合
+                            elif current_tab == "ロット一覧":
+                                lot_frame = tabview.tab("ロット一覧")
+                                # 既存のリストを削除
+                                for widget in lot_frame.winfo_children():
+                                    widget.destroy()
+                                # リストを再作成
+                                self.create_inspector_lot_list(lot_frame)
+                except Exception as e:
+                    logger.debug(f"詳細表示ポップアップの更新に失敗: {str(e)}")
+        except Exception as e:
+            logger.debug(f"詳細表示ポップアップ更新チェックに失敗: {str(e)}")
     
     def create_detail_graph(self, parent):
         """詳細表示用のグラフを作成"""
@@ -4548,6 +5481,9 @@ class ModernDataExtractorUI:
             product_master_df = self.load_product_master()
             if product_master_df is None:
                 return
+            
+            # 固定検査員情報を設定
+            self._set_fixed_inspectors_to_manager()
             
             # 検査員割振りテーブルを作成（製品マスタパスを渡す）
             product_master_path = self.config.product_master_path if self.config else None
