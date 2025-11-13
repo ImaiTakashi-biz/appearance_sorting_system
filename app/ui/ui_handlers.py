@@ -348,12 +348,12 @@ class ModernDataExtractorUI:
         """当日検査品追加セクションの作成"""
         # メインフレーム
         inspection_frame = ctk.CTkFrame(parent, fg_color="#EFF6FF", corner_radius=12)
-        inspection_frame.pack(fill="x", pady=(0, 8), padx=20)
+        inspection_frame.pack(fill="x", pady=(0, 10), padx=20)
         
         # セクションタイトル
         inspection_title = ctk.CTkLabel(
             inspection_frame,
-            text="<追加>　当日検査品",
+            text="<追加>　当日先行検査品",
             font=ctk.CTkFont(family="Yu Gothic", size=20, weight="bold"),
             text_color="#1E3A8A"
         )
@@ -361,11 +361,11 @@ class ModernDataExtractorUI:
         
         # 入力フォームフレーム
         input_frame = ctk.CTkFrame(inspection_frame, fg_color="white", corner_radius=8, border_width=1, border_color="#DBEAFE")
-        input_frame.pack(fill="x", padx=10, pady=(0, 0))  # 下部余白はボタンフレームで制御
+        input_frame.pack(fill="x", padx=10, pady=(0, 10))  # 出荷予定日選択のperiod_frameと同じ余白に設定
         
         # 入力フィールドを横並びに配置するフレーム
         fields_frame = ctk.CTkFrame(input_frame, fg_color="transparent")
-        fields_frame.pack(fill="x", padx=10, pady=(8, 0))  # 下部余白を0に
+        fields_frame.pack(fill="x", padx=10, pady=(8, 8))  # 下部余白を追加
         
         # 品番入力セクション
         product_code_frame = ctk.CTkFrame(fields_frame, fg_color="transparent")
@@ -559,7 +559,7 @@ class ModernDataExtractorUI:
             product_label = ctk.CTkLabel(
                 single_row,
                 text="品番：",
-                font=ctk.CTkFont(family="Yu Gothic", size=14),
+                font=ctk.CTkFont(family="Yu Gothic", size=14, weight="bold"),
                 text_color="#374151",
                 anchor="w"
             )
@@ -569,7 +569,7 @@ class ModernDataExtractorUI:
             product_value = ctk.CTkLabel(
                 single_row,
                 text=item['品番'],
-                font=ctk.CTkFont(family="Yu Gothic", size=14),
+                font=ctk.CTkFont(family="Yu Gothic", size=14, weight="bold"),
                 text_color="#374151",
                 width=150,
                 anchor="w"
@@ -580,7 +580,7 @@ class ModernDataExtractorUI:
             lots_label = ctk.CTkLabel(
                 single_row,
                 text="検査可能ロット数／日：",
-                font=ctk.CTkFont(family="Yu Gothic", size=14),
+                font=ctk.CTkFont(family="Yu Gothic", size=14, weight="bold"),
                 text_color="#374151",
                 anchor="w"
             )
@@ -590,7 +590,7 @@ class ModernDataExtractorUI:
             lots_value = ctk.CTkLabel(
                 single_row,
                 text=f"{item['ロット数']}ロット",
-                font=ctk.CTkFont(family="Yu Gothic", size=14),
+                font=ctk.CTkFont(family="Yu Gothic", size=14, weight="bold"),
                 text_color="#374151",
                 anchor="w"
             )
@@ -600,7 +600,7 @@ class ModernDataExtractorUI:
             fixed_inspectors_label = ctk.CTkLabel(
                 single_row,
                 text="固定検査員：",
-                font=ctk.CTkFont(family="Yu Gothic", size=14),
+                font=ctk.CTkFont(family="Yu Gothic", size=14, weight="bold"),
                 text_color="#374151",
                 anchor="w"
             )
@@ -650,7 +650,7 @@ class ModernDataExtractorUI:
             fixed_inspectors_value = ctk.CTkLabel(
                 single_row,
                 text=fixed_inspectors_text,
-                font=ctk.CTkFont(family="Yu Gothic", size=14),
+                font=ctk.CTkFont(family="Yu Gothic", size=14, weight="bold"),
                 text_color="#059669" if item['固定検査員'] else "#6B7280",
                 anchor="w"
             )
@@ -722,7 +722,7 @@ class ModernDataExtractorUI:
             label = ctk.CTkLabel(
                 dialog,
                 text=f"品番「{product_number}」の固定検査員を選択してください",
-                font=ctk.CTkFont(family="Yu Gothic", size=14)
+                font=ctk.CTkFont(family="Yu Gothic", size=14, weight="bold")
             )
             label.pack(pady=10)
             
@@ -732,7 +732,7 @@ class ModernDataExtractorUI:
                 current_label = ctk.CTkLabel(
                     dialog,
                     text=f"現在: {', '.join(current_fixed)}",
-                    font=ctk.CTkFont(family="Yu Gothic", size=12),
+                    font=ctk.CTkFont(family="Yu Gothic", size=12, weight="bold"),
                     text_color="#6B7280"
                 )
                 current_label.pack(pady=5)
@@ -758,7 +758,7 @@ class ModernDataExtractorUI:
                     text=inspector_name,
                     variable=checkbox_var,
                     command=lambda name=inspector_name, var=checkbox_var: self._update_selected_inspectors(name, var, selected_inspectors),
-                    font=ctk.CTkFont(family="Yu Gothic", size=12)
+                    font=ctk.CTkFont(family="Yu Gothic", size=12, weight="bold")
                 )
                 checkbox.pack(anchor="w", pady=2)
                 inspector_checkboxes[inspector_name] = checkbox_var
@@ -1092,7 +1092,7 @@ class ModernDataExtractorUI:
         self.selected_dates_label_popup = ctk.CTkLabel(
             self.selected_dates_frame_popup,
             text=f"{'開始日' if self.current_date_type == 'start' else '終了日'}を選択してください",
-            font=ctk.CTkFont(family="Yu Gothic", size=12),  # 14→12に縮小
+            font=ctk.CTkFont(family="Yu Gothic", size=12, weight="bold"),  # 14→12に縮小
             text_color="#1E3A8A"
         )
         self.selected_dates_label_popup.pack(pady=8)  # 10→8に縮小
@@ -1208,7 +1208,7 @@ class ModernDataExtractorUI:
                         text=str(day),
                         width=35,  # 40→35に縮小
                         height=35,  # 40→35に縮小
-                        font=ctk.CTkFont(family="Yu Gothic", size=12),  # 14→12に縮小
+                        font=ctk.CTkFont(family="Yu Gothic", size=12, weight="bold"),  # 14→12に縮小
                         fg_color="white",
                         hover_color="#F3F4F6",
                         text_color=text_color,
@@ -1373,7 +1373,7 @@ class ModernDataExtractorUI:
         self.selected_dates_label = ctk.CTkLabel(
             self.selected_dates_frame,
             text="開始日と終了日を選択してください",
-            font=ctk.CTkFont(family="Yu Gothic", size=14),
+            font=ctk.CTkFont(family="Yu Gothic", size=14, weight="bold"),
             text_color="#1E3A8A"
         )
         self.selected_dates_label.pack(pady=10)
@@ -1444,7 +1444,7 @@ class ModernDataExtractorUI:
                         text=str(day),
                         width=40,
                         height=40,
-                        font=ctk.CTkFont(family="Yu Gothic", size=14),
+                        font=ctk.CTkFont(family="Yu Gothic", size=14, weight="bold"),
                         fg_color="white",
                         hover_color="#F3F4F6",
                         text_color=text_color,
@@ -1678,7 +1678,7 @@ class ModernDataExtractorUI:
                        background="white",
                        foreground="#374151",
                        fieldbackground="white",
-                       font=("MS Gothic", 10))
+                       font=("MS Gothic", 10, "bold"))
         style.map("Treeview",
                  background=[('selected', '#3B82F6')],
                  foreground=[('selected', 'white')])
@@ -1688,7 +1688,7 @@ class ModernDataExtractorUI:
                        background="white",
                        foreground="#374151",
                        fieldbackground="white",
-                       font=("MS Gothic", 10))
+                       font=("MS Gothic", 10, "bold"))
         style.configure("Treeview.Negative", 
                        background="#FEE2E2",
                        foreground="#DC2626",
@@ -3829,7 +3829,7 @@ class ModernDataExtractorUI:
                 command=self.toggle_skill_display,
                 width=100,
                 height=30,
-                font=ctk.CTkFont(family="Yu Gothic", size=12),
+                font=ctk.CTkFont(family="Yu Gothic", size=12, weight="bold"),
                 fg_color="#6B7280",
                 hover_color="#4B5563"
             )
@@ -3843,7 +3843,7 @@ class ModernDataExtractorUI:
                 command=self.toggle_detail_display,
                 width=100,
                 height=30,
-                font=ctk.CTkFont(family="Yu Gothic", size=12),
+                font=ctk.CTkFont(family="Yu Gothic", size=12, weight="bold"),
                 fg_color="#10B981",
                 hover_color="#059669"
             )
@@ -4185,7 +4185,7 @@ class ModernDataExtractorUI:
             label = ctk.CTkLabel(
                 dialog,
                 text=f"検査員列「{col_name}」の検査員を選択してください",
-                font=ctk.CTkFont(family="Yu Gothic", size=14)
+                font=ctk.CTkFont(family="Yu Gothic", size=14, weight="bold")
             )
             label.pack(pady=10)
             
@@ -4194,7 +4194,7 @@ class ModernDataExtractorUI:
                 current_label = ctk.CTkLabel(
                     dialog,
                     text=f"現在: {current_inspector}",
-                    font=ctk.CTkFont(family="Yu Gothic", size=12),
+                    font=ctk.CTkFont(family="Yu Gothic", size=12, weight="bold"),
                     text_color="#6B7280"
                 )
                 current_label.pack(pady=5)
@@ -4225,7 +4225,7 @@ class ModernDataExtractorUI:
                     text=inspector_name,
                     value=inspector_name,
                     command=lambda name=inspector_name, code=inspector_code: set_selected(name, code),
-                    font=ctk.CTkFont(family="Yu Gothic", size=12)
+                    font=ctk.CTkFont(family="Yu Gothic", size=12, weight="bold")
                 )
                 radio.pack(anchor="w", pady=2)
                 
@@ -4780,7 +4780,7 @@ class ModernDataExtractorUI:
                 command=self.close_detail_popup,
                 width=100,
                 height=35,
-                font=ctk.CTkFont(family="Yu Gothic", size=12),
+                font=ctk.CTkFont(family="Yu Gothic", size=12, weight="bold"),
                 fg_color="#6B7280",
                 hover_color="#4B5563"
             )
@@ -4895,7 +4895,7 @@ class ModernDataExtractorUI:
                 no_data_label = ctk.CTkLabel(
                     parent,
                     text="検査員データがありません",
-                    font=ctk.CTkFont(family="Yu Gothic", size=14)
+                    font=ctk.CTkFont(family="Yu Gothic", size=14, weight="bold")
                 )
                 no_data_label.pack(expand=True)
                 return
@@ -4946,7 +4946,7 @@ class ModernDataExtractorUI:
             error_label = ctk.CTkLabel(
                 parent,
                 text=f"グラフ作成中にエラーが発生しました: {str(e)}",
-                font=ctk.CTkFont(family="Yu Gothic", size=12),
+                font=ctk.CTkFont(family="Yu Gothic", size=12, weight="bold"),
                 text_color="red"
             )
             error_label.pack(expand=True)
