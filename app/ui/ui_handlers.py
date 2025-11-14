@@ -53,15 +53,6 @@ class ModernDataExtractorUI:
         self.root.geometry("1200x800")  # 初期サイズを設定
         self.root.minsize(1000, 700)
         
-        # ウィンドウのアイコンを設定（exe化対応）
-        try:
-            icon_path = self._get_icon_path("appearance_sorting_system.ico")
-            if icon_path and Path(icon_path).exists():
-                self.root.iconbitmap(icon_path)
-                logger.info(f"ウィンドウアイコンを設定しました: {icon_path}")
-        except Exception as e:
-            logger.warning(f"ウィンドウアイコンの設定に失敗しました: {e}")
-        
         # ウィンドウの背景色を白に設定
         self.root.configure(fg_color=("white", "white"))
         
@@ -128,12 +119,42 @@ class ModernDataExtractorUI:
         
         # 現在表示中のテーブル
         self.current_display_table = None
-        
+
+        # メインスクロールのバインド状態
+        self._main_scroll_bound = False
+
         # UIの構築
         self.setup_ui()
         
         # ログ設定
         self.setup_logging()
+        
+        # ウィンドウのアイコンを設定（exe化対応、ログ設定後に実行）
+        try:
+            icon_path = self._get_icon_path("appearance_sorting_system.ico")
+            logger.info(f"アイコンパス解決結果: {icon_path}")
+            logger.info(f"アイコンファイル存在確認: {Path(icon_path).exists() if icon_path else 'None'}")
+            
+            if icon_path and Path(icon_path).exists():
+                # CustomTkinterのCTkウィンドウでは、Tkinterの標準メソッドを使用
+                # root.tkでTkinterのルートウィンドウにアクセス
+                try:
+                    self.root.tk.call('wm', 'iconbitmap', self.root._w, icon_path)
+                    logger.info(f"ウィンドウアイコンを設定しました: {icon_path}")
+                except Exception as icon_error:
+                    # iconbitmapが失敗した場合、iconphotoを試す
+                    try:
+                        from PIL import Image
+                        import tkinter as tk
+                        icon_photo = tk.PhotoImage(file=icon_path)
+                        self.root.iconphoto(False, icon_photo)
+                        logger.info(f"ウィンドウアイコンを設定しました（iconphoto使用）: {icon_path}")
+                    except Exception as iconphoto_error:
+                        logger.warning(f"iconbitmapとiconphotoの両方が失敗しました: {icon_error}, {iconphoto_error}")
+            else:
+                logger.warning(f"アイコンファイルが見つかりません: {icon_path}")
+        except Exception as e:
+            logger.warning(f"ウィンドウアイコンの設定に失敗しました: {e}", exc_info=True)
         
         # 設定の読み込み
         self.load_config()
@@ -170,42 +191,28 @@ class ModernDataExtractorUI:
     
     def bind_main_scroll(self):
         """メイン画面のスクロールをバインド"""
+        if getattr(self, "_main_scroll_bound", False):
+            return
+
         try:
-            # メインスクロールフレームにマウスホイールイベントをバインド
             def on_main_mousewheel(event):
-                # CTkScrollableFrameのスクロール速度を他のテーブルと同等にするため、スクロール量を14倍に設定
-                scroll_amount = int(-1 * (event.delta / 120)) * 14
-                # CTkScrollableFrameの正しいスクロールメソッドを使用
-                if hasattr(self.main_scroll_frame, 'yview_scroll'):
-                    self.main_scroll_frame.yview_scroll(scroll_amount, "units")
-                else:
-                    # CTkScrollableFrameの場合は内部のCanvasを直接操作
-                    canvas = self.main_scroll_frame._parent_canvas
-                    if canvas:
-                        canvas.yview_scroll(scroll_amount, "units")
-                return "break"
-            
-            # 既存のバインドを解除してから新しいバインドを追加
-            self.main_scroll_frame.unbind_all("<MouseWheel>")
-            self.main_scroll_frame.bind("<MouseWheel>", on_main_mousewheel)
-            
-            # メインスクロールフレーム内のすべての子ウィジェットにもバインド（タイトル部分、ボタン部分など）
-            def bind_to_children(widget):
-                """再帰的に子ウィジェットにマウスホイールイベントをバインド"""
+                delta = event.delta
+                if not delta:
+                    return "break"
+
+                base_steps = -int(delta / 120) if abs(delta) >= 120 else (-1 if delta < 0 else 1)
+                scroll_steps = base_steps * 10  # スクロールを速くする
+                target = getattr(self.main_scroll_frame, "_parent_canvas", self.main_scroll_frame)
                 try:
-                    # テーブル以外のウィジェットにバインド
-                    if not isinstance(widget, (ttk.Treeview, ttk.Scrollbar)):
-                        widget.bind("<MouseWheel>", on_main_mousewheel)
-                    
-                    # 子ウィジェットを再帰的に処理
-                    for child in widget.winfo_children():
-                        bind_to_children(child)
-                except:
+                    target.yview_scroll(scroll_steps, "units")
+                except AttributeError:
                     pass
-            
-            # メインスクロールフレームの子ウィジェットにバインド
-            bind_to_children(self.main_scroll_frame)
-            
+
+                return "break"
+
+            self.root.bind_all("<MouseWheel>", on_main_mousewheel)
+            self._main_scroll_bound = True
+
         except Exception as e:
             logger.error(f"メインスクロールバインド中にエラーが発生しました: {str(e)}")
     
@@ -351,26 +358,25 @@ class ModernDataExtractorUI:
             解決されたアイコンファイルのパス
         """
         if getattr(sys, 'frozen', False):
-            # exe化されている場合
-            # まず一時ディレクトリ（sys._MEIPASS）を確認（埋め込まれたファイル）
             temp_dir = Path(sys._MEIPASS)
             temp_file = temp_dir / icon_filename
             if temp_file.exists():
+                logger.info(f"アイコンファイルを一時ディレクトリから使用しました: {temp_file}")
                 return str(temp_file)
-            
-            # 次にexeと同じ階層を確認
+
             exe_dir = Path(sys.executable).parent
             exe_file = exe_dir / icon_filename
             if exe_file.exists():
+                logger.info(f"アイコンファイルを実行ファイルのディレクトリから使用しました: {exe_file}")
                 return str(exe_file)
-            
-            # 見つからない場合は元のパスを返す
+
+            logger.warning(f"アイコンファイルが見つかりませんでした: {icon_filename}")
             return icon_filename
         else:
-            # 通常のPython実行の場合：スクリプトの場所を基準にする
             script_dir = Path(__file__).parent.parent.parent
             icon_path = script_dir / icon_filename
             if icon_path.exists():
+                logger.info(f"アイコンファイルを読み込みました: {icon_path}")
                 return str(icon_path)
             return icon_filename
     
@@ -831,8 +837,8 @@ class ModernDataExtractorUI:
             item = self.registered_products[index]
             product_number = item['品番']
             
-            # 検査員マスタを読み込む
-            inspector_master_df = self.load_inspector_master()
+            # 検査員マスタを読み込む（キャッシュを活用）
+            inspector_master_df = self.load_inspector_master_cached()
             if inspector_master_df is None or inspector_master_df.empty:
                 self.log_message("エラー: 検査員マスタを読み込めません")
                 return
@@ -1985,7 +1991,7 @@ class ModernDataExtractorUI:
                     # 検査員マスタを読み込む（休暇情報のフィルタリング用）
                     if inspector_master_df is None:
                         try:
-                            inspector_master_df = self.load_inspector_master()
+                            inspector_master_df = self.load_inspector_master_cached()
                         except Exception as e:
                             self.log_message(f"警告: 検査員マスタの読み込みに失敗しました: {str(e)}")
                     
@@ -1996,7 +2002,7 @@ class ModernDataExtractorUI:
                     # エラー時も空のテーブルを表示
                     if inspector_master_df is None:
                         try:
-                            inspector_master_df = self.load_inspector_master()
+                            inspector_master_df = self.load_inspector_master_cached()
                         except:
                             pass
                     self.root.after(0, lambda ed=extraction_date, imd=inspector_master_df: self.display_vacation_info_table({}, ed, imd))
@@ -2005,7 +2011,7 @@ class ModernDataExtractorUI:
                 # 設定がない場合も空のテーブルを表示
                 if inspector_master_df is None:
                     try:
-                        inspector_master_df = self.load_inspector_master()
+                        inspector_master_df = self.load_inspector_master_cached()
                     except:
                         pass
                 self.root.after(0, lambda ed=extraction_date, imd=inspector_master_df: self.display_vacation_info_table({}, ed, imd))
@@ -2014,7 +2020,7 @@ class ModernDataExtractorUI:
             # 既に読み込まれている場合は再利用
             if inspector_master_df is None:
                 try:
-                    inspector_master_df = self.load_inspector_master()
+                    inspector_master_df = self.load_inspector_master_cached()
                 except Exception as e:
                     self.log_message(f"警告: 検査員マスタの読み込みに失敗しました: {str(e)}")
             
@@ -2027,8 +2033,7 @@ class ModernDataExtractorUI:
             
             # データベース接続
             self.update_progress(0.02, "データベースに接続中...")
-            connection_string = self.config.get_connection_string()
-            connection = pyodbc.connect(connection_string)
+            connection = self.config.get_connection()
             self.log_message("データベース接続が完了しました")
             
             # 検査対象.csvを読み込む（キャッシュ機能を使用）
@@ -2373,6 +2378,7 @@ class ModernDataExtractorUI:
             
             for row_tuple in df.head(display_limit).itertuples(index=True):
                 index = row_tuple[0]  # インデックス
+                row = df.loc[index] if index in df.index else pd.Series(dtype=object)
                 values = []
                 item_id = None
                 for col in columns:
@@ -3871,7 +3877,7 @@ class ModernDataExtractorUI:
             df = pd.read_excel(file_path, engine='openpyxl')
             
             # 列名を確認
-            self.log_message(f"製品マスタの列: {df.columns.tolist()}")
+            logger.debug(f"製品マスタの列: {df.columns.tolist()}")
             
             # 必要な列が存在するかチェック
             required_columns = ['品番', '工程番号', '検査時間']
@@ -3890,7 +3896,7 @@ class ModernDataExtractorUI:
                 
                 if len(column_mapping) >= 2:  # 品番と検査時間は最低限必要
                     df = df.rename(columns=column_mapping)
-                    self.log_message(f"列名をマッピングしました: {column_mapping}")
+                    logger.debug(f"列名をマッピングしました: {column_mapping}")
                 else:
                     self.log_message(f"必要な列が見つかりません: {missing_columns}")
                     return None
@@ -4499,8 +4505,8 @@ class ModernDataExtractorUI:
             original_index = inspector_df.index[row_index_in_tree]
             row = inspector_df.iloc[original_index]
             
-            # 検査員マスタを読み込む
-            inspector_master_df = self.load_inspector_master()
+            # 検査員マスタを読み込む（キャッシュを活用）
+            inspector_master_df = self.load_inspector_master_cached()
             if inspector_master_df is None or inspector_master_df.empty:
                 self.log_message("エラー: 検査員マスタを読み込めません")
                 return
@@ -4634,8 +4640,8 @@ class ModernDataExtractorUI:
             product_number = row.get('品番', '')
             current_date = pd.Timestamp.now().date()
             
-            # 検査員マスタを読み込む
-            inspector_master_df = self.load_inspector_master()
+            # 検査員マスタを読み込む（キャッシュを活用）
+            inspector_master_df = self.load_inspector_master_cached()
             if inspector_master_df is None:
                 self.log_message("エラー: 検査員マスタを読み込めません")
                 return
@@ -5760,8 +5766,8 @@ class ModernDataExtractorUI:
                 messagebox.showwarning("警告", "ロット割り当て結果がありません。\n先にデータを抽出してください。")
                 return
             
-            # 製品マスタファイルを読み込み
-            product_master_df = self.load_product_master()
+            # 製品マスタファイルを読み込み（キャッシュを活用）
+            product_master_df = self.load_product_master_cached()
             if product_master_df is None:
                 return
             
@@ -6019,7 +6025,6 @@ class ModernDataExtractorUI:
             keywords = keywords[keywords != ''].tolist()
             
             self.log_message(f"検査対象CSVを読み込みました: {len(keywords)}件のキーワード")
-            self.log_message(f"検査対象キーワード: {keywords}")
             
             return keywords
             

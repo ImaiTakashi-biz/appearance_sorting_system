@@ -578,8 +578,7 @@ def main():
         
         # Accessデータベース接続
         config = DatabaseConfig()
-        connection_string = config.get_connection_string()
-        connection = pyodbc.connect(connection_string)
+        connection = config.get_connection()
         
         # バッチ処理用にリクエストを準備
         total_start_time = time.time()
