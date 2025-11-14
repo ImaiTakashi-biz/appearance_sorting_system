@@ -74,8 +74,13 @@ class ModernDataExtractorUI:
         self.registered_products_frame = None  # 登録リスト表示フレーム
         self.registered_list_container = None  # 登録リストコンテナ
         
-        # 登録済み品番リストの保存ファイルパス
-        self.registered_products_file = Path(__file__).parent.parent.parent / "registered_products.json"
+        # 登録済み品番リストの保存ファイルパス（exe化対応）
+        if getattr(sys, 'frozen', False):
+            # exe化されている場合、exeファイルと同じディレクトリに保存
+            self.registered_products_file = Path(sys.executable).parent / "registered_products.json"
+        else:
+            # 開発環境の場合、プロジェクトルートに保存
+            self.registered_products_file = Path(__file__).parent.parent.parent / "registered_products.json"
         
         # カレンダー用の変数初期化
         today = date.today()
@@ -131,28 +136,126 @@ class ModernDataExtractorUI:
         
         # ウィンドウのアイコンを設定（exe化対応、ログ設定後に実行）
         try:
-            icon_path = self._get_icon_path("appearance_sorting_system.ico")
-            logger.info(f"アイコンパス解決結果: {icon_path}")
-            logger.info(f"アイコンファイル存在確認: {Path(icon_path).exists() if icon_path else 'None'}")
+            import ctypes
+            from ctypes import wintypes
             
-            if icon_path and Path(icon_path).exists():
-                # CustomTkinterのCTkウィンドウでは、Tkinterの標準メソッドを使用
-                # root.tkでTkinterのルートウィンドウにアクセス
+            # Windows APIを使用してEXEファイルからアイコンを取得して設定
+            hwnd = self.root.winfo_id()
+            if hwnd:
+                icon_set = False
+                
+                # 方法1: EXEファイル自体からアイコンを取得（最も確実）
                 try:
-                    self.root.tk.call('wm', 'iconbitmap', self.root._w, icon_path)
-                    logger.info(f"ウィンドウアイコンを設定しました: {icon_path}")
-                except Exception as icon_error:
-                    # iconbitmapが失敗した場合、iconphotoを試す
+                    if getattr(sys, 'frozen', False):
+                        # exe化されている場合、実行ファイル自体からアイコンを取得
+                        exe_path = sys.executable
+                    else:
+                        # 開発環境の場合、ICOファイルのパスを使用
+                        icon_path = self._get_icon_path("appearance_sorting_system.ico")
+                        exe_path = icon_path if icon_path and Path(icon_path).exists() else None
+                    
+                    if exe_path:
+                        # ExtractIconExを使用してEXEファイルからアイコンを取得
+                        WM_SETICON = 0x0080
+                        ICON_SMALL = 0
+                        ICON_BIG = 1
+                        
+                        # ExtractIconExでEXEファイルからアイコンを取得
+                        # ポインタの配列を作成
+                        hicon_large_array = (ctypes.c_void_p * 1)()
+                        hicon_small_array = (ctypes.c_void_p * 1)()
+                        
+                        icon_count = ctypes.windll.shell32.ExtractIconExW(
+                            str(exe_path),
+                            0,  # 最初のアイコン
+                            hicon_large_array,
+                            hicon_small_array,
+                            1  # 1つのアイコンのみ取得
+                        )
+                        
+                        if icon_count > 0:
+                            # 小さいアイコンを設定
+                            if hicon_small_array[0]:
+                                ctypes.windll.user32.SendMessageW(
+                                    hwnd,
+                                    WM_SETICON,
+                                    ICON_SMALL,
+                                    hicon_small_array[0]
+                                )
+                            # 大きいアイコンを設定
+                            if hicon_large_array[0]:
+                                ctypes.windll.user32.SendMessageW(
+                                    hwnd,
+                                    WM_SETICON,
+                                    ICON_BIG,
+                                    hicon_large_array[0]
+                                )
+                            logger.info(f"ウィンドウアイコンを設定しました（EXEファイルから取得）: {exe_path}")
+                            icon_set = True
+                except Exception as exe_error:
+                    logger.debug(f"EXEファイルからアイコン取得が失敗しました: {exe_error}")
+                
+                # 方法2: ICOファイルから読み込む（フォールバック）
+                if not icon_set:
                     try:
-                        from PIL import Image
-                        import tkinter as tk
-                        icon_photo = tk.PhotoImage(file=icon_path)
-                        self.root.iconphoto(False, icon_photo)
-                        logger.info(f"ウィンドウアイコンを設定しました（iconphoto使用）: {icon_path}")
-                    except Exception as iconphoto_error:
-                        logger.warning(f"iconbitmapとiconphotoの両方が失敗しました: {icon_error}, {iconphoto_error}")
-            else:
-                logger.warning(f"アイコンファイルが見つかりません: {icon_path}")
+                        icon_path = self._get_icon_path("appearance_sorting_system.ico")
+                        if icon_path and Path(icon_path).exists():
+                            # LoadImageを使用してICOファイルからアイコンを読み込む
+                            LR_LOADFROMFILE = 0x0010
+                            IMAGE_ICON = 1
+                            ICON_SMALL = 0
+                            ICON_BIG = 1
+                            WM_SETICON = 0x0080
+                            
+                            # アイコンを読み込む
+                            hicon_small = ctypes.windll.user32.LoadImageW(
+                                None,
+                                str(icon_path),
+                                IMAGE_ICON,
+                                16, 16,
+                                LR_LOADFROMFILE
+                            )
+                            hicon_big = ctypes.windll.user32.LoadImageW(
+                                None,
+                                str(icon_path),
+                                IMAGE_ICON,
+                                32, 32,
+                                LR_LOADFROMFILE
+                            )
+                            
+                            if hicon_small or hicon_big:
+                                if hicon_small:
+                                    ctypes.windll.user32.SendMessageW(
+                                        hwnd,
+                                        WM_SETICON,
+                                        ICON_SMALL,
+                                        hicon_small
+                                    )
+                                if hicon_big:
+                                    ctypes.windll.user32.SendMessageW(
+                                        hwnd,
+                                        WM_SETICON,
+                                        ICON_BIG,
+                                        hicon_big
+                                    )
+                                logger.info(f"ウィンドウアイコンを設定しました（ICOファイルから読み込み）: {icon_path}")
+                                icon_set = True
+                    except Exception as ico_error:
+                        logger.debug(f"ICOファイルからのアイコン読み込みが失敗しました: {ico_error}")
+                
+                # 方法3: iconbitmapを試す（最後の手段）
+                if not icon_set:
+                    try:
+                        icon_path = self._get_icon_path("appearance_sorting_system.ico")
+                        if icon_path and Path(icon_path).exists():
+                            self.root.tk.call('wm', 'iconbitmap', self.root._w, icon_path)
+                            logger.info(f"ウィンドウアイコンを設定しました（iconbitmap）: {icon_path}")
+                            icon_set = True
+                    except Exception as iconbitmap_error:
+                        logger.debug(f"iconbitmapが失敗しました: {iconbitmap_error}")
+                
+                if not icon_set:
+                    logger.warning("すべてのアイコン設定方法が失敗しました")
         except Exception as e:
             logger.warning(f"ウィンドウアイコンの設定に失敗しました: {e}", exc_info=True)
         
@@ -872,6 +975,25 @@ class ModernDataExtractorUI:
             # スクロール可能なフレーム
             scroll_frame = ctk.CTkScrollableFrame(dialog)
             scroll_frame.pack(fill="both", expand=True, padx=20, pady=10)
+            
+            # マウスホイールイベントのバインド（CTkScrollableFrame用）
+            def on_scroll_mousewheel(event):
+                # スクロール量を計算（速度を上げるため10倍にする）
+                scroll_amount = int(-1 * (event.delta / 120)) * 10
+                # CTkScrollableFrameの正しいスクロールメソッドを使用
+                if hasattr(scroll_frame, 'yview_scroll'):
+                    scroll_frame.yview_scroll(scroll_amount, "units")
+                else:
+                    # CTkScrollableFrameの場合は内部のCanvasを直接操作
+                    canvas = scroll_frame._parent_canvas
+                    if canvas:
+                        canvas.yview_scroll(scroll_amount, "units")
+                return "break"
+            
+            # スクロールフレームにマウスホイールイベントをバインド
+            scroll_frame.bind("<MouseWheel>", on_scroll_mousewheel)
+            # ダイアログ全体にもバインド（フォーカスが外れている場合でも動作するように）
+            dialog.bind("<MouseWheel>", on_scroll_mousewheel)
             
             # 選択された検査員を保持（セットで管理）
             selected_inspectors = set(current_fixed)
@@ -4300,27 +4422,39 @@ class ModernDataExtractorUI:
             inspector_tree.tag_configure("even", background="#F9FAFB")
             inspector_tree.tag_configure("odd", background="#FFFFFF")
             
-            # マウスホイールイベントのバインド
+            # マウスホイールイベントのバインド（テーブルとフレーム全体にバインド）
             def on_inspector_mousewheel(event):
-                inspector_tree.yview_scroll(int(-1 * (event.delta / 120)), "units")
-                return "break"
+                # スクロール量を計算（元の速度に戻す）
+                scroll_amount = int(-1 * (event.delta / 120))
+                inspector_tree.yview_scroll(scroll_amount, "units")
+                return "break"  # イベントの伝播を止める
             
+            # テーブルとフレーム全体にマウスホイールイベントをバインド
             inspector_tree.bind("<MouseWheel>", on_inspector_mousewheel)
+            table_frame.bind("<MouseWheel>", on_inspector_mousewheel)
+            inspector_frame.bind("<MouseWheel>", on_inspector_mousewheel)
             
-            # テーブルに入ったときと出たときのイベント（精度向上のため、コンテナフレームにも追加）
-            # 注意: unbind_allは使わず、テーブル専用のスクロールを優先的に処理
+            # テーブルに入ったときと出たときのイベント（メインスクロールのbind_allを一時的に解除）
             def on_inspector_enter(event):
-                # テーブル内ではテーブルのスクロールを優先（メインスクロールは無効化しない）
-                pass
+                # テーブル内ではメインスクロールのbind_allを一時的に解除
+                # これにより、テーブルのマウスホイールイベントが優先される
+                try:
+                    self.root.unbind_all("<MouseWheel>")
+                    # フラグをリセット（再バインド可能にするため）
+                    self._main_scroll_bound = False
+                except:
+                    pass
             
             def on_inspector_leave(event):
-                # テーブルから出たときはメインスクロールを再バインド（念のため）
+                # テーブルから出たときはメインスクロールを再バインド
                 self.bind_main_scroll()
             
             inspector_tree.bind("<Enter>", on_inspector_enter)
             inspector_tree.bind("<Leave>", on_inspector_leave)
             table_frame.bind("<Enter>", on_inspector_enter)
             table_frame.bind("<Leave>", on_inspector_leave)
+            inspector_frame.bind("<Enter>", on_inspector_enter)
+            inspector_frame.bind("<Leave>", on_inspector_leave)
             
             # 【追加】右クリックメニューの実装
             def show_inspector_context_menu(event):
