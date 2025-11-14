@@ -3,6 +3,19 @@
 近未来的なデザインで出荷予定日を指定してデータを抽出する
 """
 
+import os
+import sys
+from pathlib import Path
+
+# 直接実行時のパス解決（モジュールとして実行される場合の対応）
+# スクリプトとして直接実行されている場合のみパスを追加
+if __package__ is None:
+    # プロジェクトルートをパスに追加
+    current_file = Path(__file__).resolve()
+    project_root = current_file.parent.parent.parent
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
+
 import customtkinter as ctk
 import tkinter as tk
 from tkinter import messagebox, filedialog, ttk
@@ -11,9 +24,6 @@ import pyodbc
 from datetime import datetime, date, timedelta
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import os
-import sys
-from pathlib import Path
 import json
 from loguru import logger
 from app.config import DatabaseConfig
@@ -134,73 +144,20 @@ class ModernDataExtractorUI:
         # ログ設定
         self.setup_logging()
         
-        # ウィンドウのアイコンを設定（exe化対応、ログ設定後に実行）
+        # ウィンドウのアイコンを設定（シンプルで確実な方法にリセット）
         try:
-            import ctypes
-            from ctypes import wintypes
-            
-            # Windows APIを使用してEXEファイルからアイコンを取得して設定
-            hwnd = self.root.winfo_id()
-            if hwnd:
-                icon_set = False
-                
-                # 方法1: EXEファイル自体からアイコンを取得（最も確実）
+            icon_path = self._get_icon_path("appearance_sorting_system.ico")
+            if icon_path and Path(icon_path).exists():
+                # 方法1: iconbitmapを使用（Tkinterの標準的な方法）
                 try:
-                    if getattr(sys, 'frozen', False):
-                        # exe化されている場合、実行ファイル自体からアイコンを取得
-                        exe_path = sys.executable
-                    else:
-                        # 開発環境の場合、ICOファイルのパスを使用
-                        icon_path = self._get_icon_path("appearance_sorting_system.ico")
-                        exe_path = icon_path if icon_path and Path(icon_path).exists() else None
-                    
-                    if exe_path:
-                        # ExtractIconExを使用してEXEファイルからアイコンを取得
-                        WM_SETICON = 0x0080
-                        ICON_SMALL = 0
-                        ICON_BIG = 1
-                        
-                        # ExtractIconExでEXEファイルからアイコンを取得
-                        # ポインタの配列を作成
-                        hicon_large_array = (ctypes.c_void_p * 1)()
-                        hicon_small_array = (ctypes.c_void_p * 1)()
-                        
-                        icon_count = ctypes.windll.shell32.ExtractIconExW(
-                            str(exe_path),
-                            0,  # 最初のアイコン
-                            hicon_large_array,
-                            hicon_small_array,
-                            1  # 1つのアイコンのみ取得
-                        )
-                        
-                        if icon_count > 0:
-                            # 小さいアイコンを設定
-                            if hicon_small_array[0]:
-                                ctypes.windll.user32.SendMessageW(
-                                    hwnd,
-                                    WM_SETICON,
-                                    ICON_SMALL,
-                                    hicon_small_array[0]
-                                )
-                            # 大きいアイコンを設定
-                            if hicon_large_array[0]:
-                                ctypes.windll.user32.SendMessageW(
-                                    hwnd,
-                                    WM_SETICON,
-                                    ICON_BIG,
-                                    hicon_large_array[0]
-                                )
-                            logger.info(f"ウィンドウアイコンを設定しました（EXEファイルから取得）: {exe_path}")
-                            icon_set = True
-                except Exception as exe_error:
-                    logger.debug(f"EXEファイルからアイコン取得が失敗しました: {exe_error}")
-                
-                # 方法2: ICOファイルから読み込む（フォールバック）
-                if not icon_set:
+                    self.root.iconbitmap(icon_path)
+                    logger.info(f"ウィンドウアイコンを設定しました（iconbitmap）: {icon_path}")
+                except Exception as iconbitmap_error:
+                    # 方法2: Windows APIを使用（フォールバック）
                     try:
-                        icon_path = self._get_icon_path("appearance_sorting_system.ico")
-                        if icon_path and Path(icon_path).exists():
-                            # LoadImageを使用してICOファイルからアイコンを読み込む
+                        import ctypes
+                        hwnd = self.root.winfo_id()
+                        if hwnd:
                             LR_LOADFROMFILE = 0x0010
                             IMAGE_ICON = 1
                             ICON_SMALL = 0
@@ -223,39 +180,25 @@ class ModernDataExtractorUI:
                                 LR_LOADFROMFILE
                             )
                             
-                            if hicon_small or hicon_big:
-                                if hicon_small:
-                                    ctypes.windll.user32.SendMessageW(
-                                        hwnd,
-                                        WM_SETICON,
-                                        ICON_SMALL,
-                                        hicon_small
-                                    )
-                                if hicon_big:
-                                    ctypes.windll.user32.SendMessageW(
-                                        hwnd,
-                                        WM_SETICON,
-                                        ICON_BIG,
-                                        hicon_big
-                                    )
-                                logger.info(f"ウィンドウアイコンを設定しました（ICOファイルから読み込み）: {icon_path}")
-                                icon_set = True
-                    except Exception as ico_error:
-                        logger.debug(f"ICOファイルからのアイコン読み込みが失敗しました: {ico_error}")
-                
-                # 方法3: iconbitmapを試す（最後の手段）
-                if not icon_set:
-                    try:
-                        icon_path = self._get_icon_path("appearance_sorting_system.ico")
-                        if icon_path and Path(icon_path).exists():
-                            self.root.tk.call('wm', 'iconbitmap', self.root._w, icon_path)
-                            logger.info(f"ウィンドウアイコンを設定しました（iconbitmap）: {icon_path}")
-                            icon_set = True
-                    except Exception as iconbitmap_error:
-                        logger.debug(f"iconbitmapが失敗しました: {iconbitmap_error}")
-                
-                if not icon_set:
-                    logger.warning("すべてのアイコン設定方法が失敗しました")
+                            if hicon_small:
+                                ctypes.windll.user32.SendMessageW(
+                                    hwnd,
+                                    WM_SETICON,
+                                    ICON_SMALL,
+                                    hicon_small
+                                )
+                            if hicon_big:
+                                ctypes.windll.user32.SendMessageW(
+                                    hwnd,
+                                    WM_SETICON,
+                                    ICON_BIG,
+                                    hicon_big
+                                )
+                            logger.info(f"ウィンドウアイコンを設定しました（Windows API）: {icon_path}")
+                    except Exception as api_error:
+                        logger.warning(f"アイコン設定に失敗しました: {api_error}")
+            else:
+                logger.warning(f"アイコンファイルが見つかりませんでした: {icon_path}")
         except Exception as e:
             logger.warning(f"ウィンドウアイコンの設定に失敗しました: {e}", exc_info=True)
         
@@ -6207,7 +6150,13 @@ def main():
 
 
 if __name__ == "__main__":
+    # 直接実行時のエントリーポイント
+    def main():
+        """アプリケーションのエントリーポイント"""
+        try:
+            ModernDataExtractorUI().run()
+        except Exception as exc:
+            logger.error(f"アプリケーションの起動に失敗しました: {exc}")
+            raise
+    
     main()
-# 使用例:
-# ui = ModernDataExtractorUI()
-# ui.run()
