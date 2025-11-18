@@ -852,27 +852,205 @@ class ModernDataExtractorUI:
             )
             inspector_button.pack(side="left", padx=(0, 5))
             
-            # 削除ボタン
-            delete_button = ctk.CTkButton(
+            # 登録変更ボタン
+            modify_button = ctk.CTkButton(
                 button_frame,
-                text="登録削除",
-                command=lambda idx=idx: self.delete_registered_product(idx),
+                text="登録変更",
+                command=lambda idx=idx: self.modify_registered_product(idx),
                 font=ctk.CTkFont(family="Yu Gothic", size=12, weight="bold"),
                 width=100,
                 height=32,
-                fg_color="#EF4444",
-                hover_color="#DC2626",
+                fg_color="#3B82F6",
+                hover_color="#2563EB",
                 text_color="white"
             )
-            delete_button.pack(side="left")
+            modify_button.pack(side="left")
     
     def delete_registered_product(self, index):
-        """登録された品番を削除"""
+        """登録された品番を削除（後方互換性のため残す）"""
         if 0 <= index < len(self.registered_products):
             self.registered_products.pop(index)
             self.update_registered_list()
             # ファイルに保存
             self.save_registered_products()
+    
+    def modify_registered_product(self, index):
+        """登録された品番の変更ダイアログを表示（ロット数変更・削除）"""
+        try:
+            if index < 0 or index >= len(self.registered_products):
+                return
+            
+            item = self.registered_products[index]
+            product_number = item['品番']
+            current_lots = item['ロット数']
+            
+            # 変更ダイアログを作成
+            dialog = ctk.CTkToplevel(self.root)
+            dialog.title(f"登録変更 - {product_number}")
+            dialog.geometry("450x300")
+            dialog.transient(self.root)
+            dialog.grab_set()
+            
+            # タイトルラベル
+            title_label = ctk.CTkLabel(
+                dialog,
+                text=f"品番「{product_number}」の登録変更",
+                font=ctk.CTkFont(family="Yu Gothic", size=16, weight="bold")
+            )
+            title_label.pack(pady=15)
+            
+            # 現在のロット数表示
+            current_label = ctk.CTkLabel(
+                dialog,
+                text=f"現在のロット数: {current_lots}ロット",
+                font=ctk.CTkFont(family="Yu Gothic", size=14),
+                text_color="#6B7280"
+            )
+            current_label.pack(pady=5)
+            
+            # ロット数入力フレーム
+            lots_frame = ctk.CTkFrame(dialog, fg_color="transparent")
+            lots_frame.pack(pady=20, padx=30, fill="x")
+            
+            lots_label = ctk.CTkLabel(
+                lots_frame,
+                text="新しいロット数:",
+                font=ctk.CTkFont(family="Yu Gothic", size=14, weight="bold")
+            )
+            lots_label.pack(side="left", padx=(0, 10))
+            
+            lots_entry = ctk.CTkEntry(
+                lots_frame,
+                placeholder_text="ロット数を入力",
+                font=ctk.CTkFont(family="Yu Gothic", size=14),
+                width=150
+            )
+            lots_entry.pack(side="left")
+            lots_entry.insert(0, str(current_lots))  # 現在の値を初期値として設定
+            
+            # ボタンフレーム
+            button_frame = ctk.CTkFrame(dialog, fg_color="transparent")
+            button_frame.pack(pady=20)
+            
+            def update_lots():
+                """ロット数を更新"""
+                new_lots = lots_entry.get().strip()
+                if not new_lots:
+                    return
+                
+                # ロット数を更新
+                item['ロット数'] = new_lots
+                self.update_registered_list()
+                self.save_registered_products()
+                self.log_message(f"品番「{product_number}」のロット数を「{new_lots}ロット」に変更しました")
+                dialog.destroy()
+            
+            def delete_product():
+                """登録を削除"""
+                # 確認ダイアログ
+                confirm_dialog = ctk.CTkToplevel(dialog)
+                confirm_dialog.title("確認")
+                confirm_dialog.geometry("400x150")
+                confirm_dialog.transient(dialog)
+                confirm_dialog.grab_set()
+                
+                confirm_label = ctk.CTkLabel(
+                    confirm_dialog,
+                    text=f"品番「{product_number}」を登録から削除しますか？",
+                    font=ctk.CTkFont(family="Yu Gothic", size=14, weight="bold")
+                )
+                confirm_label.pack(pady=20)
+                
+                confirm_button_frame = ctk.CTkFrame(confirm_dialog, fg_color="transparent")
+                confirm_button_frame.pack(pady=10)
+                
+                def confirm_delete():
+                    if 0 <= index < len(self.registered_products):
+                        self.registered_products.pop(index)
+                        self.update_registered_list()
+                        self.save_registered_products()
+                        self.log_message(f"品番「{product_number}」を登録から削除しました")
+                    confirm_dialog.destroy()
+                    dialog.destroy()
+                
+                def cancel_delete():
+                    confirm_dialog.destroy()
+                
+                confirm_yes_button = ctk.CTkButton(
+                    confirm_button_frame,
+                    text="削除",
+                    command=confirm_delete,
+                    font=ctk.CTkFont(family="Yu Gothic", size=12, weight="bold"),
+                    width=100,
+                    height=32,
+                    fg_color="#EF4444",
+                    hover_color="#DC2626",
+                    text_color="white"
+                )
+                confirm_yes_button.pack(side="left", padx=10)
+                
+                confirm_no_button = ctk.CTkButton(
+                    confirm_button_frame,
+                    text="キャンセル",
+                    command=cancel_delete,
+                    font=ctk.CTkFont(family="Yu Gothic", size=12, weight="bold"),
+                    width=100,
+                    height=32,
+                    fg_color="#6B7280",
+                    hover_color="#4B5563",
+                    text_color="white"
+                )
+                confirm_no_button.pack(side="left", padx=10)
+            
+            # ロット数変更ボタン
+            update_button = ctk.CTkButton(
+                button_frame,
+                text="ロット数変更",
+                command=update_lots,
+                font=ctk.CTkFont(family="Yu Gothic", size=12, weight="bold"),
+                width=120,
+                height=35,
+                fg_color="#10B981",
+                hover_color="#059669",
+                text_color="white"
+            )
+            update_button.pack(side="left", padx=10)
+            
+            # 登録削除ボタン
+            delete_button = ctk.CTkButton(
+                button_frame,
+                text="登録削除",
+                command=delete_product,
+                font=ctk.CTkFont(family="Yu Gothic", size=12, weight="bold"),
+                width=120,
+                height=35,
+                fg_color="#EF4444",
+                hover_color="#DC2626",
+                text_color="white"
+            )
+            delete_button.pack(side="left", padx=10)
+            
+            # キャンセルボタン
+            cancel_button = ctk.CTkButton(
+                button_frame,
+                text="キャンセル",
+                command=dialog.destroy,
+                font=ctk.CTkFont(family="Yu Gothic", size=12, weight="bold"),
+                width=120,
+                height=35,
+                fg_color="#6B7280",
+                hover_color="#4B5563",
+                text_color="white"
+            )
+            cancel_button.pack(side="left", padx=10)
+            
+            # Enterキーでロット数変更
+            lots_entry.bind("<Return>", lambda e: update_lots())
+            lots_entry.focus_set()
+            
+        except Exception as e:
+            logger.error(f"登録変更ダイアログの表示に失敗しました: {str(e)}")
+            self.log_message(f"エラー: 登録変更ダイアログの表示に失敗しました")
     
     def fix_inspectors_for_product(self, index):
         """品番に対する検査員を固定するダイアログを表示"""
