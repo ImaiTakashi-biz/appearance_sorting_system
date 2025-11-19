@@ -50,11 +50,11 @@ echo ========================================
 echo ビルドが完了しました！
 echo ========================================
 echo.
-echo 出力先: dist\appearance_sorting_system.exe
+echo 出力先: dist\外観検査振分支援システム.exe
 echo.
 echo 配布時の注意事項:
-echo 1. dist\appearance_sorting_system.exe を配布してください
-echo 2. config.env をexeファイルと同じフォルダに配置してください
+echo 1. dist\外観検査振分支援システム.exe を配布してください
+echo 2. config.env はexeに埋め込まれています（別途配置不要）
 echo 3. aptest-384703-24764f69b34f.json はexeに埋め込まれています
 echo 4. logsフォルダは自動的に作成されます
 echo.

@@ -45,7 +45,7 @@ def convert_png_to_ico(png_path: str, ico_path: str = None):
         raise
 
 if __name__ == "__main__":
-    png_file = "ChatGPT Image 2025年11月13日 16_05_27.png"
+    png_file = "ChatGPT Image 2025年11月19日 13_13_22.png"
     ico_file = "appearance_sorting_system.ico"
     
     if Path(png_file).exists():

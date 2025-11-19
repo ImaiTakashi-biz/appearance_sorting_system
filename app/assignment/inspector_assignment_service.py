@@ -3219,10 +3219,13 @@ class InspectorAssignmentManager:
         """割り当て統計を表示"""
         try:
             if not self.inspector_assignment_count:
-                self.log_message("割り当て統計: まだ割り当てがありません")
+                self.log_message("📊 割り当て統計: まだ割り当てがありません")
                 return
             
-            self.log_message("=== 検査員割り当て統計 ===")
+            self.log_message("")
+            self.log_message("=" * 60)
+            self.log_message("📊 検査員割り当て統計")
+            self.log_message("=" * 60)
             
             # 割り当て回数でソート
             sorted_assignments = sorted(self.inspector_assignment_count.items(), 
@@ -3232,12 +3235,13 @@ class InspectorAssignmentManager:
             inspector_count = len(self.inspector_assignment_count)
             average_assignments = total_assignments / inspector_count if inspector_count > 0 else 0
             
-            self.log_message(f"総割り当て回数: {total_assignments}回")
-            self.log_message(f"検査員数: {inspector_count}人")
-            self.log_message(f"平均割り当て回数: {average_assignments:.1f}回")
-            self.log_message("")
+            self.log_message(f"📋 割り当て実績: {inspector_count}名の検査員に合計{total_assignments}回割り当て")
+            self.log_message(f"📊 平均割り当て回数: {average_assignments:.1f}回")
             
-            # 各検査員の割り当て回数と勤務時間を表示
+            # 警告がある検査員を収集
+            warning_inspectors = []
+            
+            # 各検査員の割り当て回数と勤務時間を確認
             for inspector_code, count in sorted_assignments:
                 work_hours = self.inspector_work_hours.get(inspector_code, 0.0)
                 daily_hours = self.inspector_daily_assignments.get(inspector_code, {}).get(pd.Timestamp.now().date(), 0.0)
@@ -3245,23 +3249,50 @@ class InspectorAssignmentManager:
                 # 検査員マスタから最大勤務時間を取得
                 if inspector_master_df is not None:
                     max_hours = self.get_inspector_max_hours(inspector_code, inspector_master_df)
-                    # 個別の最大勤務時間に基づく上限チェック
-                    status = ""
-                    if work_hours > max_hours:
-                        status = f" ⚠️ {max_hours:.1f}h超過"
-                    elif work_hours > max_hours * 0.8:
-                        status = f" ⚠️ {max_hours:.1f}hの80%超過"
-                    
-                    self.log_message(f"検査員 {inspector_code}: {count}回 (総勤務時間: {work_hours:.1f}h/{max_hours:.1f}h, 今日: {daily_hours:.1f}h){status}")
+                    # 警告対象をチェック
+                    if work_hours > max_hours * 0.8:  # 80%超過で警告
+                        warning_inspectors.append((inspector_code, count, work_hours, max_hours, daily_hours, work_hours > max_hours))
                 else:
-                    # 検査員マスタがない場合は従来の表示
-                    status = ""
-                    if work_hours > 8.0:
-                        status = " ⚠️ 8時間超過"
-                    elif work_hours > 6.0:
-                        status = " ⚠️ 6時間超過"
+                    # 検査員マスタがない場合
+                    if work_hours > 6.0:  # 6時間超過で警告
+                        warning_inspectors.append((inspector_code, count, work_hours, 8.0, daily_hours, work_hours > 8.0))
+            
+            # デバッグモードでない場合は警告がある検査員のみ詳細表示
+            if not self.debug_mode:
+                if warning_inspectors:
+                    self.log_message("")
+                    self.log_message("⚠️ 警告対象の検査員:")
+                    for inspector_code, count, work_hours, max_hours, daily_hours, is_over in warning_inspectors:
+                        if is_over:
+                            status = f" ⚠️ {max_hours:.1f}h超過"
+                        else:
+                            status = f" ⚠️ {max_hours:.1f}hの80%超過"
+                        self.log_message(f"  {inspector_code}: {count}回 (勤務時間: {work_hours:.1f}h/{max_hours:.1f}h, 今日: {daily_hours:.1f}h){status}")
+                else:
+                    self.log_message("✅ すべての検査員が正常範囲内です")
+            else:
+                # デバッグモード: 全員の詳細を表示
+                self.log_message("")
+                self.log_message("【詳細情報（デバッグモード）】:")
+                for inspector_code, count in sorted_assignments:
+                    work_hours = self.inspector_work_hours.get(inspector_code, 0.0)
+                    daily_hours = self.inspector_daily_assignments.get(inspector_code, {}).get(pd.Timestamp.now().date(), 0.0)
                     
-                    self.log_message(f"検査員 {inspector_code}: {count}回 (総勤務時間: {work_hours:.1f}h, 今日: {daily_hours:.1f}h){status}")
+                    if inspector_master_df is not None:
+                        max_hours = self.get_inspector_max_hours(inspector_code, inspector_master_df)
+                        status = ""
+                        if work_hours > max_hours:
+                            status = f" ⚠️ {max_hours:.1f}h超過"
+                        elif work_hours > max_hours * 0.8:
+                            status = f" ⚠️ {max_hours:.1f}hの80%超過"
+                        self.log_message(f"  {inspector_code}: {count}回 (総勤務時間: {work_hours:.1f}h/{max_hours:.1f}h, 今日: {daily_hours:.1f}h){status}")
+                    else:
+                        status = ""
+                        if work_hours > 8.0:
+                            status = " ⚠️ 8時間超過"
+                        elif work_hours > 6.0:
+                            status = " ⚠️ 6時間超過"
+                        self.log_message(f"  {inspector_code}: {count}回 (総勤務時間: {work_hours:.1f}h, 今日: {daily_hours:.1f}h){status}")
             
             # 偏り度を計算
             max_count = max(self.inspector_assignment_count.values())
@@ -3269,9 +3300,9 @@ class InspectorAssignmentManager:
             imbalance = max_count - min_count
             
             self.log_message("")
-            self.log_message(f"最大割り当て回数: {max_count}回")
-            self.log_message(f"最小割り当て回数: {min_count}回")
-            self.log_message(f"偏り度: {imbalance}回")
+            self.log_message(f"📈 最大割り当て回数: {max_count}回")
+            self.log_message(f"📉 最小割り当て回数: {min_count}回")
+            self.log_message(f"📊 偏り度: {imbalance}回")
             
             if imbalance <= 1:
                 self.log_message("✅ 割り当ては非常に公平です")
@@ -3280,10 +3311,10 @@ class InspectorAssignmentManager:
             else:
                 self.log_message("❌ 割り当てに偏りがあります")
             
-            self.log_message("========================")
+            self.log_message("=" * 60)
             
         except Exception as e:
-            self.log_message(f"統計表示中にエラーが発生しました: {str(e)}")
+            self.log_message(f"❌ 統計表示中にエラーが発生しました: {str(e)}", level='error')
     
     def print_detailed_kpi_statistics(self, result_df, inspector_master_df, skill_master_df):
         """
@@ -3299,7 +3330,7 @@ class InspectorAssignmentManager:
         try:
             self.log_message("")
             self.log_message("=" * 60)
-            self.log_message("改善ポイント: 詳細KPI統計")
+            self.log_message("📈 詳細KPI統計")
             self.log_message("=" * 60)
             
             # 1. 未割当ロット総数と assignability_status ごとの件数
@@ -3308,12 +3339,24 @@ class InspectorAssignmentManager:
                 unassigned_total = sum(count for status, count in status_counts.items() 
                                      if status not in ['fully_assigned', 'capacity_shortage_resolved', 'skill_mismatch_resolved'])
                 
-                self.log_message(f"【未割当ロット総数】: {unassigned_total}件")
-                self.log_message("【assignability_status ごとの件数】:")
-                for status, count in sorted(status_counts.items()):
-                    self.log_message(f"  - {status}: {count}件")
+                if unassigned_total > 0:
+                    self.log_message(f"⚠️ 【未割当ロット総数】: {unassigned_total}件")
+                    if self.debug_mode:
+                        self.log_message("【assignability_status ごとの件数】:")
+                        for status, count in sorted(status_counts.items()):
+                            self.log_message(f"  - {status}: {count}件")
+                    else:
+                        # 通常モード: 未割当のstatusのみ表示
+                        unassigned_statuses = {status: count for status, count in status_counts.items() 
+                                             if status not in ['fully_assigned', 'capacity_shortage_resolved', 'skill_mismatch_resolved']}
+                        if unassigned_statuses:
+                            self.log_message("【未割当のstatus別件数】:")
+                            for status, count in sorted(unassigned_statuses.items()):
+                                self.log_message(f"  - {status}: {count}件")
+                else:
+                    self.log_message(f"✅ 【未割当ロット総数】: 0件（すべて割り当て完了）")
             else:
-                self.log_message("【未割当ロット総数】: assignability_status列が見つかりません")
+                self.log_message("⚠️ 【未割当ロット総数】: assignability_status列が見つかりません")
             
             # 2. 理論上割当可能（残時間合計≧必要時間）だが未成立ロット数
             if 'available_capacity_hours' in result_df.columns and '検査時間' in result_df.columns:
@@ -3321,9 +3364,13 @@ class InspectorAssignmentManager:
                     (result_df['available_capacity_hours'] >= result_df['検査時間']) &
                     (result_df['assignability_status'].isin(['logic_conflict', 'partial_assigned', 'capacity_shortage_partial', 'skill_mismatch_partial']))
                 ]
-                self.log_message(f"【理論上割当可能だが未成立ロット数】: {len(theoretical_possible)}件")
+                if len(theoretical_possible) > 0:
+                    self.log_message(f"⚠️ 【理論上割当可能だが未成立ロット数】: {len(theoretical_possible)}件")
+                else:
+                    self.log_message(f"✅ 【理論上割当可能だが未成立ロット数】: 0件")
             else:
-                self.log_message("【理論上割当可能だが未成立ロット数】: 必要な列が見つかりません")
+                if self.debug_mode:
+                    self.log_message("⚠️ 【理論上割当可能だが未成立ロット数】: 必要な列が見つかりません")
             
             # 3. 4.0h超過→置換で解消できた件数／率
             # (relaxed_product_limit_assignmentsに含まれるが、最終的に4.0h以下になった件数)
@@ -3335,17 +3382,23 @@ class InspectorAssignmentManager:
                     if product_hours <= PRODUCT_LIMIT_HARD_THRESHOLD:
                         resolved_over_limit += 1
                 resolution_rate = (resolved_over_limit / total_over_limit * 100) if total_over_limit > 0 else 0.0
-                self.log_message(f"【4.0h超過→置換で解消】: {resolved_over_limit}件 / {total_over_limit}件 ({resolution_rate:.1f}%)")
+                if resolution_rate >= 80:
+                    self.log_message(f"✅ 【4.0h超過→置換で解消】: {resolved_over_limit}件 / {total_over_limit}件 ({resolution_rate:.1f}%)")
+                else:
+                    self.log_message(f"⚠️ 【4.0h超過→置換で解消】: {resolved_over_limit}件 / {total_over_limit}件 ({resolution_rate:.1f}%)")
             else:
-                self.log_message("【4.0h超過→置換で解消】: 0件")
+                if self.debug_mode:
+                    self.log_message("✅ 【4.0h超過→置換で解消】: 0件（該当なし）")
             
             # 4. 偏り是正フェーズの swap 実施率
             # (fix_single_violationでswapが実行された件数 / 総違反件数)
-            if self.violation_count > 0:
-                swap_rate = (self.swap_count / self.violation_count) * 100
-                self.log_message(f"【偏り是正フェーズの swap 実施率】: {self.swap_count}/{self.violation_count} = {swap_rate:.1f}%")
+            if hasattr(self, 'violation_count') and self.violation_count > 0:
+                swap_count = getattr(self, 'swap_count', 0)
+                swap_rate = (swap_count / self.violation_count * 100) if self.violation_count > 0 else 0.0
+                self.log_message(f"📊 【偏り是正フェーズの swap 実施率】: {swap_count}/{self.violation_count} = {swap_rate:.1f}%")
             else:
-                self.log_message("【偏り是正フェーズの swap 実施率】: 違反件数が0件のため計算不可")
+                if self.debug_mode:
+                    self.log_message("📊 【偏り是正フェーズの swap 実施率】: 違反件数が0件のため計算不可")
             
             # 5. 各検査員の勤務時間平均・分散・変動係数（CV）
             if inspector_master_df is not None and self.inspector_daily_assignments:
@@ -3361,20 +3414,29 @@ class InspectorAssignmentManager:
                     std_hours = np.std(work_hours_list)
                     cv = (std_hours / mean_hours * 100) if mean_hours > 0 else 0.0
                     
-                    self.log_message(f"【検査員勤務時間統計】")
+                    self.log_message(f"📊 【検査員勤務時間統計】")
                     self.log_message(f"  - 平均: {mean_hours:.2f}h")
-                    self.log_message(f"  - 標準偏差: {std_hours:.2f}h")
-                    self.log_message(f"  - 変動係数(CV): {cv:.2f}%")
+                    if self.debug_mode:
+                        self.log_message(f"  - 標準偏差: {std_hours:.2f}h")
+                        self.log_message(f"  - 変動係数(CV): {cv:.2f}%")
+                    else:
+                        # 通常モード: 変動係数のみ表示（分散の目安）
+                        if cv > 30:
+                            self.log_message(f"  - 変動係数(CV): {cv:.2f}% ⚠️ 分散が大きい")
+                        else:
+                            self.log_message(f"  - 変動係数(CV): {cv:.2f}% ✅ 分散は適切")
                 else:
-                    self.log_message("【検査員勤務時間統計】: データなし")
+                    if self.debug_mode:
+                        self.log_message("📊 【検査員勤務時間統計】: データなし")
             else:
-                self.log_message("【検査員勤務時間統計】: 検査員マスタまたは履歴データなし")
+                if self.debug_mode:
+                    self.log_message("📊 【検査員勤務時間統計】: 検査員マスタまたは履歴データなし")
             
             self.log_message("=" * 60)
             self.log_message("")
             
         except Exception as e:
-            self.log_message(f"詳細KPI統計表示中にエラーが発生しました: {str(e)}")
+            self.log_message(f"❌ 詳細KPI統計表示中にエラーが発生しました: {str(e)}", level='error')
     
     def optimize_assignments(self, result_df, inspector_master_df, skill_master_df, show_skill_values=False, process_master_df=None, inspection_target_keywords=None):
         """全体最適化：勤務時間超過の是正と偏りの調整"""

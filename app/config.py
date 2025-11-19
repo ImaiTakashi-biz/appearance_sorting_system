@@ -23,9 +23,17 @@ class DatabaseConfig:
         """
         # exe化されている場合とそうでない場合でconfig.envのパスを決定
         if getattr(sys, 'frozen', False):
-            # exe化されている場合：exeファイルの場所を基準にする
-            application_path = Path(sys.executable).parent
-            self.env_file_path = str(application_path / env_file_path)
+            # exe化されている場合
+            # まず一時ディレクトリ（sys._MEIPASS）を確認（埋め込まれたファイル）
+            temp_dir = Path(sys._MEIPASS)
+            temp_file = temp_dir / Path(env_file_path).name
+            if temp_file.exists():
+                # 埋め込まれたファイルが見つかった場合
+                self.env_file_path = str(temp_file)
+            else:
+                # 埋め込まれたファイルが見つからない場合、exeファイルの場所を基準にする
+                application_path = Path(sys.executable).parent
+                self.env_file_path = str(application_path / env_file_path)
         else:
             # 通常のPython実行の場合：相対パスまたは絶対パスを使用
             self.env_file_path = env_file_path
@@ -92,6 +100,32 @@ class DatabaseConfig:
             
             self.google_sheets_url_cleaning = os.getenv("GOOGLE_SHEETS_URL_CLEANING")
             self.google_sheets_url_cleaning_instructions = os.getenv("GOOGLE_SHEETS_URL_CLEANING_INSTRUCTIONS")
+            
+            # 登録済み品番リストファイルのパスを取得
+            # NAS上のUNCパスもそのまま使用可能（絶対パスの場合はそのまま返す）
+            registered_products_path = os.getenv("REGISTERED_PRODUCTS_PATH")
+            if registered_products_path:
+                # UNCパス（\\で始まる）の場合はそのまま使用
+                if registered_products_path.startswith('\\\\'):
+                    self.registered_products_path = registered_products_path
+                else:
+                    # 相対パスの場合は_get_resource_pathで解決
+                    self.registered_products_path = self._get_resource_path(registered_products_path)
+            else:
+                self.registered_products_path = None
+            
+            # ログディレクトリのパスを取得
+            # NAS上のUNCパスもそのまま使用可能（絶対パスの場合はそのまま返す）
+            log_dir_path = os.getenv("LOG_DIR_PATH")
+            if log_dir_path:
+                # UNCパス（\\で始まる）の場合はそのまま使用
+                if log_dir_path.startswith('\\\\'):
+                    self.log_dir_path = log_dir_path
+                else:
+                    # 相対パスの場合は_get_resource_pathで解決
+                    self.log_dir_path = self._get_resource_path(log_dir_path)
+            else:
+                self.log_dir_path = None
 
             # 必須設定の確認
             if not self.access_file_path:
@@ -103,18 +137,20 @@ class DatabaseConfig:
             if not Path(self.access_file_path).exists():
                 raise FileNotFoundError(f"Accessファイルが見つかりません: {self.access_file_path}")
 
-            logger.info("設定ファイルの読み込みが完了しました")
-            logger.info(f"Accessファイル: {self.access_file_path}")
-            logger.info(f"テーブル名: {self.access_table_name}")
-            logger.info(f"製品マスタ: {self.product_master_path}")
-            logger.info(f"検査員マスタ: {self.inspector_master_path}")
-            logger.info(f"スキルマスタ: {self.skill_master_path}")
-            logger.info(f"検査対象CSV: {self.inspection_target_csv_path}")
-            logger.info(f"工程マスタ: {self.process_master_path}")
-            logger.info(f"GoogleスプレッドシートURL: {self.google_sheets_url}")
-            logger.info(f"Google認証情報: {self.google_sheets_credentials_path}")
-            logger.info(f"洗浄二次処理依頼URL: {self.google_sheets_url_cleaning}")
-            logger.info(f"洗浄指示URL: {self.google_sheets_url_cleaning_instructions}")
+            logger.info("✅ 設定ファイルの読み込みが完了しました")
+            logger.debug(f"Accessファイル: {self.access_file_path}")
+            logger.debug(f"テーブル名: {self.access_table_name}")
+            logger.debug(f"製品マスタ: {self.product_master_path}")
+            logger.debug(f"検査員マスタ: {self.inspector_master_path}")
+            logger.debug(f"スキルマスタ: {self.skill_master_path}")
+            logger.debug(f"検査対象CSV: {self.inspection_target_csv_path}")
+            logger.debug(f"工程マスタ: {self.process_master_path}")
+            logger.debug(f"GoogleスプレッドシートURL: {self.google_sheets_url}")
+            logger.debug(f"Google認証情報: {self.google_sheets_credentials_path}")
+            logger.debug(f"洗浄二次処理依頼URL: {self.google_sheets_url_cleaning}")
+            logger.debug(f"洗浄指示URL: {self.google_sheets_url_cleaning_instructions}")
+            logger.debug(f"登録済み品番リスト: {self.registered_products_path}")
+            logger.debug(f"ログディレクトリ: {self.log_dir_path}")
 
         except Exception as e:
             logger.error(f"設定の読み込みに失敗しました: {e}")

@@ -70,7 +70,8 @@ class ModernDataExtractorUI:
         self.root.protocol("WM_DELETE_WINDOW", self.quit_application)
         
         # 変数の初期化
-        self.config = None
+        # 設定を先に読み込む（registered_products_pathを使用するため）
+        self.config = DatabaseConfig()
         self.extractor = None
         self.is_extracting = False
         self.selected_start_date = None
@@ -84,8 +85,11 @@ class ModernDataExtractorUI:
         self.registered_products_frame = None  # 登録リスト表示フレーム
         self.registered_list_container = None  # 登録リストコンテナ
         
-        # 登録済み品番リストの保存ファイルパス（exe化対応）
-        if getattr(sys, 'frozen', False):
+        # 登録済み品番リストの保存ファイルパス（exe化対応・NAS共有対応）
+        if self.config.registered_products_path:
+            # config.envで設定されている場合はそれを使用（NAS共有対応）
+            self.registered_products_file = Path(self.config.registered_products_path)
+        elif getattr(sys, 'frozen', False):
             # exe化されている場合、exeファイルと同じディレクトリに保存
             self.registered_products_file = Path(sys.executable).parent / "registered_products.json"
         else:
@@ -151,7 +155,7 @@ class ModernDataExtractorUI:
                 # 方法1: iconbitmapを使用（Tkinterの標準的な方法）
                 try:
                     self.root.iconbitmap(icon_path)
-                    logger.info(f"ウィンドウアイコンを設定しました（iconbitmap）: {icon_path}")
+                    logger.debug(f"ウィンドウアイコンを設定しました（iconbitmap）: {icon_path}")
                 except Exception as iconbitmap_error:
                     # 方法2: Windows APIを使用（フォールバック）
                     try:
@@ -194,11 +198,11 @@ class ModernDataExtractorUI:
                                     ICON_BIG,
                                     hicon_big
                                 )
-                            logger.info(f"ウィンドウアイコンを設定しました（Windows API）: {icon_path}")
+                            logger.debug(f"ウィンドウアイコンを設定しました（Windows API）: {icon_path}")
                     except Exception as api_error:
                         logger.warning(f"アイコン設定に失敗しました: {api_error}")
             else:
-                logger.warning(f"アイコンファイルが見つかりませんでした: {icon_path}")
+                logger.debug(f"アイコンファイルが見つかりませんでした: {icon_path}")
         except Exception as e:
             logger.warning(f"ウィンドウアイコンの設定に失敗しました: {e}", exc_info=True)
         
@@ -274,17 +278,21 @@ class ModernDataExtractorUI:
         
         logger.remove()  # デフォルトのハンドラーを削除
         
-        # exe化されている場合とそうでない場合でログディレクトリを決定
-        if getattr(sys, 'frozen', False):
+        # ログディレクトリの決定（NAS共有対応）
+        if self.config and self.config.log_dir_path:
+            # config.envで設定されている場合はそれを使用（NAS共有対応）
+            log_dir = Path(self.config.log_dir_path)
+        elif getattr(sys, 'frozen', False):
             # exe化されている場合：exeファイルの場所を基準にする
             application_path = Path(sys.executable).parent
+            log_dir = application_path / "logs"
         else:
             # 通常のPython実行の場合：スクリプトの場所を基準にする
             application_path = Path(__file__).parent.parent.parent
+            log_dir = application_path / "logs"
         
         # ログディレクトリを作成
-        log_dir = application_path / "logs"
-        log_dir.mkdir(exist_ok=True)
+        log_dir.mkdir(parents=True, exist_ok=True)
         
         # ログファイルのパス
         if execution_id:
@@ -295,7 +303,7 @@ class ModernDataExtractorUI:
             # 初期起動時は日付ごとにファイルを分ける（後方互換性のため）
             log_file = log_dir / f"app_{datetime.now().strftime('%Y%m%d')}.log"
         
-        # コンソール出力用のフィルタ関数
+        # コンソール出力用のフィルタ関数（重要なログのみ）
         def console_filter(record):
             """重要なログのみコンソールに出力"""
             message = record["message"]
@@ -304,7 +312,11 @@ class ModernDataExtractorUI:
             return (level in ["WARNING", "ERROR", "CRITICAL"] or 
                    "⚠️" in message or 
                    "❌" in message or 
-                   "📊" in message)
+                   "📊" in message or
+                   "✅" in message or
+                   "開始" in message or
+                   "完了" in message or
+                   "失敗" in message)
         
         # コンソール出力（重要なログのみ）
         def _safe_console_output(message: str) -> None:
@@ -316,26 +328,30 @@ class ModernDataExtractorUI:
                 safe_message = message.encode(encoding, errors="replace").decode(encoding, errors="replace")
                 print(safe_message, end="")
 
+        # コンソール出力（WARNING以上のみ）
         logger.add(
             _safe_console_output,
-            level="INFO",
-            format="{time:HH:mm:ss} | {level} | {message}",
+            level="WARNING",  # WARNING以上のみコンソールに出力
+            format="<yellow>{time:HH:mm:ss}</yellow> | <level>{level: <8}</level> | {message}",
             filter=console_filter
         )
         
-        # ファイル出力（すべてのログ）
+        # ファイル出力（すべてのログを1つのファイルに統一）
+        # ERROR時はスタックトレースも含める
         logger.add(
             log_file,
-            level="INFO",
-            format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {message}",
+            level="INFO",  # INFO以上をファイルに記録
+            format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} | {message}",
             rotation="10 MB",  # 10MBごとにローテーション
             retention="30 days",  # 30日間保持
             encoding="utf-8",
-            backtrace=True,
-            diagnose=True
+            backtrace=True,  # ERROR時はスタックトレースを出力
+            diagnose=True,  # ERROR時は診断情報を出力
+            enqueue=True,  # スレッドセーフな出力
+            catch=True  # ログ出力中のエラーをキャッチ
         )
         
-        logger.info(f"ログファイル: {log_file.absolute()}")
+        logger.info(f"📝 ログファイル: {log_file.absolute()}")
     
     def load_config(self):
         """設定の読み込み"""
@@ -407,22 +423,22 @@ class ModernDataExtractorUI:
             temp_dir = Path(sys._MEIPASS)
             temp_file = temp_dir / icon_filename
             if temp_file.exists():
-                logger.info(f"アイコンファイルを一時ディレクトリから使用しました: {temp_file}")
+                logger.debug(f"アイコンファイルを一時ディレクトリから使用しました: {temp_file}")
                 return str(temp_file)
 
             exe_dir = Path(sys.executable).parent
             exe_file = exe_dir / icon_filename
             if exe_file.exists():
-                logger.info(f"アイコンファイルを実行ファイルのディレクトリから使用しました: {exe_file}")
+                logger.debug(f"アイコンファイルを実行ファイルのディレクトリから使用しました: {exe_file}")
                 return str(exe_file)
 
-            logger.warning(f"アイコンファイルが見つかりませんでした: {icon_filename}")
+            logger.debug(f"アイコンファイルが見つかりませんでした: {icon_filename}")
             return icon_filename
         else:
             script_dir = Path(__file__).parent.parent.parent
             icon_path = script_dir / icon_filename
             if icon_path.exists():
-                logger.info(f"アイコンファイルを読み込みました: {icon_path}")
+                logger.debug(f"アイコンファイルを読み込みました: {icon_path}")
                 return str(icon_path)
             return icon_filename
     
@@ -1247,7 +1263,7 @@ class ModernDataExtractorUI:
                 # UIが構築されている場合はリストを更新
                 if self.registered_list_container is not None:
                     self.update_registered_list()
-                logger.info(f"登録済み品番リストを読み込みました: {len(self.registered_products)}件")
+                logger.info(f"✅ 登録済み品番リストを読み込みました: {len(self.registered_products)}件")
         except Exception as e:
             logger.error(f"登録済み品番リストの読み込みに失敗しました: {str(e)}")
             self.registered_products = []
@@ -2190,6 +2206,7 @@ class ModernDataExtractorUI:
     def extract_data_thread(self, start_date, end_date):
         """データ抽出のスレッド処理"""
         connection = None
+        success = False  # 成功フラグを追加
         try:
             # データ抽出実行ごとに新しいログファイルを作成
             execution_id = f"{start_date}_{end_date}".replace("-", "").replace(" ", "_").replace(":", "")
@@ -2292,6 +2309,7 @@ class ModernDataExtractorUI:
             if sample_df.empty:
                 self.log_message("テーブルにデータが見つかりません")
                 self.update_progress(1.0, "完了（データなし）")
+                success = True  # データなしも完了として扱う
                 return
             
             # 実際の列名を取得
@@ -2362,6 +2380,7 @@ class ModernDataExtractorUI:
             if df is None or df.empty:
                 self.log_message("指定された期間にデータが見つかりませんでした")
                 self.update_progress(1.0, "完了（データなし）")
+                success = True  # データなしも完了として扱う
                 return
             
             self.log_message(f"抽出完了: {len(df)}件のレコード")
@@ -2390,6 +2409,8 @@ class ModernDataExtractorUI:
                 f"検査員割振り結果を自動表示しました"
             ))
             
+            success = True  # 成功フラグを設定
+            
         except Exception as e:
             error_msg = f"データ抽出中にエラーが発生しました: {str(e)}"
             self.log_message(f"エラー: {error_msg}")
@@ -2403,8 +2424,13 @@ class ModernDataExtractorUI:
             if connection:
                 connection.close()
             
-            # UIの状態をリセット
-            self.root.after(0, self.reset_ui_state)
+            # UIの状態をリセット（エラー時のみ）
+            if not success:
+                self.root.after(0, self.reset_ui_state)
+            else:
+                # 成功時はボタンのみ有効化（ステータスバーは維持）
+                self.root.after(0, lambda: self.extract_button.configure(state="normal", text="データ抽出開始"))
+                self.root.after(0, lambda: setattr(self, 'is_extracting', False))
     
     def update_progress(self, value, message):
         """進捗の更新"""
