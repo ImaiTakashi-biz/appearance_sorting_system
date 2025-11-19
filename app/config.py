@@ -80,6 +80,7 @@ class DatabaseConfig:
             self.inspector_master_path = os.getenv("INSPECTOR_MASTER_PATH")
             self.skill_master_path = os.getenv("SKILL_MASTER_PATH")
             self.inspection_target_csv_path = os.getenv("INSPECTION_TARGET_CSV_PATH")
+            self.process_master_path = os.getenv("PROCESS_MASTER_PATH")
             self.google_sheets_url = os.getenv("GOOGLE_SHEETS_URL")
             
             # Google認証情報ファイルのパスを解決（exe化対応）
@@ -109,6 +110,7 @@ class DatabaseConfig:
             logger.info(f"検査員マスタ: {self.inspector_master_path}")
             logger.info(f"スキルマスタ: {self.skill_master_path}")
             logger.info(f"検査対象CSV: {self.inspection_target_csv_path}")
+            logger.info(f"工程マスタ: {self.process_master_path}")
             logger.info(f"GoogleスプレッドシートURL: {self.google_sheets_url}")
             logger.info(f"Google認証情報: {self.google_sheets_credentials_path}")
             logger.info(f"洗浄二次処理依頼URL: {self.google_sheets_url_cleaning}")

@@ -2898,8 +2898,9 @@ class ModernDataExtractorUI:
             actual_columns = sample_df.columns.tolist()
             
             # 利用可能な列のみでクエリを作成
+            # 品名と客先も取得する（先行検査品の品名・客先を表示するため）
             available_columns = [col for col in actual_columns if col in [
-                "品番", "数量", "指示日", "号機", "現在工程番号", "現在工程名", 
+                "品番", "品名", "客先", "数量", "指示日", "号機", "現在工程番号", "現在工程名", 
                 "現在工程二次処理", "生産ロットID"
             ]]
             
@@ -3019,11 +3020,21 @@ class ModernDataExtractorUI:
                     # 出荷予定日は「先行検査」とする
                     shipping_date = "先行検査"
                     
+                    # 品名と客先を取得（main_dfから取得できない場合はロットデータから取得）
+                    product_name = (
+                        main_row.get('品名', '') if main_row is not None else 
+                        (lot[lot_cols.get('品名', -1)] if '品名' in lot_cols and pd.notna(lot[lot_cols.get('品名', -1)]) else '')
+                    )
+                    customer_name = (
+                        main_row.get('客先', '') if main_row is not None else 
+                        (lot[lot_cols.get('客先', -1)] if '客先' in lot_cols and pd.notna(lot[lot_cols.get('客先', -1)]) else '')
+                    )
+                    
                     assignment_result = {
                         '出荷予定日': shipping_date,
                         '品番': product_number,
-                        '品名': main_row.get('品名', '') if main_row is not None else '',
-                        '客先': main_row.get('客先', '') if main_row is not None else '',
+                        '品名': product_name,
+                        '客先': customer_name,
                         '出荷数': int(main_row.get('出荷数', 0)) if main_row is not None else 0,
                         '在庫数': int(main_row.get('在庫数', 0)) if main_row is not None else 0,
                         '在梱包数': int(main_row.get('梱包・完了', 0)) if main_row is not None else 0,
@@ -3484,7 +3495,16 @@ class ModernDataExtractorUI:
             
             self.update_progress(table_progress, "検査員割振りテーブルを作成中...")
             product_master_path = self.config.product_master_path if self.config else None
-            inspector_df = self.inspector_manager.create_inspector_assignment_table(assignment_df, product_master_df, product_master_path)
+            process_master_path = self.config.process_master_path if self.config else None
+            inspection_target_keywords = self.load_inspection_target_csv()
+            
+            inspector_df = self.inspector_manager.create_inspector_assignment_table(
+                assignment_df, 
+                product_master_df, 
+                product_master_path=product_master_path,
+                process_master_path=process_master_path,
+                inspection_target_keywords=inspection_target_keywords
+            )
             if inspector_df is None:
                 self.log_message("検査員割振りテーブルの作成に失敗しました")
                 return
@@ -3494,12 +3514,24 @@ class ModernDataExtractorUI:
                 # 再読み込みは次の処理で行うため、ここではログのみ
                 pass
             
+            # 工程マスタを読み込む（検査員割当て用）
+            process_master_df = None
+            if process_master_path:
+                process_master_df = self.inspector_manager.load_process_master(process_master_path)
+            
             # 固定検査員情報を設定
             self._set_fixed_inspectors_to_manager()
             
             # 検査員を割り当て（スキル値付きで保存）
             self.update_progress(assign_progress, "検査員を割り当て中...")
-            inspector_df_with_skills = self.inspector_manager.assign_inspectors(inspector_df, inspector_master_df, skill_master_df, True)
+            inspector_df_with_skills = self.inspector_manager.assign_inspectors(
+                inspector_df, 
+                inspector_master_df, 
+                skill_master_df, 
+                show_skill_values=True,
+                process_master_df=process_master_df,
+                inspection_target_keywords=inspection_target_keywords
+            )
             
             # 現在の表示状態に応じてデータを設定
             if self.show_skill_values:
@@ -6031,7 +6063,15 @@ class ModernDataExtractorUI:
             
             # 検査員割振りテーブルを作成（製品マスタパスを渡す）
             product_master_path = self.config.product_master_path if self.config else None
-            inspector_df = self.inspector_manager.create_inspector_assignment_table(self.current_assignment_data, product_master_df, product_master_path)
+            process_master_path = self.config.process_master_path if self.config else None
+            inspection_target_keywords = self.load_inspection_target_csv()
+            inspector_df = self.inspector_manager.create_inspector_assignment_table(
+                self.current_assignment_data, 
+                product_master_df, 
+                product_master_path=product_master_path,
+                process_master_path=process_master_path,
+                inspection_target_keywords=inspection_target_keywords
+            )
             if inspector_df is None:
                 return
             

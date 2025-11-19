@@ -104,9 +104,10 @@ def _get_table_structure(connection):
         actual_columns = sample_df.columns.tolist()
         
         # 取得したい列のリスト
+        # 現在工程名はロット情報に含めず、空欄として扱う
         desired_columns = [
             "品番", "品名", "客先", "数量", "ロット数量", "指示日", "号機", 
-            "現在工程番号", "現在工程名", "現在工程二次処理", "生産ロットID", "材料識別"
+            "現在工程番号", "現在工程二次処理", "生産ロットID", "材料識別"
         ]
         
         # テーブルに存在する列のみを抽出
@@ -215,6 +216,11 @@ def _get_lots_from_access_batch(connection, requests: List[Dict]) -> pd.DataFram
             lots_df = pd.read_sql(query, connection)
             elapsed_time = time.time() - start_time
             logger.info(f"バッチクエリ完了: {len(lots_df)}件のロットを取得 ({elapsed_time:.2f}秒)")
+            
+            # 現在工程名列を空欄として追加（ロット情報に含めないため）
+            if '現在工程名' not in lots_df.columns:
+                lots_df['現在工程名'] = ''
+            
             return lots_df
         except Exception as query_error:
             logger.error(f"バッチクエリ実行中にエラーが発生しました: {str(query_error)}")
