@@ -24,7 +24,9 @@ MANIFEST
 # PyInstaller
 *.manifest
 *.spec
-# 生成されたアイコンファイル（convert_icon.pyから生成される）
+build/
+dist/
+# 生成されたアイコンファイル
 appearance_sorting_system.ico
 
 # Installer logs
@@ -128,7 +130,6 @@ Thumbs.db
 # Project specific
 logs/
 output/
-*.log
 *.accdb
 *.mdb
 
@@ -137,16 +138,32 @@ config.env
 .env
 .env.local
 .env.production
+# Google認証情報ファイル（機密情報を含む）
+aptest-*.json
+*-*.json
 *.json
 
 # Data files (機密情報を含む可能性)
 *.csv
 *.xlsx
 *.xls
-製品マスタ.xlsx
-検査員マスタ.csv
-スキルマスタ.csv
+製品マスタ*.xlsx
+検査員マスタ*.csv
+スキルマスタ*.csv
+工程マスタ*.xlsx
+検査対象.csv
+registered_products.json
 
 # Temporary files
 *.tmp
 *.temp
+
+# 画像ファイル（プロジェクトリソースとして含める場合はコメントアウト）
+# ChatGPT Image *.png
+
+# 実行ファイル
+*.exe
+
+# ログファイル（NAS共有のログディレクトリ）
+# ローカルのログファイルのみ除外
+*.log

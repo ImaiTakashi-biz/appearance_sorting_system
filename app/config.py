@@ -13,6 +13,14 @@ import pyodbc
 
 class DatabaseConfig:
     """データベース設定管理クラス"""
+    
+    # キャッシュ設定定数
+    CONNECTION_CACHE_TTL = 300  # 5分間（秒）
+    
+    # クラス変数として接続をキャッシュ（高速化）
+    _connection_cache = None
+    _connection_cache_timestamp = None
+    _connection_cache_ttl = CONNECTION_CACHE_TTL
 
     def __init__(self, env_file_path: str = "config.env"):
         """
@@ -137,20 +145,8 @@ class DatabaseConfig:
             if not Path(self.access_file_path).exists():
                 raise FileNotFoundError(f"Accessファイルが見つかりません: {self.access_file_path}")
 
-            logger.info("✅ 設定ファイルの読み込みが完了しました")
-            logger.debug(f"Accessファイル: {self.access_file_path}")
-            logger.debug(f"テーブル名: {self.access_table_name}")
-            logger.debug(f"製品マスタ: {self.product_master_path}")
-            logger.debug(f"検査員マスタ: {self.inspector_master_path}")
-            logger.debug(f"スキルマスタ: {self.skill_master_path}")
-            logger.debug(f"検査対象CSV: {self.inspection_target_csv_path}")
-            logger.debug(f"工程マスタ: {self.process_master_path}")
-            logger.debug(f"GoogleスプレッドシートURL: {self.google_sheets_url}")
-            logger.debug(f"Google認証情報: {self.google_sheets_credentials_path}")
-            logger.debug(f"洗浄二次処理依頼URL: {self.google_sheets_url_cleaning}")
-            logger.debug(f"洗浄指示URL: {self.google_sheets_url_cleaning_instructions}")
-            logger.debug(f"登録済み品番リスト: {self.registered_products_path}")
-            logger.debug(f"ログディレクトリ: {self.log_dir_path}")
+            # 起動時のログ出力を削減（高速化のため）
+            # エラー時のみ詳細ログを出力
 
         except Exception as e:
             logger.error(f"設定の読み込みに失敗しました: {e}")
@@ -222,7 +218,7 @@ class DatabaseConfig:
             if driver not in candidates:
                 candidates.append(driver)
         
-        logger.info(f"試行するドライバー候補（優先順位順）: {candidates}")
+        # ログ出力を削減（高速化のため）
         return candidates
 
     def get_connection_string(self, driver_name: str = None) -> str:
@@ -249,25 +245,48 @@ class DatabaseConfig:
 
         return connection_string
 
-    def get_connection(self) -> pyodbc.Connection:
+    def get_connection(self, timeout: int = 30) -> pyodbc.Connection:
         """
-        データベース接続を取得（自動的に利用可能なドライバーを検出）
+        データベース接続を取得（キャッシュ機能付き・高速化）
+        
+        Args:
+            timeout: 接続タイムアウト（秒、現在は未使用だが将来の拡張用）
         
         Returns:
             pyodbc.Connection: データベース接続オブジェクト
         
         Raises:
-            Exception: すべてのドライバーで接続に失敗した場合
+            ConnectionError: すべてのドライバーで接続に失敗した場合
         """
+        import time
+        
+        # キャッシュが有効な場合は再利用（高速化）
+        if (DatabaseConfig._connection_cache is not None and 
+            DatabaseConfig._connection_cache_timestamp is not None):
+            elapsed = time.time() - DatabaseConfig._connection_cache_timestamp
+            if elapsed < DatabaseConfig.CONNECTION_CACHE_TTL:
+                try:
+                    # 接続が有効か確認（高速チェック）
+                    DatabaseConfig._connection_cache.execute("SELECT 1")
+                    return DatabaseConfig._connection_cache
+                except:
+                    # 接続が無効な場合はキャッシュをクリア
+                    DatabaseConfig._connection_cache = None
+                    DatabaseConfig._connection_cache_timestamp = None
+        
+        # 新しい接続を取得
         candidates = self._get_driver_candidates()
         last_error = None
         
         for driver in candidates:
             try:
                 connection_string = self.get_connection_string(driver_name=driver)
-                logger.info(f"ドライバー '{driver}' で接続を試行中...")
                 connection = pyodbc.connect(connection_string)
-                logger.info(f"ドライバー '{driver}' で接続に成功しました")
+                
+                # キャッシュに保存（高速化のため）
+                DatabaseConfig._connection_cache = connection
+                DatabaseConfig._connection_cache_timestamp = time.time()
+                
                 return connection
             except pyodbc.Error as e:
                 error_code = e.args[0] if e.args else ""
@@ -287,6 +306,22 @@ class DatabaseConfig:
         )
         logger.error(error_msg)
         raise ConnectionError(error_msg) from last_error
+
+    @staticmethod
+    def close_all_connections() -> None:
+        """
+        すべてのキャッシュされた接続を閉じる（リソース解放）
+        アプリケーション終了時に呼び出すことを推奨
+        """
+        if DatabaseConfig._connection_cache is not None:
+            try:
+                DatabaseConfig._connection_cache.close()
+            except Exception:
+                # 接続が既に閉じられている場合は無視
+                pass
+            finally:
+                DatabaseConfig._connection_cache = None
+                DatabaseConfig._connection_cache_timestamp = None
 
     def validate_config(self) -> bool:
         """設定の妥当性を検証"""

@@ -6,6 +6,10 @@
 import os
 import sys
 from pathlib import Path
+import warnings  # 警告抑制のため
+
+# pandasのUserWarningを抑制（SQLAlchemy接続の推奨警告）
+warnings.filterwarnings('ignore', category=UserWarning, message='.*pandas only supports SQLAlchemy.*')
 
 # 直接実行時のパス解決（モジュールとして実行される場合の対応）
 # スクリプトとして直接実行されている場合のみパスを追加
@@ -42,6 +46,20 @@ from PIL import Image
 class ModernDataExtractorUI:
     """近未来的なデザインのデータ抽出UI"""
     
+    # キャッシュ設定定数
+    TABLE_STRUCTURE_CACHE_TTL = 3600  # 1時間（秒）
+    MASTER_CACHE_TTL_MINUTES = 5  # 5分
+    
+    # UI設定定数
+    DEFAULT_WINDOW_SIZE = "1200x800"
+    MIN_WINDOW_WIDTH = 1000
+    MIN_WINDOW_HEIGHT = 700
+    
+    # クラス変数としてテーブル構造をキャッシュ（高速化）
+    _table_structure_cache = None
+    _table_structure_cache_timestamp = None
+    _table_structure_cache_ttl = TABLE_STRUCTURE_CACHE_TTL
+    
     def __init__(self):
         """UIの初期化"""
         # 日本語ロケール設定
@@ -60,8 +78,8 @@ class ModernDataExtractorUI:
         # メインウィンドウの作成
         self.root = ctk.CTk()
         self.root.title("外観検査振分支援システム")
-        self.root.geometry("1200x800")  # 初期サイズを設定
-        self.root.minsize(1000, 700)
+        self.root.geometry(self.DEFAULT_WINDOW_SIZE)
+        self.root.minsize(self.MIN_WINDOW_WIDTH, self.MIN_WINDOW_HEIGHT)
         
         # ウィンドウの背景色を白に設定
         self.root.configure(fg_color=("white", "white"))
@@ -134,7 +152,7 @@ class ModernDataExtractorUI:
         # マスタデータキャッシュ機能
         self.master_cache = {}
         self.cache_timestamps = {}
-        self.cache_ttl = timedelta(minutes=5)  # 5分間キャッシュ
+        self.cache_ttl = timedelta(minutes=self.MASTER_CACHE_TTL_MINUTES)
         
         # 現在表示中のテーブル
         self.current_display_table = None
@@ -144,6 +162,9 @@ class ModernDataExtractorUI:
 
         # UIの構築
         self.setup_ui()
+        
+        # メニューバーの作成
+        self.create_menu_bar()
         
         # ログ設定
         self.setup_logging()
@@ -320,13 +341,8 @@ class ModernDataExtractorUI:
         
         # コンソール出力（重要なログのみ）
         def _safe_console_output(message: str) -> None:
-            import sys
-            try:
-                print(message, end="")
-            except UnicodeEncodeError:
-                encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
-                safe_message = message.encode(encoding, errors="replace").decode(encoding, errors="replace")
-                print(safe_message, end="")
+            # print文を削除してloguruのみを使用
+            pass
 
         # コンソール出力（WARNING以上のみ）
         logger.add(
@@ -486,27 +502,32 @@ class ModernDataExtractorUI:
         title_container = ctk.CTkFrame(title_frame, fg_color="white", corner_radius=0)
         title_container.place(relx=0.5, rely=0.5, anchor="center")  # 中央配置
         
-        # 画像を読み込む
-        image_filename = "ChatGPT Image 2025年11月13日 16_05_27.png"
+        # 画像を読み込む（存在するファイル名に修正）
+        image_filename = "ChatGPT Image 2025年11月19日 13_13_22.png"
         image_path = self._get_image_path(image_filename)
         
         try:
-            # 画像を読み込んでリサイズ（サイズを大きく）
-            pil_image = Image.open(image_path)
-            # タイトルに合わせたサイズにリサイズ（高さ50pxに拡大）
-            pil_image = pil_image.resize((50, 50), Image.Resampling.LANCZOS)
-            ctk_image = ctk.CTkImage(light_image=pil_image, dark_image=pil_image, size=(50, 50))
-            
-            # 画像ラベル
-            image_label = ctk.CTkLabel(
-                title_container,
-                image=ctk_image,
-                text=""  # テキストなし
-            )
-            image_label.pack(side="left", padx=(0, 12))  # 画像とテキストの間隔を調整
-        except Exception as e:
-            logger.warning(f"画像の読み込みに失敗しました: {e}")
-            # 画像が読み込めない場合は画像なしで続行
+            # 画像ファイルの存在確認（高速化のため）
+            if not Path(image_path).exists():
+                # 画像が存在しない場合は警告を出さずにスキップ（高速化）
+                pass
+            else:
+                # 画像を読み込んでリサイズ（サイズを大きく）
+                pil_image = Image.open(image_path)
+                # タイトルに合わせたサイズにリサイズ（高さ50pxに拡大）
+                pil_image = pil_image.resize((50, 50), Image.Resampling.LANCZOS)
+                ctk_image = ctk.CTkImage(light_image=pil_image, dark_image=pil_image, size=(50, 50))
+                
+                # 画像ラベル
+                image_label = ctk.CTkLabel(
+                    title_container,
+                    image=ctk_image,
+                    text=""  # テキストなし
+                )
+                image_label.pack(side="left", padx=(0, 12))  # 画像とテキストの間隔を調整
+        except Exception:
+            # 画像が読み込めない場合は警告を出さずに画像なしで続行（高速化）
+            pass
         
         # メインタイトル（サイズを大きく、中央配置）
         title_label = ctk.CTkLabel(
@@ -1221,6 +1242,13 @@ class ModernDataExtractorUI:
             selected_set.add(name)
         else:
             selected_set.discard(name)
+    
+    def _update_selected_inspectors_for_change(self, name, code, var, selected_dict):
+        """検査員変更ダイアログ用：選択された検査員を更新（辞書形式）"""
+        if var.get():
+            selected_dict[name] = code
+        else:
+            selected_dict.pop(name, None)
     
     def _set_fixed_inspectors_to_manager(self):
         """登録済み品番の固定検査員情報をInspectorAssignmentManagerに設定"""
@@ -2300,28 +2328,41 @@ class ModernDataExtractorUI:
             self.update_progress(0.05, "検査対象CSVを読み込み中...")
             self.inspection_target_keywords = self.load_inspection_target_csv_cached()
             
-            # テーブル構造を確認
-            self.update_progress(0.08, "テーブル構造を確認中...")
-            self.log_message("テーブル構造を確認中...")
-            columns_query = f"SELECT TOP 1 * FROM [{self.config.access_table_name}]"
-            sample_df = pd.read_sql(columns_query, connection)
+            # テーブル構造を確認（キャッシュ機能付き・高速化）
+            import time
+            actual_columns = None
             
-            if sample_df.empty:
-                self.log_message("テーブルにデータが見つかりません")
-                self.update_progress(1.0, "完了（データなし）")
-                success = True  # データなしも完了として扱う
-                return
+            # キャッシュが有効な場合は再利用
+            if (ModernDataExtractorUI._table_structure_cache is not None and 
+                ModernDataExtractorUI._table_structure_cache_timestamp is not None):
+                elapsed = time.time() - ModernDataExtractorUI._table_structure_cache_timestamp
+                if elapsed < ModernDataExtractorUI.TABLE_STRUCTURE_CACHE_TTL:
+                    actual_columns = ModernDataExtractorUI._table_structure_cache
+                    # ログ出力を削減（高速化）
             
-            # 実際の列名を取得
-            actual_columns = sample_df.columns.tolist()
-            self.log_message(f"テーブルの列: {actual_columns}")
+            # キャッシュが無効な場合は取得
+            if actual_columns is None:
+                self.update_progress(0.08, "テーブル構造を確認中...")
+                columns_query = f"SELECT TOP 1 * FROM [{self.config.access_table_name}]"
+                sample_df = pd.read_sql(columns_query, connection)
+                
+                if sample_df.empty:
+                    self.log_message("テーブルにデータが見つかりません")
+                    self.update_progress(1.0, "完了（データなし）")
+                    success = True  # データなしも完了として扱う
+                    return
+                
+                # 実際の列名を取得してキャッシュに保存
+                actual_columns = sample_df.columns.tolist()
+                ModernDataExtractorUI._table_structure_cache = actual_columns
+                ModernDataExtractorUI._table_structure_cache_timestamp = time.time()
             
             # 指定された列が存在するかチェック（梱包・完了は後で追加するため除外）
             required_columns = ["品番", "品名", "客先", "出荷予定日", "出荷数", "在庫数", "不足数", "処理"]
             available_columns = [col for col in required_columns if col in actual_columns]
             
             if not available_columns:
-                self.log_message("指定された列が見つかりません。全列を取得します。")
+                # ログ出力を削減（高速化）
                 available_columns = actual_columns
             
             # 利用可能な列のみでクエリを作成（SQL側で日付フィルタリングを実行して高速化）
@@ -2432,22 +2473,25 @@ class ModernDataExtractorUI:
                 self.root.after(0, lambda: self.extract_button.configure(state="normal", text="データ抽出開始"))
                 self.root.after(0, lambda: setattr(self, 'is_extracting', False))
     
-    def update_progress(self, value, message):
-        """進捗の更新"""
+    def update_progress(self, value: float, message: str) -> None:
+        """
+        進捗の更新
+        
+        Args:
+            value: 進捗値（0.0～1.0）
+            message: 進捗メッセージ
+        """
         self.root.after(0, lambda: self.progress_bar.set(value))
         self.root.after(0, lambda: self.progress_label.configure(text=message))
     
-    def log_message(self, message):
-        """ログメッセージの追加（コンソール出力のみ）"""
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        log_entry = f"{timestamp} | {message}"
-        try:
-            print(log_entry)  # コンソール出力のみ
-        except UnicodeEncodeError:
-            import sys
-            encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
-            safe_entry = log_entry.encode(encoding, errors="replace").decode(encoding, errors="replace")
-            print(safe_entry)
+    def log_message(self, message: str) -> None:
+        """
+        ログメッセージの追加（loguruのみ使用）
+        
+        Args:
+            message: ログメッセージ
+        """
+        # print文を削除してloguruのみを使用（高速化）
         logger.info(message)
     
     def calculate_column_widths(self, df, columns, min_width=0, max_width=600):
@@ -4221,11 +4265,11 @@ class ModernDataExtractorUI:
                 except:
                     pass
             
-            # 休暇情報セクションを作成
-            vacation_frame = ctk.CTkFrame(self.main_scroll_frame, fg_color="#EFF6FF", corner_radius=12)
+            # 休暇情報セクションを作成（左寄せのためfill="none"に変更、背景色を赤系に変更）
+            vacation_frame = ctk.CTkFrame(self.main_scroll_frame, fg_color="#FEE2E2", corner_radius=12)
             vacation_frame.table_section = True
             vacation_frame.vacation_section = True  # 休暇情報テーブルのマーカー
-            vacation_frame.pack(fill="x", padx=20, pady=(10, 10))
+            vacation_frame.pack(fill="none", anchor="w", padx=20, pady=(10, 10))  # 左寄せに変更
             self.vacation_info_frame = vacation_frame
             
             # タイトルフレーム
@@ -4308,9 +4352,9 @@ class ModernDataExtractorUI:
                 # 検査員マスタが読み込めない場合は全員表示
                 filtered_vacation_data = vacation_data
             
-            # テーブルフレーム
+            # テーブルフレーム（左寄せ、内容に応じた幅に調整）
             table_frame = tk.Frame(vacation_frame)
-            table_frame.pack(fill="both", expand=True, padx=15, pady=(0, 15))
+            table_frame.pack(fill="none", anchor="w", padx=15, pady=(0, 15))  # 左寄せに変更
             
             # 列の定義（検査員名と休暇内容）
             vacation_columns = ["検査員名", "休暇内容"]
@@ -4330,11 +4374,27 @@ class ModernDataExtractorUI:
                      background=[('selected', '#3B82F6')],
                      foreground=[('selected', 'white')])
             
-            # 列の設定
+            # 列の設定（内容に応じた幅に最適化）
             vacation_tree.heading("検査員名", text="検査員名", anchor="center")
             vacation_tree.heading("休暇内容", text="休暇内容", anchor="center")
-            vacation_tree.column("検査員名", width=200, anchor="w")
-            vacation_tree.column("休暇内容", width=300, anchor="w")
+            
+            # 列幅を内容に応じて最適化（窮屈にならないように適度な余白を確保）
+            # 検査員名: 最大文字数に応じて調整（日本語1文字=約10ピクセル、余白20ピクセル）
+            if filtered_vacation_data:
+                max_name_length = max([len(name) for name in filtered_vacation_data.keys()] + [len("検査員名")])
+            else:
+                max_name_length = len("検査員名")
+            name_width = min(max(max_name_length * 10 + 20, 120), 250)  # 最小120、最大250
+            
+            # 休暇内容: 最大文字数に応じて調整
+            if filtered_vacation_data:
+                max_content_length = max([len(str(v.get('interpretation', v.get('code', '')))) for v in filtered_vacation_data.values()] + [len("休暇内容")])
+            else:
+                max_content_length = len("休暇内容")
+            content_width = min(max(max_content_length * 10 + 20, 150), 300)  # 最小150、最大300
+            
+            vacation_tree.column("検査員名", width=int(name_width), anchor="w", minwidth=120)
+            vacation_tree.column("休暇内容", width=int(content_width), anchor="w", minwidth=150)
             
             # データの挿入
             if filtered_vacation_data:
@@ -4357,8 +4417,9 @@ class ModernDataExtractorUI:
             # スクロールバーは不要のため削除
             vacation_tree.grid(row=0, column=0, sticky="nsew")
             
+            # テーブルフレームのサイズを内容に合わせる（横方向は自動調整）
             table_frame.grid_rowconfigure(0, weight=1)
-            table_frame.grid_columnconfigure(0, weight=1)
+            table_frame.grid_columnconfigure(0, weight=0)  # 横方向は自動サイズに変更
             
             # マウスホイールイベントのバインド（メイン画面のスクロールを有効化）
             def on_vacation_mousewheel(event):
@@ -4853,14 +4914,42 @@ class ModernDataExtractorUI:
             scroll_frame = ctk.CTkScrollableFrame(dialog)
             scroll_frame.pack(fill="both", expand=True, padx=20, pady=10)
             
-            # 選択された検査員を保持
-            selected_inspector = {'name': None, 'code': None}
+            # マウスホイールイベントのバインド（CTkScrollableFrame用）
+            def on_scroll_mousewheel(event):
+                # スクロール量を計算（速度を上げるため10倍にする）
+                scroll_amount = int(-1 * (event.delta / 120)) * 10
+                # CTkScrollableFrameの正しいスクロールメソッドを使用
+                if hasattr(scroll_frame, 'yview_scroll'):
+                    scroll_frame.yview_scroll(scroll_amount, "units")
+                else:
+                    # CTkScrollableFrameの場合は内部のCanvasを直接操作
+                    canvas = scroll_frame._parent_canvas
+                    if canvas:
+                        canvas.yview_scroll(scroll_amount, "units")
+                return "break"
+            
+            # スクロールフレームにマウスホイールイベントをバインド
+            scroll_frame.bind("<MouseWheel>", on_scroll_mousewheel)
+            # ダイアログ全体にもバインド（フォーカスが外れている場合でも動作するように）
+            dialog.bind("<MouseWheel>", on_scroll_mousewheel)
+            
+            # 選択された検査員を保持（複数選択対応：辞書形式で名前とコードを保持）
+            selected_inspectors = {}  # {name: code}
+            
+            # 現在の検査員を初期選択状態にする
+            if current_inspector:
+                current_name_clean = current_inspector.split('(')[0].strip()
+                inspector_info = inspector_master_df[inspector_master_df['#氏名'] == current_name_clean]
+                if not inspector_info.empty:
+                    inspector_code = inspector_info.iloc[0]['#ID']
+                    selected_inspectors[current_name_clean] = inspector_code
             
             # 検査員リストを作成
             inspector_names = inspector_master_df['#氏名'].dropna().astype(str).str.strip()
             inspector_names = inspector_names[inspector_names != ''].unique().tolist()
             
-            # 各検査員にラジオボタンを作成
+            # 各検査員にチェックボックスを作成
+            inspector_checkboxes = {}
             for inspector_name in sorted(inspector_names):
                 # 検査員コードを取得
                 inspector_info = inspector_master_df[inspector_master_df['#氏名'] == inspector_name]
@@ -4869,38 +4958,35 @@ class ModernDataExtractorUI:
                 
                 inspector_code = inspector_info.iloc[0]['#ID']
                 
-                # ラジオボタンを作成
-                radio = ctk.CTkRadioButton(
+                # チェックボックスを作成
+                checkbox_var = tk.BooleanVar(value=inspector_name in selected_inspectors)
+                checkbox = ctk.CTkCheckBox(
                     scroll_frame,
                     text=inspector_name,
-                    value=inspector_name,
-                    command=lambda name=inspector_name, code=inspector_code: set_selected(name, code),
+                    variable=checkbox_var,
+                    command=lambda name=inspector_name, code=inspector_code, var=checkbox_var: self._update_selected_inspectors_for_change(name, code, var, selected_inspectors),
                     font=ctk.CTkFont(family="Yu Gothic", size=12, weight="bold")
                 )
-                radio.pack(anchor="w", pady=2)
-                
-                # 現在の検査員を選択状態にする
-                if current_inspector:
-                    current_name_clean = current_inspector.split('(')[0].strip()
-                    if inspector_name == current_name_clean:
-                        radio.select()
-                        selected_inspector['name'] = inspector_name
-                        selected_inspector['code'] = inspector_code
-            
-            def set_selected(name, code):
-                selected_inspector['name'] = name
-                selected_inspector['code'] = code
+                checkbox.pack(anchor="w", pady=2)
+                inspector_checkboxes[inspector_name] = checkbox_var
             
             # ボタンフレーム
             button_frame = ctk.CTkFrame(dialog, fg_color="transparent")
             button_frame.pack(pady=10)
             
             def on_ok():
-                if selected_inspector['name']:
-                    # 検査員を変更
+                if selected_inspectors:
+                    # 複数の検査員を変更（col_nameは最初の列名として使用）
+                    self.update_inspector_assignment_multiple(
+                        original_index, col_name, col_index,
+                        selected_inspectors,
+                        current_inspector, row, inspector_df
+                    )
+                else:
+                    # 選択が空の場合は未割当にする
                     self.update_inspector_assignment(
                         original_index, col_name, col_index,
-                        selected_inspector['name'], selected_inspector['code'],
+                        None, None,
                         current_inspector, row, inspector_df
                     )
                 dialog.destroy()
@@ -5142,6 +5228,158 @@ class ModernDataExtractorUI:
             
             self.log_message(
                 f"検査員を変更しました: {old_inspector_name if old_inspector_name else '未割当'} → {new_inspector_name} "
+                f"(品番: {product_number}, {col_name})"
+            )
+            
+        except Exception as e:
+            self.log_message(f"検査員割当ての更新に失敗しました: {str(e)}")
+            logger.error(f"検査員割当ての更新に失敗しました: {str(e)}", exc_info=True)
+    
+    def update_inspector_assignment_multiple(self, original_index, col_name, col_index, selected_inspectors_dict, old_inspector_name, row, inspector_df):
+        """複数の検査員を割り当てる（検査員変更ダイアログ用）"""
+        try:
+            from datetime import date as date_type
+            
+            if inspector_df is None:
+                self.log_message("エラー: 検査員割当てデータが見つかりません")
+                return
+            
+            # データフレームの行を取得
+            df = inspector_df.copy()
+            inspection_time = row.get('検査時間', 0.0)
+            product_number = row.get('品番', '')
+            current_date = pd.Timestamp.now().date()
+            
+            # 検査員マスタを読み込む（キャッシュを活用）
+            inspector_master_df = self.load_inspector_master_cached()
+            if inspector_master_df is None:
+                self.log_message("エラー: 検査員マスタを読み込めません")
+                return
+            
+            # 選択された検査員のリストを取得（最大5人まで）
+            selected_names = list(selected_inspectors_dict.keys())[:5]
+            selected_codes = [selected_inspectors_dict[name] for name in selected_names]
+            
+            if not selected_names:
+                # すべての検査員を削除
+                self.update_inspector_assignment(
+                    original_index, col_name, col_index,
+                    None, None,
+                    old_inspector_name, row, inspector_df
+                )
+                return
+            
+            # 旧検査員のコードを取得
+            old_inspector_codes = []
+            if old_inspector_name:
+                old_name_clean = old_inspector_name.split('(')[0].strip()
+                old_info = inspector_master_df[inspector_master_df['#氏名'] == old_name_clean]
+                if not old_info.empty:
+                    old_inspector_codes.append(old_info.iloc[0]['#ID'])
+            
+            # 現在の検査員列（検査員1～5）から旧検査員のコードを取得
+            for i in range(1, 6):
+                inspector_col = f'検査員{i}'
+                if inspector_col in df.columns:
+                    inspector_value = row.get(inspector_col, '')
+                    if pd.notna(inspector_value) and str(inspector_value).strip() != '':
+                        inspector_name_clean = str(inspector_value).split('(')[0].strip()
+                        inspector_info = inspector_master_df[inspector_master_df['#氏名'] == inspector_name_clean]
+                        if not inspector_info.empty:
+                            inspector_code = inspector_info.iloc[0]['#ID']
+                            if inspector_code not in old_inspector_codes:
+                                old_inspector_codes.append(inspector_code)
+            
+            # 分割検査時間を計算
+            divided_time = inspection_time / len(selected_names) if len(selected_names) > 0 else 0.0
+            
+            # 旧検査員から時間を引く
+            for old_code in old_inspector_codes:
+                if old_code in self.inspector_manager.inspector_daily_assignments:
+                    if current_date in self.inspector_manager.inspector_daily_assignments[old_code]:
+                        self.inspector_manager.inspector_daily_assignments[old_code][current_date] = max(
+                            0.0,
+                            self.inspector_manager.inspector_daily_assignments[old_code][current_date] - divided_time
+                        )
+                
+                if old_code in self.inspector_manager.inspector_work_hours:
+                    self.inspector_manager.inspector_work_hours[old_code] = max(
+                        0.0,
+                        self.inspector_manager.inspector_work_hours[old_code] - divided_time
+                    )
+                
+                # 品番別累計時間も更新
+                if old_code in self.inspector_manager.inspector_product_hours:
+                    if product_number in self.inspector_manager.inspector_product_hours[old_code]:
+                        self.inspector_manager.inspector_product_hours[old_code][product_number] = max(
+                            0.0,
+                            self.inspector_manager.inspector_product_hours[old_code][product_number] - divided_time
+                        )
+            
+            # 新検査員に時間を追加
+            for new_code in selected_codes:
+                if new_code not in self.inspector_manager.inspector_daily_assignments:
+                    self.inspector_manager.inspector_daily_assignments[new_code] = {}
+                if current_date not in self.inspector_manager.inspector_daily_assignments[new_code]:
+                    self.inspector_manager.inspector_daily_assignments[new_code][current_date] = 0.0
+                
+                self.inspector_manager.inspector_daily_assignments[new_code][current_date] += divided_time
+                
+                if new_code not in self.inspector_manager.inspector_work_hours:
+                    self.inspector_manager.inspector_work_hours[new_code] = 0.0
+                self.inspector_manager.inspector_work_hours[new_code] += divided_time
+                
+                # 品番別累計時間も更新
+                if new_code not in self.inspector_manager.inspector_product_hours:
+                    self.inspector_manager.inspector_product_hours[new_code] = {}
+                self.inspector_manager.inspector_product_hours[new_code][product_number] = (
+                    self.inspector_manager.inspector_product_hours[new_code].get(product_number, 0.0) + divided_time
+                )
+            
+            # データフレームを更新（検査員1～5に設定）
+            for i in range(1, 6):
+                inspector_col = f'検査員{i}'
+                if inspector_col in df.columns:
+                    if i <= len(selected_names):
+                        df.at[original_index, inspector_col] = selected_names[i - 1]
+                    else:
+                        df.at[original_index, inspector_col] = ''
+            
+            # 検査員人数と分割検査時間を再計算
+            self._recalculate_inspector_count_and_divided_time(df, original_index)
+            
+            # 当日洗浄上がり品の制約を更新
+            shipping_date_str = str(row.get('出荷予定日', '')).strip()
+            is_same_day_cleaning = (
+                shipping_date_str == "当日洗浄上がり品" or
+                shipping_date_str == "当日洗浄品" or
+                "当日洗浄" in shipping_date_str or
+                shipping_date_str == "先行検査" or
+                shipping_date_str == "当日先行検査"
+            )
+            
+            if is_same_day_cleaning:
+                # 旧検査員を削除
+                for old_code in old_inspector_codes:
+                    if product_number in self.inspector_manager.same_day_cleaning_inspectors:
+                        self.inspector_manager.same_day_cleaning_inspectors[product_number].discard(old_code)
+                
+                # 新検査員を追加
+                for new_code in selected_codes:
+                    self.inspector_manager.same_day_cleaning_inspectors.setdefault(product_number, set()).add(new_code)
+            
+            # データフレームを更新
+            self.current_inspector_data = df
+            
+            # テーブルを再描画（スクロール位置と選択行を保持）
+            self.display_inspector_assignment_table(df, preserve_scroll_position=True, target_row_index=original_index)
+            
+            # 詳細表示ポップアップが開いている場合は更新
+            self.update_detail_popup_if_open()
+            
+            selected_names_str = ', '.join(selected_names)
+            self.log_message(
+                f"検査員を変更しました: {old_inspector_name if old_inspector_name else '未割当'} → {selected_names_str} "
                 f"(品番: {product_number}, {col_name})"
             )
             
@@ -6011,28 +6249,34 @@ class ModernDataExtractorUI:
         try:
             logger.info("リソースをクリーンアップしています...")
             
+            # データベース接続を閉じる（リソース解放）
+            try:
+                DatabaseConfig.close_all_connections()
+            except Exception as e:
+                logger.debug(f"データベース接続のクローズでエラー（無視）: {e}")
+            
             # カレンダーウィンドウを閉じる
             if hasattr(self, 'calendar_window') and self.calendar_window is not None:
                 try:
                     self.calendar_window.destroy()
-                except:
-                    pass
+                except (AttributeError, tk.TclError) as e:
+                    logger.debug(f"カレンダーウィンドウの破棄でエラー（無視）: {e}")
                 self.calendar_window = None
             
             # グラフフレームを破棄
             if hasattr(self, 'graph_frame') and self.graph_frame is not None:
                 try:
                     self.graph_frame.destroy()
-                except:
-                    pass
+                except (AttributeError, tk.TclError) as e:
+                    logger.debug(f"グラフフレームの破棄でエラー（無視）: {e}")
                 self.graph_frame = None
             
             # matplotlibのリソースをクリーンアップ
             try:
                 import matplotlib.pyplot as plt
                 plt.close('all')
-            except:
-                pass
+            except Exception as e:
+                logger.debug(f"matplotlibのクリーンアップでエラー（無視）: {e}")
             
             logger.info("リソースのクリーンアップが完了しました")
             
@@ -6246,13 +6490,14 @@ class ModernDataExtractorUI:
             
             # 就業時間を計算（終了時刻 - 開始時刻 - 1時間休憩）
             try:
-                # 時刻フォーマットを試行
-                df['開始時刻'] = pd.to_datetime(df['開始時刻'], format='%H:%M').dt.time
-                df['終了時刻'] = pd.to_datetime(df['終了時刻'], format='%H:%M').dt.time
+                # 時刻フォーマットを試行（formatを指定して警告を回避・高速化）
+                # 文字列の時刻をdatetime型に変換（同じ日付として扱う）
+                base_date = pd.Timestamp('1900-01-01')
+                start_datetime = pd.to_datetime(base_date.strftime('%Y-%m-%d') + ' ' + df['開始時刻'].astype(str), format='%Y-%m-%d %H:%M', errors='coerce')
+                end_datetime = pd.to_datetime(base_date.strftime('%Y-%m-%d') + ' ' + df['終了時刻'].astype(str), format='%Y-%m-%d %H:%M', errors='coerce')
                 
-                # 就業時間を計算
-                df['就業時間'] = pd.to_datetime(df['終了時刻'].astype(str)) - pd.to_datetime(df['開始時刻'].astype(str))
-                df['就業時間'] = df['就業時間'].dt.total_seconds() / 3600 - 1  # 休憩1時間を引く
+                # 就業時間を計算（formatを指定して警告を回避・高速化）
+                df['就業時間'] = (end_datetime - start_datetime).dt.total_seconds() / 3600 - 1  # 休憩1時間を引く
                 
             except Exception as e:
                 self.log_message(f"時刻フォーマット処理でエラー: {str(e)}")
@@ -6381,26 +6626,130 @@ class ModernDataExtractorUI:
             self.log_message(error_msg)
             logger.error(error_msg)
             messagebox.showerror("エラー", error_msg)
-
-
-def main():
-    """メイン関数"""
-    try:
-        app = ModernDataExtractorUI()
-        app.run()
-    except Exception as e:
-        logger.error(f"アプリケーションの起動に失敗しました: {e}")
-        messagebox.showerror("エラー", f"アプリケーションの起動に失敗しました:\n{str(e)}")
-
-
-if __name__ == "__main__":
-    # 直接実行時のエントリーポイント
-    def main():
-        """アプリケーションのエントリーポイント"""
-        try:
-            ModernDataExtractorUI().run()
-        except Exception as exc:
-            logger.error(f"アプリケーションの起動に失敗しました: {exc}")
-            raise
     
-    main()
+    def create_menu_bar(self):
+        """メニューバーを作成"""
+        try:
+            # CustomTkinterでも標準のtkinterメニューバーを使用可能
+            menubar = tk.Menu(self.root)
+            self.root.config(menu=menubar)
+            
+            # マスタファイルメニュー
+            master_menu = tk.Menu(menubar, tearoff=0)
+            menubar.add_cascade(label="マスタファイル", menu=master_menu)
+            
+            # 各マスタファイルを開くメニュー項目
+            master_menu.add_command(
+                label="製品マスタを開く",
+                command=self.open_product_master_file
+            )
+            master_menu.add_command(
+                label="検査員マスタを開く",
+                command=self.open_inspector_master_file
+            )
+            master_menu.add_command(
+                label="スキルマスタを開く",
+                command=self.open_skill_master_file
+            )
+            master_menu.add_command(
+                label="工程マスタを開く",
+                command=self.open_process_master_file
+            )
+            master_menu.add_separator()
+            master_menu.add_command(
+                label="検査対象CSVを開く",
+                command=self.open_inspection_target_csv_file
+            )
+            
+        except Exception as e:
+            logger.error(f"メニューバーの作成に失敗しました: {e}")
+    
+    def open_product_master_file(self):
+        """製品マスタファイルを開く"""
+        try:
+            if self.config and self.config.product_master_path:
+                file_path = self.config.product_master_path
+                if os.path.exists(file_path):
+                    os.startfile(file_path)
+                    self.log_message(f"製品マスタファイルを開きました: {file_path}")
+                else:
+                    messagebox.showerror("エラー", f"製品マスタファイルが見つかりません:\n{file_path}")
+            else:
+                messagebox.showinfo("情報", "製品マスタファイルのパスが設定されていません。")
+        except Exception as e:
+            error_msg = f"製品マスタファイルを開く際にエラーが発生しました: {str(e)}"
+            self.log_message(error_msg)
+            logger.error(error_msg)
+            messagebox.showerror("エラー", error_msg)
+    
+    def open_inspector_master_file(self):
+        """検査員マスタファイルを開く"""
+        try:
+            if self.config and self.config.inspector_master_path:
+                file_path = self.config.inspector_master_path
+                if os.path.exists(file_path):
+                    os.startfile(file_path)
+                    self.log_message(f"検査員マスタファイルを開きました: {file_path}")
+                else:
+                    messagebox.showerror("エラー", f"検査員マスタファイルが見つかりません:\n{file_path}")
+            else:
+                messagebox.showinfo("情報", "検査員マスタファイルのパスが設定されていません。")
+        except Exception as e:
+            error_msg = f"検査員マスタファイルを開く際にエラーが発生しました: {str(e)}"
+            self.log_message(error_msg)
+            logger.error(error_msg)
+            messagebox.showerror("エラー", error_msg)
+    
+    def open_skill_master_file(self):
+        """スキルマスタファイルを開く"""
+        try:
+            if self.config and self.config.skill_master_path:
+                file_path = self.config.skill_master_path
+                if os.path.exists(file_path):
+                    os.startfile(file_path)
+                    self.log_message(f"スキルマスタファイルを開きました: {file_path}")
+                else:
+                    messagebox.showerror("エラー", f"スキルマスタファイルが見つかりません:\n{file_path}")
+            else:
+                messagebox.showinfo("情報", "スキルマスタファイルのパスが設定されていません。")
+        except Exception as e:
+            error_msg = f"スキルマスタファイルを開く際にエラーが発生しました: {str(e)}"
+            self.log_message(error_msg)
+            logger.error(error_msg)
+            messagebox.showerror("エラー", error_msg)
+    
+    def open_process_master_file(self):
+        """工程マスタファイルを開く"""
+        try:
+            if self.config and self.config.process_master_path:
+                file_path = self.config.process_master_path
+                if os.path.exists(file_path):
+                    os.startfile(file_path)
+                    self.log_message(f"工程マスタファイルを開きました: {file_path}")
+                else:
+                    messagebox.showerror("エラー", f"工程マスタファイルが見つかりません:\n{file_path}")
+            else:
+                messagebox.showinfo("情報", "工程マスタファイルのパスが設定されていません。")
+        except Exception as e:
+            error_msg = f"工程マスタファイルを開く際にエラーが発生しました: {str(e)}"
+            self.log_message(error_msg)
+            logger.error(error_msg)
+            messagebox.showerror("エラー", error_msg)
+    
+    def open_inspection_target_csv_file(self):
+        """検査対象CSVファイルを開く"""
+        try:
+            if self.config and self.config.inspection_target_csv_path:
+                file_path = self.config.inspection_target_csv_path
+                if os.path.exists(file_path):
+                    os.startfile(file_path)
+                    self.log_message(f"検査対象CSVファイルを開きました: {file_path}")
+                else:
+                    messagebox.showerror("エラー", f"検査対象CSVファイルが見つかりません:\n{file_path}")
+            else:
+                messagebox.showinfo("情報", "検査対象CSVファイルのパスが設定されていません。")
+        except Exception as e:
+            error_msg = f"検査対象CSVファイルを開く際にエラーが発生しました: {str(e)}"
+            self.log_message(error_msg)
+            logger.error(error_msg)
+            messagebox.showerror("エラー", error_msg)
