@@ -283,6 +283,15 @@ class GoogleSheetsExporter:
                                 
                                 # 日付として変換を試みる（当日洗浄品でない場合のみ）
                                 try:
+                                    # 特殊な文字列を事前にチェック
+                                    special_strings = ['先行検査', '当日先行検査', '当日洗浄', '当日洗浄品', '当日洗浄上がり品']
+                                    is_special_string = any(special in val_str for special in special_strings)
+                                    
+                                    if is_special_string:
+                                        # 特殊文字列の場合はそのまま使用（日付変換をスキップ）
+                                        data.append(val_str)
+                                        continue
+                                    
                                     # 日付をyyyy/mm/dd形式に変換
                                     date_value = pd.to_datetime(val, errors='raise')
                                     # NaT（Not a Time）の場合は空文字を追加
@@ -294,8 +303,10 @@ class GoogleSheetsExporter:
                                         data.append(formatted_date)
                                 except (ValueError, TypeError, Exception) as e:
                                     # 日付変換に失敗した場合は元の値をそのまま使用
-                                    if log_callback:
-                                        log_callback(f"デバッグ: 日付変換失敗（行{idx+1}）。値: {repr(val)}, 型: {type(val).__name__}, エラー: {str(e)}")
+                                    # デバッグログは削減（特殊文字列の場合は正常な動作）
+                                    if not any(special in val_str for special in ['先行検査', '当日先行検査', '当日洗浄']):
+                                        if log_callback:
+                                            log_callback(f"デバッグ: 日付変換失敗（行{idx+1}）。値: {repr(val)}, 型: {type(val).__name__}, エラー: {str(e)}")
                                     data.append(val_str)
                     else:
                         # 日付列以外は通常の処理

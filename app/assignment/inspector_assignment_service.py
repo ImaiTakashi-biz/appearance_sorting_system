@@ -2091,16 +2091,20 @@ class InspectorAssignmentManager:
                 # これは登録済み品番リストの固定検査員の特別処置です
                 missing_fixed_inspectors = [name for name in fixed_inspector_names if name not in available_inspector_names]
                 if missing_fixed_inspectors:
-                    self.log_message(
-                        f"⚠️ 警告: 品番 '{product_number}' の固定検査員のうち、以下の検査員が候補に含まれていません: {missing_fixed_inspectors}",
-                        level='warning'
-                    )
-                    self.log_message(
-                        f"   理由: スキルマスタに該当品番のスキル情報がないか、スキル値が1,2,3以外の可能性があります"
-                    )
-                    self.log_message(
-                        f"   特別処置: 固定検査員として設定されているため、スキルマスタに含まれていなくても候補に追加します"
-                    )
+                    # 警告の重複を防ぐ
+                    warning_key = ('fixed_inspector_missing', product_number, tuple(sorted(missing_fixed_inspectors)))
+                    if warning_key not in self.logged_warnings:
+                        self.logged_warnings.add(warning_key)
+                        self.log_message(
+                            f"⚠️ 警告: 品番 '{product_number}' の固定検査員のうち、以下の検査員が候補に含まれていません: {missing_fixed_inspectors}",
+                            level='warning'
+                        )
+                        self.log_message(
+                            f"   理由: スキルマスタに該当品番のスキル情報がないか、スキル値が1,2,3以外の可能性があります"
+                        )
+                        self.log_message(
+                            f"   特別処置: 固定検査員として設定されているため、スキルマスタに含まれていなくても候補に追加します"
+                        )
                     
                     # 検査員マスタから固定検査員の情報を取得して追加
                     for missing_name in missing_fixed_inspectors:
@@ -3961,7 +3965,7 @@ class InspectorAssignmentManager:
                     result_df = result_df_sorted
                     break
                 
-                # 違反を是正（出荷予定日が古い順）
+                # 違反を是正（当日洗浄上がり品を優先）
                 all_violations = overworked_assignments + product_limit_violations
                 # 重複を除去（同じロットの複数の違反を1つにまとめる）
                 unique_violations = {}
@@ -3974,6 +3978,29 @@ class InspectorAssignmentManager:
                         existing = unique_violations[index]
                         if violation[3] > existing[3]:  # excess値が大きい方
                             unique_violations[index] = violation
+                
+                # 【改善】当日洗浄上がり品の違反を分離
+                same_day_cleaning_violations = []
+                other_violations = []
+                
+                for violation in unique_violations.values():
+                    violation_index = violation[0]
+                    if violation_index < len(result_df_sorted):
+                        violation_row = result_df_sorted.iloc[violation_index]
+                        shipping_date_raw = violation_row.get('出荷予定日', None)
+                        shipping_date_str = str(shipping_date_raw).strip() if pd.notna(shipping_date_raw) else ''
+                        is_same_day_cleaning = (
+                            shipping_date_str == "当日洗浄上がり品" or
+                            shipping_date_str == "当日洗浄品" or
+                            "当日洗浄" in shipping_date_str
+                        )
+                        
+                        if is_same_day_cleaning:
+                            same_day_cleaning_violations.append(violation)
+                        else:
+                            other_violations.append(violation)
+                    else:
+                        other_violations.append(violation)
                 
                 def violation_priority(violation):
                     """違反の優先順位を計算（ソート用）"""
@@ -4009,9 +4036,17 @@ class InspectorAssignmentManager:
                         # エラー発生時は優先度を最低にしてソートを継続
                         self.log_message(f"violation_priority計算エラー: {str(e)} (ロットインデックス: {violation[0]})", level='warning')
                         return (2, pd.Timestamp.max.date(), violation[0])
+                
+                # 当日洗浄上がり品の違反を優先的に処理
+                same_day_cleaning_violations_sorted = sorted(same_day_cleaning_violations, key=violation_priority)
+                other_violations_sorted = sorted(other_violations, key=violation_priority)
+                violations_to_fix = same_day_cleaning_violations_sorted + other_violations_sorted
+                
+                if same_day_cleaning_violations:
+                    self.log_message(f"当日洗浄上がり品の違反 {len(same_day_cleaning_violations)}件を優先的に処理します", level='info')
 
                 try:
-                    sorted_violations = sorted(unique_violations.values(), key=violation_priority)
+                    sorted_violations = violations_to_fix
                 except Exception as e:
                     # ソートエラーが発生した場合は、インデックス順でソート
                     self.log_message(f"違反のソート中にエラーが発生しました: {str(e)}。インデックス順で処理します。", level='warning')
@@ -4092,9 +4127,30 @@ class InspectorAssignmentManager:
                                     if isinstance(shipping_date_raw, pd.Timestamp):
                                         shipping_date = shipping_date_raw.date()
                                     elif isinstance(shipping_date_raw, str):
-                                        shipping_date = pd.to_datetime(shipping_date_raw).date()
+                                        shipping_date_str = str(shipping_date_raw).strip()
+                                        # 「当日洗浄上がり品」「先行検査」などの文字列の場合は最優先として扱う
+                                        if (shipping_date_str == "当日洗浄上がり品" or
+                                            shipping_date_str == "当日洗浄品" or
+                                            "当日洗浄" in shipping_date_str or
+                                            shipping_date_str == "先行検査" or
+                                            shipping_date_str == "当日先行検査"):
+                                            shipping_date = pd.Timestamp.min.date()  # 最優先として扱う
+                                        else:
+                                            # 日付文字列の場合は変換を試みる
+                                            try:
+                                                shipping_date_parsed = pd.to_datetime(shipping_date_raw, errors='coerce')
+                                                if pd.notna(shipping_date_parsed):
+                                                    shipping_date = shipping_date_parsed.date()
+                                                else:
+                                                    shipping_date = pd.Timestamp.max.date()
+                                            except:
+                                                shipping_date = pd.Timestamp.max.date()
                                     else:
-                                        shipping_date = shipping_date_raw  # すでにdate型の場合
+                                        # その他の型（datetime.date等）の場合はそのまま使用
+                                        try:
+                                            shipping_date = shipping_date_raw.date() if hasattr(shipping_date_raw, 'date') else shipping_date_raw
+                                        except:
+                                            shipping_date = pd.Timestamp.max.date()
                                 else:
                                     shipping_date = pd.Timestamp.max.date()
                             else:
@@ -6482,21 +6538,155 @@ class InspectorAssignmentManager:
             
             if same_day_cleaning_violations:
                 self.log_message(f"⚠️ 警告: フェーズ3.5検証で当日洗浄上がり品の制約違反が {len(same_day_cleaning_violations)}件検出されました", level='warning')
-                # 【改善】当日洗浄上がり品は最優先のため、違反があっても割り当てを維持する（警告のみ）
-                violation_indices = set()
-                for violation in same_day_cleaning_violations:
-                    violation_indices.add(violation[0])
                 
-                for violation_index in violation_indices:
-                    violation_type = next((v[3] for v in same_day_cleaning_violations if v[0] == violation_index), "不明")
+                # 【改善】違反を解消するための再割り当てを試行
+                resolved_count = 0
+                current_date = pd.Timestamp.now().date()
+                
+                for violation in same_day_cleaning_violations:
+                    violation_index = violation[0]
+                    violation_code = violation[1]
+                    violation_name = violation[2]
+                    violation_type = violation[3]
+                    product_number = violation[4] if len(violation) > 4 else ''
+                    
+                    if violation_index >= len(result_df):
+                        continue
+                    
                     row = result_df.iloc[violation_index]
-                    product_number = row.get('品番', '')
-                    # 【改善】未割当にせず、警告のみを出力して割り当てを維持
-                    self.log_message(
-                        f"⚠️ 警告: 当日洗浄上がり品の制約違反が検出されましたが、最優先のため割り当てを維持します - "
-                        f"ロット {violation_index} (品番: {product_number}, 違反タイプ: {violation_type})",
-                        level='warning'
-                    )
+                    
+                    # 違反している検査員を特定
+                    violating_inspector_col = None
+                    for j in range(1, 6):
+                        inspector_col = f'検査員{j}'
+                        inspector_value = row.get(inspector_col, '')
+                        if pd.notna(inspector_value) and str(inspector_value).strip() != '':
+                            inspector_name = str(inspector_value).strip()
+                            if '(' in inspector_name:
+                                inspector_name = inspector_name.split('(')[0].strip()
+                            if inspector_name == violation_name:
+                                violating_inspector_col = inspector_col
+                                break
+                    
+                    if violating_inspector_col:
+                        # 代替検査員を探す
+                        process_number = row.get('工程番号', None)
+                        shipping_date = row.get('出荷予定日', None)
+                        inspection_time = row.get('検査時間', 0.0)
+                        divided_time = row.get('分割検査時間', inspection_time)
+                        
+                        # 既に割り当てられている検査員を取得
+                        assigned_codes = set()
+                        for j in range(1, 6):
+                            col = f'検査員{j}'
+                            val = row.get(col, '')
+                            if pd.notna(val) and str(val).strip() != '':
+                                name = str(val).strip()
+                                if '(' in name:
+                                    name = name.split('(')[0].strip()
+                                info = inspector_master_df[inspector_master_df['#氏名'] == name]
+                                if not info.empty:
+                                    assigned_codes.add(info.iloc[0]['#ID'])
+                        
+                        # 品番単位と品名単位の制約を取得
+                        already_assigned_to_product = self.same_day_cleaning_inspectors.get(product_number, set())
+                        product_name = row.get('品名', '')
+                        product_name_str = str(product_name).strip() if pd.notna(product_name) else ''
+                        already_assigned_to_product_name = set()
+                        if product_name_str:
+                            already_assigned_to_product_name = self.same_day_cleaning_inspectors_by_product_name.get(product_name_str, set())
+                        
+                        # 除外すべき検査員コード
+                        excluded_codes = assigned_codes | already_assigned_to_product | already_assigned_to_product_name
+                        
+                        # 代替検査員を取得
+                        available_inspectors = self.get_available_inspectors(
+                            product_number, process_number, skill_master_df, inspector_master_df,
+                            shipping_date=shipping_date, process_master_df=process_master_df
+                        )
+                        
+                        # 除外条件を満たす検査員を探す
+                        replacement_found = False
+                        inspector_max_hours = {}
+                        for code in inspector_master_df['#ID'].unique():
+                            inspector_max_hours[code] = self.get_inspector_max_hours(code, inspector_master_df)
+                        
+                        for insp in available_inspectors:
+                            code = insp['コード']
+                            if code in excluded_codes:
+                                continue
+                            if code == violation_code:
+                                continue
+                            
+                            # 勤務時間チェック
+                            max_hours = inspector_max_hours.get(code, 8.0)
+                            if not self.check_work_hours_capacity(code, divided_time, max_hours, current_date):
+                                continue
+                            
+                            # 代替検査員が見つかった
+                            replacement_found = True
+                            skill_value = insp.get('スキル値', '')
+                            display_name = f"{insp['氏名']}({skill_value})" if skill_value else insp['氏名']
+                            result_df.at[violation_index, violating_inspector_col] = display_name
+                            
+                            # 履歴を更新（旧検査員から時間を引く）
+                            if violation_code in self.inspector_daily_assignments:
+                                if current_date in self.inspector_daily_assignments[violation_code]:
+                                    self.inspector_daily_assignments[violation_code][current_date] = max(0.0, 
+                                        self.inspector_daily_assignments[violation_code][current_date] - divided_time)
+                            if violation_code in self.inspector_work_hours:
+                                self.inspector_work_hours[violation_code] = max(0.0, 
+                                    self.inspector_work_hours[violation_code] - divided_time)
+                            if violation_code in self.inspector_product_hours:
+                                if product_number in self.inspector_product_hours[violation_code]:
+                                    self.inspector_product_hours[violation_code][product_number] = max(0.0,
+                                        self.inspector_product_hours[violation_code][product_number] - divided_time)
+                            
+                            # 履歴を更新（新検査員に時間を追加）
+                            if code not in self.inspector_daily_assignments:
+                                self.inspector_daily_assignments[code] = {}
+                            if current_date not in self.inspector_daily_assignments[code]:
+                                self.inspector_daily_assignments[code][current_date] = 0.0
+                            self.inspector_daily_assignments[code][current_date] += divided_time
+                            
+                            if code not in self.inspector_work_hours:
+                                self.inspector_work_hours[code] = 0.0
+                            self.inspector_work_hours[code] += divided_time
+                            
+                            if code not in self.inspector_product_hours:
+                                self.inspector_product_hours[code] = {}
+                            if product_number not in self.inspector_product_hours[code]:
+                                self.inspector_product_hours[code][product_number] = 0.0
+                            self.inspector_product_hours[code][product_number] += divided_time
+                            
+                            # 品番単位・品名単位の追跡を更新
+                            if product_number in self.same_day_cleaning_inspectors:
+                                self.same_day_cleaning_inspectors[product_number].discard(violation_code)
+                                self.same_day_cleaning_inspectors[product_number].add(code)
+                            if product_name_str:
+                                if product_name_str not in self.same_day_cleaning_inspectors_by_product_name:
+                                    self.same_day_cleaning_inspectors_by_product_name[product_name_str] = set()
+                                self.same_day_cleaning_inspectors_by_product_name[product_name_str].discard(violation_code)
+                                self.same_day_cleaning_inspectors_by_product_name[product_name_str].add(code)
+                            
+                            self.log_message(
+                                f"✅ 当日洗浄上がり品の制約違反を解消: ロット {violation_index} (品番: {product_number}) "
+                                f"の検査員 '{violation_name}' を '{insp['氏名']}' に変更しました",
+                                level='info'
+                            )
+                            resolved_count += 1
+                            break
+                        
+                        if not replacement_found:
+                            # 代替検査員が見つからない場合は警告のみを出力して割り当てを維持
+                            self.log_message(
+                                f"⚠️ 警告: 当日洗浄上がり品の制約違反が検出されましたが、代替検査員が見つかりませんでした - "
+                                f"ロット {violation_index} (品番: {product_number}, 違反タイプ: {violation_type})。最優先のため割り当てを維持します。",
+                                level='warning'
+                            )
+                
+                if resolved_count > 0:
+                    self.log_message(f"✅ 当日洗浄上がり品の制約違反を {resolved_count}件解消しました", level='info')
             
             if phase3_5_violations:
                 self.log_message(f"⚠️ 警告: フェーズ3.5検証で {len(phase3_5_violations)}件の違反が検出されました", level='warning')
@@ -7088,36 +7278,145 @@ class InspectorAssignmentManager:
                     if is_same_day_cleaning_lot:
                         already_assigned_to_this_product = self.same_day_cleaning_inspectors.get(product_number, set())
                     
-                    for insp in available_inspectors:
-                        if insp['コード'] not in current_codes:
-                            code = insp['コード']
-                            insp_name = insp['氏名']
-                            
-                            # 当日洗浄上がり品の場合、既にこの品番に割り当てられた検査員を除外（品番単位の制約）
-                            if is_same_day_cleaning_lot and code in already_assigned_to_this_product:
-                                excluded_reasons[insp_name] = f"既にこの品番に割り当て済み（品番単位の制約）"
-                                continue
-                            
-                            max_hours = inspector_max_hours.get(code, 8.0)
-                            # 勤務時間チェック
-                            if not self.check_work_hours_capacity(code, divided_time, max_hours, current_date):
+                    # 【改善】段階的な制約緩和レベルを定義
+                    relaxation_levels = [
+                        {
+                            'name': 'strict',
+                            'same_day_cleaning_product_constraint': True,
+                            'work_hours_buffer': 0.0,
+                            'product_limit': PRODUCT_LIMIT_HARD_THRESHOLD,
+                        },
+                        {
+                            'name': 'relaxed_product_limit',
+                            'same_day_cleaning_product_constraint': True,
+                            'work_hours_buffer': 0.0,
+                            'product_limit': PRODUCT_LIMIT_FINAL_TOLERANCE,
+                        },
+                        {
+                            'name': 'relaxed_work_hours',
+                            'same_day_cleaning_product_constraint': True,
+                            'work_hours_buffer': 0.5,
+                            'product_limit': PRODUCT_LIMIT_FINAL_TOLERANCE,
+                        },
+                        {
+                            'name': 'relaxed_same_day_constraint',
+                            'same_day_cleaning_product_constraint': False,
+                            'work_hours_buffer': 0.5,
+                            'product_limit': PRODUCT_LIMIT_FINAL_TOLERANCE,
+                        },
+                    ]
+                    
+                    # 各緩和レベルで候補を検索
+                    selected_relaxation_level = None
+                    for level in relaxation_levels:
+                        level_candidates = []
+                        level_excluded = {}
+                        
+                        for insp in available_inspectors:
+                            if insp['コード'] not in current_codes:
+                                code = insp['コード']
+                                insp_name = insp['氏名']
+                                
+                                # 当日洗浄上がり品の品番単位制約チェック（緩和レベルに応じて）
+                                if (level['same_day_cleaning_product_constraint'] and 
+                                    is_same_day_cleaning_lot and 
+                                    code in already_assigned_to_this_product):
+                                    level_excluded[insp_name] = f"既にこの品番に割り当て済み（品番単位の制約）"
+                                    continue
+                                
+                                max_hours = inspector_max_hours.get(code, 8.0)
                                 daily_hours = self.inspector_daily_assignments.get(code, {}).get(current_date, 0.0)
-                                excluded_reasons[insp_name] = f"勤務時間超過 ({daily_hours:.1f}h + {divided_time:.1f}h > {max_hours:.1f}h)"
-                                continue
-                            # 改善ポイント: 最適化フェーズでの4時間上限チェック（厳格）
-                            current_product_hours = self.inspector_product_hours.get(code, {}).get(product_number, 0.0)
-                            if current_product_hours + divided_time > PRODUCT_LIMIT_HARD_THRESHOLD:
-                                excluded_reasons[insp_name] = f"同一品番4時間超過 ({current_product_hours:.1f}h + {divided_time:.1f}h = {current_product_hours + divided_time:.1f}h > {PRODUCT_LIMIT_HARD_THRESHOLD:.1f}h)"
-                                continue
-                            total_hours = self.inspector_work_hours.get(code, 0.0)
-                            replacement_candidates.append((total_hours, insp))
+                                
+                                # 勤務時間チェック（緩和レベルに応じて）
+                                if daily_hours + divided_time > max_hours - level['work_hours_buffer']:
+                                    level_excluded[insp_name] = f"勤務時間超過 ({daily_hours:.1f}h + {divided_time:.1f}h > {max_hours:.1f}h - {level['work_hours_buffer']:.1f}h緩和)"
+                                    continue
+                                
+                                # 同一品番4時間上限チェック（緩和レベルに応じて）
+                                current_product_hours = self.inspector_product_hours.get(code, {}).get(product_number, 0.0)
+                                if current_product_hours + divided_time > level['product_limit']:
+                                    level_excluded[insp_name] = f"同一品番超過 ({current_product_hours:.1f}h + {divided_time:.1f}h > {level['product_limit']:.1f}h)"
+                                    continue
+                                
+                                total_hours = self.inspector_work_hours.get(code, 0.0)
+                                level_candidates.append((total_hours, insp))
+                        
+                        if level_candidates:
+                            replacement_candidates = level_candidates
+                            excluded_reasons = level_excluded
+                            selected_relaxation_level = level['name']
+                            if level['name'] != 'strict':
+                                self.log_message(f"制約緩和レベル '{level['name']}' で {len(level_candidates)}人の候補が見つかりました (品番: {product_number})", level='info')
+                            break
+                        else:
+                            excluded_reasons.update(level_excluded)
+                    
+                    # 候補が見つからない場合、制約違反の程度で優先順位付けを試行
+                    if not replacement_candidates:
+                        scored_candidates = []
+                        
+                        for insp in available_inspectors:
+                            if insp['コード'] not in current_codes:
+                                code = insp['コード']
+                                insp_name = insp['氏名']
+                                
+                                score = 0
+                                violations = []
+                                
+                                # 各制約違反にペナルティを付与
+                                if is_same_day_cleaning_lot and code in already_assigned_to_this_product:
+                                    score += 100  # 高ペナルティ
+                                    violations.append("品番単位制約")
+                                
+                                max_hours = inspector_max_hours.get(code, 8.0)
+                                daily_hours = self.inspector_daily_assignments.get(code, {}).get(current_date, 0.0)
+                                excess_work_hours = max(0, (daily_hours + divided_time) - max_hours)
+                                if excess_work_hours > 0:
+                                    score += excess_work_hours * 10
+                                    violations.append(f"勤務時間超過{excess_work_hours:.1f}h")
+                                
+                                current_product_hours = self.inspector_product_hours.get(code, {}).get(product_number, 0.0)
+                                excess_product_hours = max(0, (current_product_hours + divided_time) - PRODUCT_LIMIT_HARD_THRESHOLD)
+                                if excess_product_hours > 0:
+                                    score += excess_product_hours * 5
+                                    violations.append(f"同一品番超過{excess_product_hours:.1f}h")
+                                
+                                scored_candidates.append((score, insp, violations))
+                        
+                        # スコアが低い順（違反が少ない順）にソート
+                        scored_candidates.sort(key=lambda x: x[0])
+                        
+                        # 最も違反が少ない候補を選択（許容可能な範囲内）
+                        if scored_candidates:
+                            best_score = scored_candidates[0][0]
+                            # 当日洗浄上がり品の場合は閾値を緩和（100まで許容）
+                            threshold = 100 if is_same_day_cleaning_lot else 50
+                            if best_score < threshold:
+                                best_candidate = scored_candidates[0]
+                                self.log_message(
+                                    f"⚠️ 制約を一部緩和して割り当て: '{best_candidate[1]['氏名']}' "
+                                    f"(違反: {', '.join(best_candidate[2])}, 品番: {product_number}, スコア: {best_score:.1f})", 
+                                    level='warning'
+                                )
+                                replacement_candidates = [(0, best_candidate[1])]
+                                selected_relaxation_level = 'scored_relaxation'
                     
                     if not replacement_candidates:
-                        # 代替検査員が見つからない理由を詳細にログ出力
+                        # 代替検査員が見つからない理由を詳細にログ出力（統計情報を追加）
+                        total_candidates = len(available_inspectors)
+                        excluded_by_reason = {}
+                        for name, reason in excluded_reasons.items():
+                            reason_type = reason.split(':')[0] if ':' in reason else reason.split('(')[0].strip()
+                            if reason_type not in excluded_by_reason:
+                                excluded_by_reason[reason_type] = 0
+                            excluded_by_reason[reason_type] += 1
+                        
                         self.log_message(f"⚠️ 代替検査員が見つかりません (品番: {product_number}, ロットインデックス: {index})", level='warning')
+                        self.log_message(f"   候補検査員総数: {total_candidates}人, 除外された検査員: {len(excluded_reasons)}人", level='warning')
+                        if excluded_by_reason:
+                            self.log_message(f"   除外理由別統計: {excluded_by_reason}", level='warning')
                         if excluded_reasons:
-                            self.log_message(f"   除外された検査員: {len(excluded_reasons)}人", level='warning')
-                            for name, reason in list(excluded_reasons.items())[:5]:  # 最大5人まで表示
+                            for name, reason in list(excluded_reasons.items())[:5]:
                                 self.log_message(f"     - {name}: {reason}", level='warning')
                             if len(excluded_reasons) > 5:
                                 self.log_message(f"     ... 他{len(excluded_reasons) - 5}人", level='warning')
@@ -7182,6 +7481,14 @@ class InspectorAssignmentManager:
                         if self.inspector_product_hours[new_code][product_number] > PRODUCT_LIMIT_HARD_THRESHOLD:
                             self.relaxed_product_limit_assignments.add((new_code, product_number))
                         
+                        # 【追加】制約緩和レベルが'scored_relaxation'の場合は、relaxed_product_limit_assignmentsに追加
+                        if selected_relaxation_level == 'scored_relaxation':
+                            # 同一品番4時間超過または勤務時間超過の場合はrelaxed_product_limit_assignmentsに追加
+                            current_product_hours_after = self.inspector_product_hours[new_code][product_number]
+                            if current_product_hours_after > PRODUCT_LIMIT_HARD_THRESHOLD:
+                                self.relaxed_product_limit_assignments.add((new_code, product_number))
+                                self.log_message(f"制約緩和割り当てをrelaxed_product_limit_assignmentsに追加: {new_code}, {product_number} (同一品番累計: {current_product_hours_after:.1f}h)", level='info')
+                        
                         # 当日洗浄上がり品のロットの場合、same_day_cleaning_inspectorsを更新（品番単位）
                         if is_same_day_cleaning_lot:
                             # 元の検査員がこの品番に割り当てられていた場合、削除
@@ -7240,36 +7547,145 @@ class InspectorAssignmentManager:
                     if is_same_day_cleaning_lot:
                         already_assigned_to_this_product = self.same_day_cleaning_inspectors.get(product_number, set())
                     
-                    for insp in available_inspectors:
-                        if insp['コード'] not in current_codes:
-                            code = insp['コード']
-                            insp_name = insp['氏名']
-                            
-                            # 当日洗浄上がり品の場合、既にこの品番に割り当てられた検査員を除外（品番単位の制約）
-                            if is_same_day_cleaning_lot and code in already_assigned_to_this_product:
-                                excluded_reasons[insp_name] = f"既にこの品番に割り当て済み（品番単位の制約）"
-                                continue
-                            
-                            max_hours = inspector_max_hours.get(code, 8.0)
-                            # 勤務時間チェック
-                            if not self.check_work_hours_capacity(code, inspection_time, max_hours, current_date):
+                    # 【改善】段階的な制約緩和レベルを定義
+                    relaxation_levels = [
+                        {
+                            'name': 'strict',
+                            'same_day_cleaning_product_constraint': True,
+                            'work_hours_buffer': 0.0,
+                            'product_limit': PRODUCT_LIMIT_HARD_THRESHOLD,
+                        },
+                        {
+                            'name': 'relaxed_product_limit',
+                            'same_day_cleaning_product_constraint': True,
+                            'work_hours_buffer': 0.0,
+                            'product_limit': PRODUCT_LIMIT_FINAL_TOLERANCE,
+                        },
+                        {
+                            'name': 'relaxed_work_hours',
+                            'same_day_cleaning_product_constraint': True,
+                            'work_hours_buffer': 0.5,
+                            'product_limit': PRODUCT_LIMIT_FINAL_TOLERANCE,
+                        },
+                        {
+                            'name': 'relaxed_same_day_constraint',
+                            'same_day_cleaning_product_constraint': False,
+                            'work_hours_buffer': 0.5,
+                            'product_limit': PRODUCT_LIMIT_FINAL_TOLERANCE,
+                        },
+                    ]
+                    
+                    # 各緩和レベルで候補を検索
+                    selected_relaxation_level = None
+                    for level in relaxation_levels:
+                        level_candidates = []
+                        level_excluded = {}
+                        
+                        for insp in available_inspectors:
+                            if insp['コード'] not in current_codes:
+                                code = insp['コード']
+                                insp_name = insp['氏名']
+                                
+                                # 当日洗浄上がり品の品番単位制約チェック（緩和レベルに応じて）
+                                if (level['same_day_cleaning_product_constraint'] and 
+                                    is_same_day_cleaning_lot and 
+                                    code in already_assigned_to_this_product):
+                                    level_excluded[insp_name] = f"既にこの品番に割り当て済み（品番単位の制約）"
+                                    continue
+                                
+                                max_hours = inspector_max_hours.get(code, 8.0)
                                 daily_hours = self.inspector_daily_assignments.get(code, {}).get(current_date, 0.0)
-                                excluded_reasons[insp_name] = f"勤務時間超過 ({daily_hours:.1f}h + {inspection_time:.1f}h > {max_hours:.1f}h)"
-                                continue
-                            # 改善ポイント: 最適化フェーズでの4時間上限チェック（厳格）
-                            current_product_hours = self.inspector_product_hours.get(code, {}).get(product_number, 0.0)
-                            if current_product_hours + inspection_time > PRODUCT_LIMIT_HARD_THRESHOLD:
-                                excluded_reasons[insp_name] = f"同一品番4時間超過 ({current_product_hours:.1f}h + {inspection_time:.1f}h = {current_product_hours + inspection_time:.1f}h > {PRODUCT_LIMIT_HARD_THRESHOLD:.1f}h)"
-                                continue
-                            total_hours = self.inspector_work_hours.get(code, 0.0)
-                            replacement_candidates.append((total_hours, insp))
+                                
+                                # 勤務時間チェック（緩和レベルに応じて）
+                                if daily_hours + inspection_time > max_hours - level['work_hours_buffer']:
+                                    level_excluded[insp_name] = f"勤務時間超過 ({daily_hours:.1f}h + {inspection_time:.1f}h > {max_hours:.1f}h - {level['work_hours_buffer']:.1f}h緩和)"
+                                    continue
+                                
+                                # 同一品番4時間上限チェック（緩和レベルに応じて）
+                                current_product_hours = self.inspector_product_hours.get(code, {}).get(product_number, 0.0)
+                                if current_product_hours + inspection_time > level['product_limit']:
+                                    level_excluded[insp_name] = f"同一品番超過 ({current_product_hours:.1f}h + {inspection_time:.1f}h > {level['product_limit']:.1f}h)"
+                                    continue
+                                
+                                total_hours = self.inspector_work_hours.get(code, 0.0)
+                                level_candidates.append((total_hours, insp))
+                        
+                        if level_candidates:
+                            replacement_candidates = level_candidates
+                            excluded_reasons = level_excluded
+                            selected_relaxation_level = level['name']
+                            if level['name'] != 'strict':
+                                self.log_message(f"制約緩和レベル '{level['name']}' で {len(level_candidates)}人の候補が見つかりました (品番: {product_number}, 置き換え処理)", level='info')
+                            break
+                        else:
+                            excluded_reasons.update(level_excluded)
+                    
+                    # 候補が見つからない場合、制約違反の程度で優先順位付けを試行
+                    if not replacement_candidates:
+                        scored_candidates = []
+                        
+                        for insp in available_inspectors:
+                            if insp['コード'] not in current_codes:
+                                code = insp['コード']
+                                insp_name = insp['氏名']
+                                
+                                score = 0
+                                violations = []
+                                
+                                # 各制約違反にペナルティを付与
+                                if is_same_day_cleaning_lot and code in already_assigned_to_this_product:
+                                    score += 100  # 高ペナルティ
+                                    violations.append("品番単位制約")
+                                
+                                max_hours = inspector_max_hours.get(code, 8.0)
+                                daily_hours = self.inspector_daily_assignments.get(code, {}).get(current_date, 0.0)
+                                excess_work_hours = max(0, (daily_hours + inspection_time) - max_hours)
+                                if excess_work_hours > 0:
+                                    score += excess_work_hours * 10
+                                    violations.append(f"勤務時間超過{excess_work_hours:.1f}h")
+                                
+                                current_product_hours = self.inspector_product_hours.get(code, {}).get(product_number, 0.0)
+                                excess_product_hours = max(0, (current_product_hours + inspection_time) - PRODUCT_LIMIT_HARD_THRESHOLD)
+                                if excess_product_hours > 0:
+                                    score += excess_product_hours * 5
+                                    violations.append(f"同一品番超過{excess_product_hours:.1f}h")
+                                
+                                scored_candidates.append((score, insp, violations))
+                        
+                        # スコアが低い順（違反が少ない順）にソート
+                        scored_candidates.sort(key=lambda x: x[0])
+                        
+                        # 最も違反が少ない候補を選択（許容可能な範囲内）
+                        if scored_candidates:
+                            best_score = scored_candidates[0][0]
+                            # 当日洗浄上がり品の場合は閾値を緩和（100まで許容）
+                            threshold = 100 if is_same_day_cleaning_lot else 50
+                            if best_score < threshold:
+                                best_candidate = scored_candidates[0]
+                                self.log_message(
+                                    f"⚠️ 制約を一部緩和して割り当て: '{best_candidate[1]['氏名']}' "
+                                    f"(違反: {', '.join(best_candidate[2])}, 品番: {product_number}, スコア: {best_score:.1f}, 置き換え処理)", 
+                                    level='warning'
+                                )
+                                replacement_candidates = [(0, best_candidate[1])]
+                                selected_relaxation_level = 'scored_relaxation'
                     
                     if not replacement_candidates:
-                        # 代替検査員が見つからない理由を詳細にログ出力
+                        # 代替検査員が見つからない理由を詳細にログ出力（統計情報を追加）
+                        total_candidates = len(available_inspectors)
+                        excluded_by_reason = {}
+                        for name, reason in excluded_reasons.items():
+                            reason_type = reason.split(':')[0] if ':' in reason else reason.split('(')[0].strip()
+                            if reason_type not in excluded_by_reason:
+                                excluded_by_reason[reason_type] = 0
+                            excluded_by_reason[reason_type] += 1
+                        
                         self.log_message(f"⚠️ 代替検査員が見つかりません (品番: {product_number}, ロットインデックス: {index}, 置き換え処理、検査時間3時間未満のため増員なし)", level='warning')
+                        self.log_message(f"   候補検査員総数: {total_candidates}人, 除外された検査員: {len(excluded_reasons)}人", level='warning')
+                        if excluded_by_reason:
+                            self.log_message(f"   除外理由別統計: {excluded_by_reason}", level='warning')
                         if excluded_reasons:
-                            self.log_message(f"   除外された検査員: {len(excluded_reasons)}人", level='warning')
-                            for name, reason in list(excluded_reasons.items())[:5]:  # 最大5人まで表示
+                            for name, reason in list(excluded_reasons.items())[:5]:
                                 self.log_message(f"     - {name}: {reason}", level='warning')
                             if len(excluded_reasons) > 5:
                                 self.log_message(f"     ... 他{len(excluded_reasons) - 5}人", level='warning')
@@ -7325,6 +7741,14 @@ class InspectorAssignmentManager:
                         self.inspector_product_hours[new_code][product_number] = (
                             self.inspector_product_hours[new_code].get(product_number, 0.0) + inspection_time
                         )
+                        
+                        # 【追加】制約緩和レベルが'scored_relaxation'の場合は、relaxed_product_limit_assignmentsに追加
+                        if selected_relaxation_level == 'scored_relaxation':
+                            # 同一品番4時間超過の場合はrelaxed_product_limit_assignmentsに追加
+                            current_product_hours_after = self.inspector_product_hours[new_code][product_number]
+                            if current_product_hours_after > PRODUCT_LIMIT_HARD_THRESHOLD:
+                                self.relaxed_product_limit_assignments.add((new_code, product_number))
+                                self.log_message(f"制約緩和割り当てをrelaxed_product_limit_assignmentsに追加: {new_code}, {product_number} (同一品番累計: {current_product_hours_after:.1f}h, 置き換え処理)", level='info')
                         
                         # 当日洗浄上がり品のロットの場合、same_day_cleaning_inspectorsを更新（品番単位）
                         if is_same_day_cleaning_lot:
