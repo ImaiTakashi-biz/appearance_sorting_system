@@ -116,10 +116,24 @@ class InspectorAssignmentManager:
         # 【追加】固定検査員情報を保持（品番ごとの固定検査員リスト）
         # 形式: {品番: [検査員名1, 検査員名2, ...]}
         self.fixed_inspectors_by_product = {}
+        # 【高速化】検査員マスタのインデックス（O(1)アクセス用）
+        # 形式: {氏名: Series行データ} または {コード: Series行データ}
+        self.inspector_name_to_row = {}  # 氏名→行データのマッピング
+        self.inspector_code_to_row = {}  # コード→行データのマッピング
+        self.inspector_id_to_row = {}  # ID→行データのマッピング
+        self._inspector_master_df_hash = None  # マスタのハッシュ（変更検知用）
+        # 【高速化】工程マスタのキャッシュ
+        self._process_master_cache = None
+        self._process_master_cache_path = None
+        self._process_master_cache_mtime = None
+        # 【高速化】ログ出力のバッチ化（オプション）
+        self.log_batch_enabled = False  # デフォルトは無効（既存動作を維持）
+        self.log_buffer = []  # ログをバッファリング
+        self.log_batch_size = 10  # バッチサイズ
     
     def log_message(self, message, debug=False, level='info'):
         """
-        ログメッセージを出力
+        ログメッセージを出力（バッチ化対応・高速化）
         
         Args:
             message: ログメッセージ
@@ -128,14 +142,192 @@ class InspectorAssignmentManager:
         """
         if debug and not self.debug_mode:
             return
-        if self.log_callback:
-            self.log_callback(message)
-        if level == 'warning':
-            logger.warning(message)
-        elif level == 'error':
-            logger.error(message)
+        
+        # バッチ化が有効な場合はバッファに追加
+        if self.log_batch_enabled:
+            self.log_buffer.append((message, level))
+            # バッチサイズに達したらまとめて出力
+            if len(self.log_buffer) >= self.log_batch_size:
+                self._flush_log_buffer()
         else:
-            logger.info(message)
+            # 従来通り即座に出力
+            if self.log_callback:
+                self.log_callback(message)
+            if level == 'warning':
+                logger.warning(message)
+            elif level == 'error':
+                logger.error(message)
+            else:
+                logger.info(message)
+    
+    def _flush_log_buffer(self):
+        """ログバッファをフラッシュ（まとめて出力）"""
+        if not self.log_buffer:
+            return
+        
+        # バッファ内のログをまとめて出力
+        for message, level in self.log_buffer:
+            if self.log_callback:
+                self.log_callback(message)
+            if level == 'warning':
+                logger.warning(message)
+            elif level == 'error':
+                logger.error(message)
+            else:
+                logger.info(message)
+        
+        # バッファをクリア
+        self.log_buffer.clear()
+    
+    def enable_log_batching(self, batch_size=10):
+        """
+        ログ出力のバッチ化を有効化（高速化オプション）
+        
+        Args:
+            batch_size: バッチサイズ（デフォルト: 10）
+        """
+        # 既存のバッファをフラッシュ
+        if self.log_buffer:
+            self._flush_log_buffer()
+        self.log_batch_enabled = True
+        self.log_batch_size = batch_size
+    
+    def disable_log_batching(self):
+        """ログ出力のバッチ化を無効化（従来の動作に戻す）"""
+        # 既存のバッファをフラッシュ
+        if self.log_buffer:
+            self._flush_log_buffer()
+        self.log_batch_enabled = False
+    
+    def _build_inspector_index(self, inspector_master_df):
+        """
+        検査員マスタのインデックスを作成（高速化：O(1)アクセス用）
+        
+        Args:
+            inspector_master_df: 検査員マスタのDataFrame
+        """
+        import hashlib
+        # マスタのハッシュを計算（変更検知用）
+        try:
+            df_hash = hashlib.md5(pd.util.hash_pandas_object(inspector_master_df).values).hexdigest()
+            if df_hash == self._inspector_master_df_hash:
+                # 変更がない場合は再構築をスキップ
+                return
+            self._inspector_master_df_hash = df_hash
+        except Exception:
+            pass  # ハッシュ計算に失敗した場合は再構築
+        
+        # インデックスをクリア
+        self.inspector_name_to_row = {}
+        self.inspector_code_to_row = {}
+        self.inspector_id_to_row = {}
+        
+        # インデックスを構築
+        for idx, row in inspector_master_df.iterrows():
+            # 氏名→行データのマッピング
+            name = row.get('#氏名', '')
+            if pd.notna(name) and str(name).strip():
+                name_key = str(name).strip()
+                self.inspector_name_to_row[name_key] = row
+            
+            # コード→行データのマッピング
+            code = row.get('#コード', '')
+            if pd.notna(code) and str(code).strip():
+                code_key = str(code).strip()
+                self.inspector_code_to_row[code_key] = row
+            
+            # ID→行データのマッピング
+            inspector_id = row.get('#ID', '')
+            if pd.notna(inspector_id) and str(inspector_id).strip():
+                id_key = str(inspector_id).strip()
+                self.inspector_id_to_row[id_key] = row
+    
+    def _get_inspector_by_name(self, inspector_name, inspector_master_df):
+        """
+        検査員名から検査員情報を取得（高速化：O(1)アクセス）
+        
+        Args:
+            inspector_name: 検査員名
+            inspector_master_df: 検査員マスタのDataFrame（フォールバック用）
+        
+        Returns:
+            DataFrame: 検査員情報（見つからない場合は空のDataFrame）
+        """
+        if not inspector_name or pd.isna(inspector_name):
+            return pd.DataFrame()
+        
+        name_key = str(inspector_name).strip()
+        # 括弧内の情報を除去
+        if '(' in name_key:
+            name_key = name_key.split('(')[0].strip()
+        
+        # インデックスから取得
+        inspector_row = self.inspector_name_to_row.get(name_key)
+        if inspector_row is not None:
+            return pd.DataFrame([inspector_row])
+        
+        # フォールバック：従来の方法（互換性のため）
+        inspector_info = inspector_master_df[inspector_master_df['#氏名'] == name_key]
+        if not inspector_info.empty:
+            # 見つかった場合はインデックスに追加
+            self.inspector_name_to_row[name_key] = inspector_info.iloc[0]
+        return inspector_info
+    
+    def _get_inspector_by_code(self, inspector_code, inspector_master_df):
+        """
+        検査員コードから検査員情報を取得（高速化：O(1)アクセス）
+        
+        Args:
+            inspector_code: 検査員コード
+            inspector_master_df: 検査員マスタのDataFrame（フォールバック用）
+        
+        Returns:
+            DataFrame: 検査員情報（見つからない場合は空のDataFrame）
+        """
+        if not inspector_code or pd.isna(inspector_code):
+            return pd.DataFrame()
+        
+        code_key = str(inspector_code).strip()
+        
+        # インデックスから取得
+        inspector_row = self.inspector_code_to_row.get(code_key)
+        if inspector_row is not None:
+            return pd.DataFrame([inspector_row])
+        
+        # フォールバック：従来の方法（互換性のため）
+        inspector_info = inspector_master_df[inspector_master_df['#コード'] == code_key]
+        if not inspector_info.empty:
+            # 見つかった場合はインデックスに追加
+            self.inspector_code_to_row[code_key] = inspector_info.iloc[0]
+        return inspector_info
+    
+    def _get_inspector_by_id(self, inspector_id, inspector_master_df):
+        """
+        検査員IDから検査員情報を取得（高速化：O(1)アクセス）
+        
+        Args:
+            inspector_id: 検査員ID
+            inspector_master_df: 検査員マスタのDataFrame（フォールバック用）
+        
+        Returns:
+            DataFrame: 検査員情報（見つからない場合は空のDataFrame）
+        """
+        if not inspector_id or pd.isna(inspector_id):
+            return pd.DataFrame()
+        
+        id_key = str(inspector_id).strip()
+        
+        # インデックスから取得
+        inspector_row = self.inspector_id_to_row.get(id_key)
+        if inspector_row is not None:
+            return pd.DataFrame([inspector_row])
+        
+        # フォールバック：従来の方法（互換性のため）
+        inspector_info = inspector_master_df[inspector_master_df['#ID'] == id_key]
+        if not inspector_info.empty:
+            # 見つかった場合はインデックスに追加
+            self.inspector_id_to_row[id_key] = inspector_info.iloc[0]
+        return inspector_info
 
     def _normalize_shipping_date(self, shipping_date):
         """
@@ -563,6 +755,9 @@ class InspectorAssignmentManager:
             if skill_master_df is None or skill_master_df.empty:
                 self.log_message("スキルマスタが読み込まれていません")
                 return inspector_df
+            
+            # 【高速化】検査員マスタのインデックスを構築
+            self._build_inspector_index(inspector_master_df)
             
             # 出荷予定日を日付型に変換する関数（当日洗浄品は文字列として保持）
             def convert_shipping_date(val):
@@ -1773,10 +1968,18 @@ class InspectorAssignmentManager:
             
             # ソートキー列を削除
             result_df = result_df.drop(columns=['_shipping_sort_key', '_instruction_sort_key'], errors='ignore')
+            
+            # 【高速化】ログバッファをフラッシュ
+            if self.log_batch_enabled:
+                self._flush_log_buffer()
                 
             return result_df
             
         except Exception as e:
+            # 【高速化】ログバッファをフラッシュ（エラー時も）
+            if self.log_batch_enabled:
+                self._flush_log_buffer()
+            
             error_msg = f"検査員割り当て中にエラーが発生しました: {str(e)}"
             self.log_message(error_msg)
             logger.error(error_msg, exc_info=True)  # スタックトレースも出力
@@ -2163,7 +2366,7 @@ class InspectorAssignmentManager:
                     
                     # 検査員マスタから固定検査員の情報を取得して追加
                     for missing_name in missing_fixed_inspectors:
-                        inspector_info = inspector_master_df[inspector_master_df['#氏名'] == missing_name]
+                        inspector_info = self._get_inspector_by_name(missing_name, inspector_master_df)
                         if not inspector_info.empty:
                             inspector_data = inspector_info.iloc[0]
                             inspector_code = inspector_data['#ID']
@@ -2294,7 +2497,7 @@ class InspectorAssignmentManager:
     
     def load_process_master(self, process_master_path):
         """
-        工程マスタ.xlsxを読み込む
+        工程マスタ.xlsxを読み込む（キャッシュ対応・高速化）
         
         Args:
             process_master_path: 工程マスタファイルのパス
@@ -2307,8 +2510,30 @@ class InspectorAssignmentManager:
                 self.log_message(f"工程マスタファイルが見つかりません: {process_master_path}")
                 return None
             
+            # キャッシュチェック（ファイル更新時刻も確認）
+            import os
+            try:
+                if (self._process_master_cache is not None and 
+                    self._process_master_cache_path == process_master_path):
+                    current_mtime = os.path.getmtime(process_master_path)
+                    if current_mtime == self._process_master_cache_mtime:
+                        logger.debug("工程マスタをキャッシュから読み込みました（ファイル未変更）")
+                        return self._process_master_cache
+            except (OSError, AttributeError):
+                pass  # キャッシュチェックでエラーが発生した場合は通常読み込みに進む
+            
+            # 通常読み込み
             df = pd.read_excel(process_master_path, engine='openpyxl')
             self.log_message(f"工程マスタを読み込みました: {len(df)}件")
+            
+            # キャッシュに保存
+            try:
+                self._process_master_cache = df
+                self._process_master_cache_path = process_master_path
+                self._process_master_cache_mtime = os.path.getmtime(process_master_path)
+            except (OSError, AttributeError):
+                pass  # キャッシュ保存でエラーが発生しても続行
+            
             return df
         except Exception as e:
             self.log_message(f"工程マスタの読み込みに失敗しました: {str(e)}")
@@ -3753,6 +3978,9 @@ class InspectorAssignmentManager:
     def optimize_assignments(self, result_df, inspector_master_df, skill_master_df, show_skill_values=False, process_master_df=None, inspection_target_keywords=None):
         """全体最適化：勤務時間超過の是正と偏りの調整"""
         try:
+            # 【高速化】検査員マスタのインデックスを構築
+            self._build_inspector_index(inspector_master_df)
+            
             self.log_message("全体最適化フェーズ0: result_dfから実際の割り当てを再計算")
             
             # 出荷予定日を日付型に変換する関数（当日洗浄品は文字列として保持）
@@ -3900,7 +4128,7 @@ class InspectorAssignmentManager:
                                 continue
                             
                             # 検査員コードを取得
-                            inspector_info = inspector_master_df[inspector_master_df['#氏名'] == inspector_name]
+                            inspector_info = self._get_inspector_by_name(inspector_name, inspector_master_df)
                             if not inspector_info.empty:
                                 inspector_code = inspector_info.iloc[0]['#ID']
                                 
@@ -4050,7 +4278,7 @@ class InspectorAssignmentManager:
                                     continue
                                 
                                 # 検査員コードを取得
-                                inspector_info = inspector_master_df[inspector_master_df['#氏名'] == inspector_name]
+                                inspector_info = self._get_inspector_by_name(inspector_name, inspector_master_df)
                                 if not inspector_info.empty:
                                     inspector_code = inspector_info.iloc[0]['#ID']
                                     
@@ -4352,7 +4580,7 @@ class InspectorAssignmentManager:
                                 if not inspector_name:
                                     continue
                                 
-                                inspector_info = inspector_master_df[inspector_master_df['#氏名'] == inspector_name]
+                                inspector_info = self._get_inspector_by_name(inspector_name, inspector_master_df)
                                 if not inspector_info.empty:
                                     inspector_code = inspector_info.iloc[0]['#ID']
                                     
@@ -4401,7 +4629,7 @@ class InspectorAssignmentManager:
                             if not inspector_name:
                                 continue
                             
-                            inspector_info = inspector_master_df[inspector_master_df['#氏名'] == inspector_name]
+                            inspector_info = self._get_inspector_by_name(inspector_name, inspector_master_df)
                             if not inspector_info.empty:
                                 inspector_code = inspector_info.iloc[0]['#ID']
                                 
@@ -4442,7 +4670,7 @@ class InspectorAssignmentManager:
                             if not inspector_name:
                                 continue
                             
-                            inspector_info = inspector_master_df[inspector_master_df['#氏名'] == inspector_name]
+                            inspector_info = self._get_inspector_by_name(inspector_name, inspector_master_df)
                             if not inspector_info.empty:
                                 inspector_code = inspector_info.iloc[0]['#ID']
                                 daily_hours = self.inspector_daily_assignments.get(inspector_code, {}).get(current_date, 0.0)
@@ -4700,7 +4928,7 @@ class InspectorAssignmentManager:
                                 if not inspector_name:
                                     continue
                                 
-                                inspector_info = inspector_master_df[inspector_master_df['#氏名'] == inspector_name]
+                                inspector_info = self._get_inspector_by_name(inspector_name, inspector_master_df)
                                 if not inspector_info.empty:
                                     inspector_code = inspector_info.iloc[0]['#ID']
                                     
@@ -4869,7 +5097,7 @@ class InspectorAssignmentManager:
                                         if not inspector_name:
                                             continue
                                         
-                                        inspector_info = inspector_master_df[inspector_master_df['#氏名'] == inspector_name]
+                                        inspector_info = self._get_inspector_by_name(inspector_name, inspector_master_df)
                                         if not inspector_info.empty:
                                             lot_inspector_code = inspector_info.iloc[0]['#ID']
                                             if lot_inspector_code == overloaded_code:
@@ -4964,7 +5192,7 @@ class InspectorAssignmentManager:
                                             inspector_name_check = inspector_name_check.split('(')[0].strip()
                                         if not inspector_name_check:
                                             continue
-                                        inspector_info_check = inspector_master_df[inspector_master_df['#氏名'] == inspector_name_check]
+                                        inspector_info_check = self._get_inspector_by_name(inspector_name_check, inspector_master_df)
                                         if not inspector_info_check.empty:
                                             current_codes.append(inspector_info_check.iloc[0]['#ID'])
                                 
@@ -5039,7 +5267,7 @@ class InspectorAssignmentManager:
                                                 inspector_name_check = inspector_name_check.split('(')[0].strip()
                                             if not inspector_name_check:
                                                 continue
-                                            inspector_info_check = inspector_master_df[inspector_master_df['#氏名'] == inspector_name_check]
+                                            inspector_info_check = self._get_inspector_by_name(inspector_name_check, inspector_master_df)
                                             if not inspector_info_check.empty:
                                                 if inspector_info_check.iloc[0]['#ID'] == overloaded_code:
                                                     old_inspector_name = inspector_name_check
@@ -5199,7 +5427,7 @@ class InspectorAssignmentManager:
                         if not inspector_name:
                             continue
                         
-                        inspector_info = inspector_master_df[inspector_master_df['#氏名'] == inspector_name]
+                        inspector_info = self._get_inspector_by_name(inspector_name, inspector_master_df)
                         if not inspector_info.empty:
                             inspector_code = inspector_info.iloc[0]['#ID']
                             
@@ -5235,7 +5463,7 @@ class InspectorAssignmentManager:
                         if not inspector_name:
                             continue
                         
-                        inspector_info = inspector_master_df[inspector_master_df['#氏名'] == inspector_name]
+                        inspector_info = self._get_inspector_by_name(inspector_name, inspector_master_df)
                         if not inspector_info.empty:
                             inspector_code = inspector_info.iloc[0]['#ID']
                             daily_hours = self.inspector_daily_assignments.get(inspector_code, {}).get(current_date, 0.0)
@@ -5360,7 +5588,7 @@ class InspectorAssignmentManager:
                                     if not inspector_name:
                                         continue
                                     
-                                    inspector_info = inspector_master_df[inspector_master_df['#氏名'] == inspector_name]
+                                    inspector_info = self._get_inspector_by_name(inspector_name, inspector_master_df)
                                     if not inspector_info.empty:
                                         inspector_code = inspector_info.iloc[0]['#ID']
                                         
@@ -5466,7 +5694,7 @@ class InspectorAssignmentManager:
                                     if not inspector_name:
                                         continue
                                     
-                                    inspector_info = inspector_master_df[inspector_master_df['#氏名'] == inspector_name]
+                                    inspector_info = self._get_inspector_by_name(inspector_name, inspector_master_df)
                                     if not inspector_info.empty:
                                         inspector_code = inspector_info.iloc[0]['#ID']
                                         
@@ -5573,7 +5801,7 @@ class InspectorAssignmentManager:
                             if not inspector_name:
                                 continue
                             
-                            inspector_info = inspector_master_df[inspector_master_df['#氏名'] == inspector_name]
+                            inspector_info = self._get_inspector_by_name(inspector_name, inspector_master_df)
                             if not inspector_info.empty:
                                 inspector_code = inspector_info.iloc[0]['#ID']
                                 
@@ -5630,7 +5858,7 @@ class InspectorAssignmentManager:
                             if not inspector_name:
                                 continue
                             
-                            inspector_info = inspector_master_df[inspector_master_df['#氏名'] == inspector_name]
+                            inspector_info = self._get_inspector_by_name(inspector_name, inspector_master_df)
                             if not inspector_info.empty:
                                 inspector_code = inspector_info.iloc[0]['#ID']
                                 # 品番単位の制約を更新
@@ -5740,7 +5968,7 @@ class InspectorAssignmentManager:
                                 if not inspector_name:
                                     continue
                                 
-                                inspector_info = inspector_master_df[inspector_master_df['#氏名'] == inspector_name]
+                                inspector_info = self._get_inspector_by_name(inspector_name, inspector_master_df)
                                 if not inspector_info.empty:
                                     inspector_code = inspector_info.iloc[0]['#ID']
                                     
@@ -6225,7 +6453,7 @@ class InspectorAssignmentManager:
                                         if not other_inspector_name:
                                             continue
                                         
-                                        other_inspector_info = inspector_master_df[inspector_master_df['#氏名'] == other_inspector_name]
+                                        other_inspector_info = self._get_inspector_by_name(other_inspector_name, inspector_master_df)
                                         if not other_inspector_info.empty:
                                             other_inspector_code = other_inspector_info.iloc[0]['#ID']
                                             already_assigned_to_this_product.add(other_inspector_code)
@@ -6268,7 +6496,7 @@ class InspectorAssignmentManager:
                                             if not other_inspector_name:
                                                 continue
                                             
-                                            other_inspector_info = inspector_master_df[inspector_master_df['#氏名'] == other_inspector_name]
+                                            other_inspector_info = self._get_inspector_by_name(other_inspector_name, inspector_master_df)
                                             if not other_inspector_info.empty:
                                                 other_inspector_code = other_inspector_info.iloc[0]['#ID']
                                                 already_assigned_to_same_product_name.add(other_inspector_code)
@@ -6416,7 +6644,7 @@ class InspectorAssignmentManager:
                             if not inspector_name:
                                 continue
                             
-                            inspector_info = inspector_master_df[inspector_master_df['#氏名'] == inspector_name]
+                            inspector_info = self._get_inspector_by_name(inspector_name, inspector_master_df)
                             if not inspector_info.empty:
                                 inspector_code = inspector_info.iloc[0]['#ID']
                                 
@@ -6460,7 +6688,7 @@ class InspectorAssignmentManager:
                         if not inspector_name:
                             continue
                         
-                        inspector_info = inspector_master_df[inspector_master_df['#氏名'] == inspector_name]
+                        inspector_info = self._get_inspector_by_name(inspector_name, inspector_master_df)
                         if not inspector_info.empty:
                             inspector_code = inspector_info.iloc[0]['#ID']
                             
@@ -6494,7 +6722,7 @@ class InspectorAssignmentManager:
                         if not inspector_name:
                             continue
                         
-                        inspector_info = inspector_master_df[inspector_master_df['#氏名'] == inspector_name]
+                        inspector_info = self._get_inspector_by_name(inspector_name, inspector_master_df)
                         if not inspector_info.empty:
                             inspector_code = inspector_info.iloc[0]['#ID']
                             daily_hours = self.inspector_daily_assignments.get(inspector_code, {}).get(current_date, 0.0)
@@ -6543,7 +6771,7 @@ class InspectorAssignmentManager:
                             if not inspector_name:
                                 continue
                             
-                            inspector_info = inspector_master_df[inspector_master_df['#氏名'] == inspector_name]
+                            inspector_info = self._get_inspector_by_name(inspector_name, inspector_master_df)
                             if not inspector_info.empty:
                                 inspector_code = inspector_info.iloc[0]['#ID']
                                 assigned_codes_in_lot.add(inspector_code)
@@ -6581,7 +6809,7 @@ class InspectorAssignmentManager:
                                         if not other_inspector_name:
                                             continue
                                         
-                                        other_inspector_info = inspector_master_df[inspector_master_df['#氏名'] == other_inspector_name]
+                                        other_inspector_info = self._get_inspector_by_name(other_inspector_name, inspector_master_df)
                                         if not other_inspector_info.empty:
                                             other_inspector_code = other_inspector_info.iloc[0]['#ID']
                                             if other_inspector_code == code:
@@ -6636,7 +6864,7 @@ class InspectorAssignmentManager:
                                             if not other_inspector_name:
                                                 continue
                                             
-                                            other_inspector_info = inspector_master_df[inspector_master_df['#氏名'] == other_inspector_name]
+                                            other_inspector_info = self._get_inspector_by_name(other_inspector_name, inspector_master_df)
                                             if not other_inspector_info.empty:
                                                 other_inspector_code = other_inspector_info.iloc[0]['#ID']
                                                 if other_inspector_code == code:
@@ -6701,7 +6929,7 @@ class InspectorAssignmentManager:
                                 name = str(val).strip()
                                 if '(' in name:
                                     name = name.split('(')[0].strip()
-                                info = inspector_master_df[inspector_master_df['#氏名'] == name]
+                                info = self._get_inspector_by_name(name, inspector_master_df)
                                 if not info.empty:
                                     assigned_codes.add(info.iloc[0]['#ID'])
                         
@@ -6913,7 +7141,7 @@ class InspectorAssignmentManager:
                                     if not inspector_name:
                                         continue
                                     
-                                    inspector_info = inspector_master_df[inspector_master_df['#氏名'] == inspector_name]
+                                    inspector_info = self._get_inspector_by_name(inspector_name, inspector_master_df)
                                     if not inspector_info.empty:
                                         inspector_code = inspector_info.iloc[0]['#ID']
                                         
@@ -7019,7 +7247,7 @@ class InspectorAssignmentManager:
                                     if not inspector_name:
                                         continue
                                     
-                                    inspector_info = inspector_master_df[inspector_master_df['#氏名'] == inspector_name]
+                                    inspector_info = self._get_inspector_by_name(inspector_name, inspector_master_df)
                                     if not inspector_info.empty:
                                         inspector_code = inspector_info.iloc[0]['#ID']
                                         
@@ -7135,7 +7363,7 @@ class InspectorAssignmentManager:
                             if not inspector_name:
                                 continue
                             
-                            inspector_info = inspector_master_df[inspector_master_df['#氏名'] == inspector_name]
+                            inspector_info = self._get_inspector_by_name(inspector_name, inspector_master_df)
                             if not inspector_info.empty:
                                 inspector_code = inspector_info.iloc[0]['#ID']
                                 
@@ -7300,9 +7528,17 @@ class InspectorAssignmentManager:
             else:
                 self.log_message("未割当ロットはありません")
             self.relaxed_product_limit_assignments.clear()
+            
+            # 【高速化】ログバッファをフラッシュ
+            if self.log_batch_enabled:
+                self._flush_log_buffer()
+            
             return result_df
             
         except Exception as e:
+            # 【高速化】ログバッファをフラッシュ（エラー時も）
+            if self.log_batch_enabled:
+                self._flush_log_buffer()
             error_msg = f"全体最適化中にエラーが発生しました: {str(e)}"
             self.log_message(error_msg)
             logger.error(error_msg, exc_info=True)

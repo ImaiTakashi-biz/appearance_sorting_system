@@ -160,6 +160,7 @@ class ModernDataExtractorUI:
         # マスタデータキャッシュ機能
         self.master_cache = {}
         self.cache_timestamps = {}
+        self.cache_file_mtimes = {}  # ファイル更新時刻を保存（高速化）
         self.cache_ttl = timedelta(minutes=self.MASTER_CACHE_TTL_MINUTES)
         
         # 現在表示中のテーブル
@@ -4284,15 +4285,31 @@ class ModernDataExtractorUI:
             }
     
     def load_product_master_cached(self):
-        """キャッシュ付き製品マスタ読み込み"""
+        """キャッシュ付き製品マスタ読み込み（ファイル更新時刻チェック対応）"""
         cache_key = 'product_master'
         
-        # キャッシュチェック（スレッドセーフな方法で）
+        # ファイルパスを取得
+        file_path = None
+        if self.config and self.config.product_master_path:
+            file_path = self.config.product_master_path
+        if not file_path or not os.path.exists(file_path):
+            # ファイルパスが取得できない場合は通常読み込み
+            return self.load_product_master()
+        
+        # キャッシュチェック（ファイル更新時刻も確認）
         try:
             if cache_key in self.master_cache:
+                # TTLチェック
                 if datetime.now() - self.cache_timestamps[cache_key] < self.cache_ttl:
-                    logger.info("製品マスタをキャッシュから読み込みました")
-                    return self.master_cache[cache_key]
+                    # ファイル更新時刻チェック
+                    try:
+                        current_mtime = os.path.getmtime(file_path)
+                        cached_mtime = self.cache_file_mtimes.get(cache_key, 0)
+                        if current_mtime == cached_mtime:
+                            logger.debug("製品マスタをキャッシュから読み込みました（ファイル未変更）")
+                            return self.master_cache[cache_key]
+                    except (OSError, AttributeError):
+                        pass  # ファイル更新時刻取得に失敗した場合は再読み込み
         except Exception:
             pass  # キャッシュチェックでエラーが発生した場合は通常読み込みに進む
         
@@ -4302,21 +4319,43 @@ class ModernDataExtractorUI:
             try:
                 self.master_cache[cache_key] = df
                 self.cache_timestamps[cache_key] = datetime.now()
+                # ファイル更新時刻を保存
+                try:
+                    self.cache_file_mtimes[cache_key] = os.path.getmtime(file_path)
+                except (OSError, AttributeError):
+                    pass
             except Exception:
                 pass  # キャッシュ保存でエラーが発生しても続行
         
         return df
     
     def load_inspector_master_cached(self):
-        """キャッシュ付き検査員マスタ読み込み"""
+        """キャッシュ付き検査員マスタ読み込み（ファイル更新時刻チェック対応）"""
         cache_key = 'inspector_master'
         
-        # キャッシュチェック（高速化: 簡潔なチェック）
+        # ファイルパスを取得
+        file_path = None
+        if self.config and self.config.inspector_master_path:
+            file_path = self.config.inspector_master_path
+        if not file_path or not os.path.exists(file_path):
+            # ファイルパスが取得できない場合は通常読み込み
+            return self.load_inspector_master()
+        
+        # キャッシュチェック（ファイル更新時刻も確認）
         try:
-            if cache_key in self.master_cache and cache_key in self.cache_timestamps:
+            if cache_key in self.master_cache:
+                # TTLチェック
                 if datetime.now() - self.cache_timestamps[cache_key] < self.cache_ttl:
-                    return self.master_cache[cache_key]
-        except (KeyError, AttributeError):
+                    # ファイル更新時刻チェック
+                    try:
+                        current_mtime = os.path.getmtime(file_path)
+                        cached_mtime = self.cache_file_mtimes.get(cache_key, 0)
+                        if current_mtime == cached_mtime:
+                            logger.debug("検査員マスタをキャッシュから読み込みました（ファイル未変更）")
+                            return self.master_cache[cache_key]
+                    except (OSError, AttributeError):
+                        pass  # ファイル更新時刻取得に失敗した場合は再読み込み
+        except Exception:
             pass  # キャッシュチェックでエラーが発生した場合は通常読み込みに進む
         
         # キャッシュミスの場合は通常読み込み
@@ -4325,21 +4364,43 @@ class ModernDataExtractorUI:
             try:
                 self.master_cache[cache_key] = df
                 self.cache_timestamps[cache_key] = datetime.now()
+                # ファイル更新時刻を保存
+                try:
+                    self.cache_file_mtimes[cache_key] = os.path.getmtime(file_path)
+                except (OSError, AttributeError):
+                    pass
             except Exception:
                 pass  # キャッシュ保存でエラーが発生しても続行
         
         return df
     
     def load_skill_master_cached(self):
-        """キャッシュ付きスキルマスタ読み込み"""
+        """キャッシュ付きスキルマスタ読み込み（ファイル更新時刻チェック対応）"""
         cache_key = 'skill_master'
         
-        # キャッシュチェック（高速化: 簡潔なチェック）
+        # ファイルパスを取得
+        file_path = None
+        if self.config and self.config.skill_master_path:
+            file_path = self.config.skill_master_path
+        if not file_path or not os.path.exists(file_path):
+            # ファイルパスが取得できない場合は通常読み込み
+            return self.load_skill_master()
+        
+        # キャッシュチェック（ファイル更新時刻も確認）
         try:
-            if cache_key in self.master_cache and cache_key in self.cache_timestamps:
+            if cache_key in self.master_cache:
+                # TTLチェック
                 if datetime.now() - self.cache_timestamps[cache_key] < self.cache_ttl:
-                    return self.master_cache[cache_key]
-        except (KeyError, AttributeError):
+                    # ファイル更新時刻チェック
+                    try:
+                        current_mtime = os.path.getmtime(file_path)
+                        cached_mtime = self.cache_file_mtimes.get(cache_key, 0)
+                        if current_mtime == cached_mtime:
+                            logger.debug("スキルマスタをキャッシュから読み込みました（ファイル未変更）")
+                            return self.master_cache[cache_key]
+                    except (OSError, AttributeError):
+                        pass  # ファイル更新時刻取得に失敗した場合は再読み込み
+        except Exception:
             pass  # キャッシュチェックでエラーが発生した場合は通常読み込みに進む
         
         # キャッシュミスの場合は通常読み込み
@@ -4348,21 +4409,43 @@ class ModernDataExtractorUI:
             try:
                 self.master_cache[cache_key] = df
                 self.cache_timestamps[cache_key] = datetime.now()
+                # ファイル更新時刻を保存
+                try:
+                    self.cache_file_mtimes[cache_key] = os.path.getmtime(file_path)
+                except (OSError, AttributeError):
+                    pass
             except Exception:
                 pass  # キャッシュ保存でエラーが発生しても続行
         
         return df
     
     def load_inspection_target_csv_cached(self):
-        """キャッシュ付き検査対象CSV読み込み"""
+        """キャッシュ付き検査対象CSV読み込み（ファイル更新時刻チェック対応）"""
         cache_key = 'inspection_target_csv'
         
-        # キャッシュチェック（高速化: 簡潔なチェック）
+        # ファイルパスを取得
+        file_path = None
+        if self.config and self.config.inspection_target_csv_path:
+            file_path = self.config.inspection_target_csv_path
+        if not file_path or not os.path.exists(file_path):
+            # ファイルパスが取得できない場合は通常読み込み
+            return self.load_inspection_target_csv()
+        
+        # キャッシュチェック（ファイル更新時刻も確認）
         try:
-            if cache_key in self.master_cache and cache_key in self.cache_timestamps:
+            if cache_key in self.master_cache:
+                # TTLチェック
                 if datetime.now() - self.cache_timestamps[cache_key] < self.cache_ttl:
-                    return self.master_cache[cache_key]
-        except (KeyError, AttributeError):
+                    # ファイル更新時刻チェック
+                    try:
+                        current_mtime = os.path.getmtime(file_path)
+                        cached_mtime = self.cache_file_mtimes.get(cache_key, 0)
+                        if current_mtime == cached_mtime:
+                            logger.debug("検査対象CSVをキャッシュから読み込みました（ファイル未変更）")
+                            return self.master_cache[cache_key]
+                    except (OSError, AttributeError):
+                        pass  # ファイル更新時刻取得に失敗した場合は再読み込み
+        except Exception:
             pass  # キャッシュチェックでエラーが発生した場合は通常読み込みに進む
         
         # キャッシュミスの場合は通常読み込み
@@ -4371,6 +4454,11 @@ class ModernDataExtractorUI:
             try:
                 self.master_cache[cache_key] = keywords
                 self.cache_timestamps[cache_key] = datetime.now()
+                # ファイル更新時刻を保存
+                try:
+                    self.cache_file_mtimes[cache_key] = os.path.getmtime(file_path)
+                except (OSError, AttributeError):
+                    pass
             except Exception:
                 pass  # キャッシュ保存でエラーが発生しても続行
         
