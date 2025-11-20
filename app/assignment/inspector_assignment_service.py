@@ -2992,12 +2992,6 @@ class InspectorAssignmentManager:
                 self.inspector_last_assignment[code] = current_time
                 self.inspector_work_hours[code] += divided_time
                 self.inspector_daily_assignments[code][current_date] += divided_time
-                # 品番ごとの割当回数を更新
-                if code not in self.inspector_product_assignment_counts:
-                    self.inspector_product_assignment_counts[code] = {}
-                self.inspector_product_assignment_counts[code][product_number] = (
-                    self.inspector_product_assignment_counts[code].get(product_number, 0) + 1
-                )
                 
                 # ログ出力
                 count = self.inspector_assignment_count.get(code, 0)
@@ -3005,9 +2999,6 @@ class InspectorAssignmentManager:
                 self.log_message(f"検査員 '{insp['氏名']}' ({skill_info}, 割り当て回数: {count}) を選択")
                 insp.pop('__fairness_priority', None)
                 insp.pop('__candidate_order', None)
-                insp.pop('__projected_product_hours', None)
-                insp.pop('__current_product_hours', None)
-                insp.pop('__product_assignment_count', None)
             
             return selected_inspectors
             

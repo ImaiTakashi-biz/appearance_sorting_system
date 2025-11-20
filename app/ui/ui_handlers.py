@@ -280,7 +280,7 @@ class ModernDataExtractorUI:
                     return "break"
 
                 base_steps = -int(delta / 120) if abs(delta) >= 120 else (-1 if delta < 0 else 1)
-                scroll_steps = base_steps * 10  # スクロールを速くする
+                scroll_steps = base_steps * 50  # スクロールを速くする
                 target = getattr(self.main_scroll_frame, "_parent_canvas", self.main_scroll_frame)
                 try:
                     target.yview_scroll(scroll_steps, "units")
@@ -546,20 +546,6 @@ class ModernDataExtractorUI:
         )
         title_label.pack(side="left", pady=0)
 
-        self.settings_button = ctk.CTkButton(
-            title_frame,
-            text="設定",
-            command=self.show_settings_dialog,
-            font=ctk.CTkFont(family="Yu Gothic", size=13, weight="bold"),
-            height=40,
-            width=110,
-            fg_color="#10B981",
-            hover_color="#059669",
-            corner_radius=10,
-            border_width=0,
-            text_color="white"
-        )
-        self.settings_button.place(relx=0.99, rely=0.5, anchor="e", x=-20)
         
     
     def create_date_section(self, parent):
