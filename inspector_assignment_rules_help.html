@@ -1,0 +1,479 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>検査員割振りルール - ヘルプ</title>
+<style>
+  :root {
+    --bg-color: #ffffff;
+    --text-color: #111111;
+    --subtext-color: #555555;
+    --card-bg: #f9fbff;
+    --card-border: #dde3f0;
+    --accent: #005bbb;
+    --accent-soft: #e5efff;
+    --divider: #e0e4ee;
+    --pill-bg: #eef3ff;
+    --pill-text: #314b8b;
+    --settings-green: #1fa83a;
+  }
+
+  /* -----------------------------
+      ■ テーマ切替（class変更で適用）
+  ----------------------------- */
+  .theme-blue {
+    --bg-color: #ffffff;
+    --text-color: #111111;
+    --subtext-color: #555555;
+    --card-bg: #f9fbff;
+    --card-border: #dde3f0;
+    --accent: #005bbb;
+    --accent-soft: #e5efff;
+    --divider: #e0e4ee;
+    --pill-bg: #eef3ff;
+    --pill-text: #314b8b;
+  }
+  .theme-mono {
+    --bg-color: #ffffff;
+    --text-color: #111111;
+    --subtext-color: #555555;
+    --card-bg: #f7f7f7;
+    --card-border: #e2e2e2;
+    --accent: #222222;
+    --accent-soft: #efefef;
+    --divider: #dddddd;
+    --pill-bg: #f0f0f0;
+    --pill-text: #333333;
+  }
+  .theme-dark {
+    --bg-color: #111111;
+    --text-color: #f5f5f5;
+    --subtext-color: #bbbbbb;
+    --card-bg: #181818;
+    --card-border: #333333;
+    --accent: #4da3ff;
+    --accent-soft: #1f2937;
+    --divider: #333333;
+    --pill-bg: #222222;
+    --pill-text: #d0d0d0;
+  }
+
+  /* -----------------------------
+      ■ ベース設定
+  ----------------------------- */
+  body {
+    margin: 0;
+    padding: 0;
+    font-family: "Segoe UI", "Yu Gothic", "Hiragino Kaku Gothic ProN", Meiryo, sans-serif;
+    font-weight: 500;
+  }
+  .help {
+    background: var(--bg-color);
+    color: var(--text-color);
+    padding: 22px 18px 28px;
+    font-size: 0.94rem;
+    line-height: 1.8;
+    font-weight: 500;
+  }
+  .help-inner {
+    max-width: 920px;
+    margin: 0 auto;
+  }
+
+  /* -----------------------------
+      ■ ヘッダー
+  ----------------------------- */
+  h1 {
+    font-size: 1.35rem;
+    margin: 0 0 6px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+  }
+  .subtitle {
+    font-size: 0.85rem;
+    color: var(--subtext-color);
+    margin: 0 0 14px;
+  }
+  .top-summary {
+    border-radius: 10px;
+    border: 1px solid var(--card-border);
+    background: var(--accent-soft);
+    padding: 10px 12px;
+    margin-bottom: 18px;
+    font-size: 0.86rem;
+  }
+  .top-summary strong {
+    color: var(--accent);
+  }
+
+  /* -----------------------------
+      ■ セクション見出し
+  ----------------------------- */
+  h2 {
+    font-size: 1.0rem;
+    margin: 22px 0 10px;
+    border-bottom: 1px solid var(--divider);
+    padding-bottom: 4px;
+    font-weight: 600;
+  }
+  .section-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .sec-icon-wrap {
+    width: 26px;
+    height: 26px;
+    border-radius: 50%;
+    background: var(--accent-soft);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.0rem;
+  }
+  .sec-title-main {
+    font-weight: 600;
+  }
+  .sec-title-sub {
+    font-size: 0.8rem;
+    color: var(--subtext-color);
+  }
+
+  /* -----------------------------
+      ■ カード・バッジ
+  ----------------------------- */
+  .card {
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-radius: 10px;
+    padding: 10px 13px;
+    margin-bottom: 10px;
+  }
+
+  .badge-row {
+    margin-bottom: 4px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: var(--pill-bg);
+    color: var(--pill-text);
+    font-size: 0.75rem;
+    font-weight: 500;
+    gap: 4px;
+    white-space: nowrap;
+  }
+  .pill-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--pill-text);
+  }
+  .pill-settings {
+    background: #e5f7ea;
+    color: var(--settings-green);
+  }
+  .pill-settings .pill-dot {
+    background: var(--settings-green);
+  }
+
+  /* -----------------------------
+      ■ リスト・補足
+  ----------------------------- */
+  ul {
+    margin: 4px 0 4px 1.1em;
+    padding: 0;
+  }
+  li {
+    margin: 2px 0;
+  }
+  .note {
+    color: var(--subtext-color);
+    font-size: 0.82rem;
+    margin-top: 3px;
+  }
+  .settings-hint {
+    color: var(--settings-green);
+    font-weight: 600;
+  }
+
+  /* -----------------------------
+      ■ スマホ対応
+  ----------------------------- */
+  @media (max-width: 600px) {
+    .help {
+      padding: 18px 14px 24px;
+      font-size: 0.9rem;
+    }
+  }
+</style>
+</head>
+<body>
+
+<div class="help theme-blue">
+  <div class="help-inner">
+
+    <h1>検査員割振りルール</h1>
+    <p class="subtitle">
+      アプリが検査員を自動で割り振るときの考え方と、主なルールの一覧です。
+    </p>
+
+    <div class="top-summary">
+      <strong>3行で概要</strong><br>
+      ・1日の勤務時間と、品番ごとの作業時間に上限を設けて安全に配分します。<br>
+      ・出荷の近いロットから優先しつつ、スキルと公平性を考えて検査員を選びます。<br>
+      ・「4時間上限」「3時間あたり1名」の基準は、緑の「設定」ボタンから変更できます。
+    </div>
+
+    <!-- -------------------------------------------
+         1. 基本制約
+    ------------------------------------------- -->
+    <h2>
+      <div class="section-header">
+        <div class="sec-icon-wrap">⏱</div>
+        <div>
+          <div class="sec-title-main">1. 基本制約</div>
+          <div class="sec-title-sub">安全な勤務時間と品番ごとの上限を守るためのルール</div>
+        </div>
+      </div>
+    </h2>
+
+    <div class="card">
+      <div class="badge-row">
+        <div class="pill"><span class="pill-dot"></span><span>勤務時間の上限</span></div>
+        <div class="pill pill-settings"><span class="pill-dot"></span><span>一部は設定で変更可</span></div>
+      </div>
+
+      <ul>
+        <li><strong>勤務時間上限：1日8時間</strong>（休憩1hを除く）</li>
+
+        <li>上限チェック時は <strong>3分の余裕</strong> を見て判定します。</li>
+
+        <li>
+          同一品番の作業は <strong>基本4時間まで</strong> とします。<br>
+          <span class="note">
+            ※この「4時間上限」は、アプリ右上の <span class="settings-hint">緑の「設定」ボタン</span> から変更できます。
+          </span>
+        </li>
+
+        <li>当日洗浄上がり品は、最大 <strong>4.95時間</strong> まで緩和される場合があります。</li>
+
+        <li>スキル値 <strong>1〜3</strong> の検査員のみを割当候補とします。</li>
+
+        <li>スキル未登録の品番は、<strong>新規品対応チームのみ</strong>が担当します。</li>
+      </ul>
+    </div>
+
+    <!-- -------------------------------------------
+         2. ロットの優先順位
+    ------------------------------------------- -->
+    <h2>
+      <div class="section-header">
+        <div class="sec-icon-wrap">📦</div>
+        <div>
+          <div class="sec-title-main">2. ロットの優先順位</div>
+          <div class="sec-title-sub">どの仕事から順番に割り当てるか</div>
+        </div>
+      </div>
+    </h2>
+
+    <div class="card">
+      <div class="badge-row">
+        <div class="pill"><span class="pill-dot"></span><span>納期優先</span></div>
+        <div class="pill"><span class="pill-dot"></span><span>固定検査員を尊重</span></div>
+      </div>
+
+      <ul>
+        <li><strong>固定検査員設定あり → 最優先</strong>で処理します。</li>
+        <li>優先度：当日 → 洗浄上がり・洗浄 → 先行 → 翌日 → それ以降</li>
+        <li>候補検査員が少ないロットを優先します。</li>
+        <li>同条件の場合：<strong>日付順 → 品番ID順</strong></li>
+      </ul>
+    </div>
+
+    <!-- -------------------------------------------
+         3. 検査員の選び方
+    ------------------------------------------- -->
+    <h2>
+      <div class="section-header">
+        <div class="sec-icon-wrap">👥</div>
+        <div>
+          <div class="sec-title-main">3. 検査員の選び方</div>
+          <div class="sec-title-sub">誰に任せるかの優先ルール</div>
+        </div>
+      </div>
+    </h2>
+
+    <div class="card">
+      <div class="badge-row">
+        <div class="pill"><span class="pill-dot"></span><span>スキルと公平性</span></div>
+      </div>
+
+      <ul>
+        <li><strong>固定検査員を最優先</strong>します。</li>
+
+        <li>
+          1人を選ぶときの優先順：<br>
+          未使用 → 勤務時間が少ない → スキル高 → 割当回数少 → 最終作業が古い順
+        </li>
+
+        <li>
+          複数人必要な場合：<br>
+          時間に余裕のある検査員 → 品番累計時間が少ない → 公平性スコアが低い順
+        </li>
+      </ul>
+
+      <p class="note">
+        ※公平性スコア：割当回数や総勤務時間から「偏り」を数値化した指標です。
+      </p>
+    </div>
+
+    <!-- -------------------------------------------
+         4. 品番・品名の制約
+    ------------------------------------------- -->
+    <h2>
+      <div class="section-header">
+        <div class="sec-icon-wrap">🔗</div>
+        <div>
+          <div class="sec-title-main">4. 品番・品名の制約</div>
+          <div class="sec-title-sub">同じ品に偏りすぎないためのルール</div>
+        </div>
+      </div>
+    </h2>
+
+    <div class="card">
+      <ul>
+        <li>同一品番の複数ロットは、<strong>同じ検査員にしません</strong>。</li>
+        <li>同一品名で品番が違う場合も、<strong>同じ検査員不可</strong>とします。</li>
+      </ul>
+
+      <p class="note">
+        例：品名「ｷﾞﾔB」の別品番どうしには、同じ検査員を割り当てません。
+      </p>
+    </div>
+
+    <!-- -------------------------------------------
+         5. 必要人数の計算
+    ------------------------------------------- -->
+    <h2>
+      <div class="section-header">
+        <div class="sec-icon-wrap">🧮</div>
+        <div>
+          <div class="sec-title-main">5. 必要人数の計算</div>
+          <div class="sec-title-sub">どのくらいの人数で担当するか</div>
+        </div>
+      </div>
+    </h2>
+
+    <div class="card">
+      <div class="badge-row">
+        <div class="pill"><span class="pill-dot"></span><span>自動計算</span></div>
+        <div class="pill pill-settings"><span class="pill-dot"></span><span>基準の一部は設定で変更可</span></div>
+      </div>
+
+      <ul>
+        <li>
+          検査時間 <strong>&lt; 3時間：1名</strong><br>
+          <span class="note">
+            ※この「3時間あたり1名」の基準は、アプリ右上の
+            <span class="settings-hint">緑の「設定」ボタン</span> から変更できます。
+          </span>
+        </li>
+
+        <li>
+          検査時間 3時間以上：<strong>検査時間 ÷ 3</strong> を切り上げます。<br>
+          （ただし最小2名・最大5名）
+        </li>
+
+        <li>同一品番の複数ロットがある場合は、人数をできるだけ<strong>均等に分散</strong>します。</li>
+      </ul>
+    </div>
+
+    <!-- -------------------------------------------
+         6. 人数不足時の再分配
+    ------------------------------------------- -->
+    <h2>
+      <div class="section-header">
+        <div class="sec-icon-wrap">♻️</div>
+        <div>
+          <div class="sec-title-main">6. 人数不足時の再分配</div>
+          <div class="sec-title-sub">足りないときに自動で見直す仕組み</div>
+        </div>
+      </div>
+    </h2>
+
+    <div class="card">
+      <ul>
+        <li>計算上の必要人数に足りない場合は、割り当てを再調整します。</li>
+        <li>品番・品名の制約を守りながら、追加の検査員を探します。</li>
+        <li>必要に応じて、新規品対応チームのメンバーも候補とします。</li>
+      </ul>
+    </div>
+
+    <!-- -------------------------------------------
+         7. 最適化とその他ルール
+    ------------------------------------------- -->
+    <h2>
+      <div class="section-header">
+        <div class="sec-icon-wrap">⚙️</div>
+        <div>
+          <div class="sec-title-main">7. 最適化とその他ルール</div>
+          <div class="sec-title-sub">最後に全体のバランスを整える処理</div>
+        </div>
+      </div>
+    </h2>
+
+    <div class="card">
+      <div class="badge-row">
+        <div class="pill"><span class="pill-dot"></span><span>最大10回の微調整</span></div>
+      </div>
+
+      <ul>
+        <li>最大 <strong>10回</strong> の反復で、勤務時間や4時間上限などの違反を調整します。</li>
+
+        <li>当日洗浄上がり品の制約違反は優先的に解消します。</li>
+
+        <li>1ロットあたりの検査員は <strong>最大5名</strong> までです。</li>
+
+        <li>割当回数・総勤務時間のバランスを考慮し、公平性を保ちます。</li>
+
+        <li>品番切替には <strong>2分のペナルティ</strong> を加算して評価します。</li>
+
+        <li>休暇中の検査員は候補から除外します。</li>
+      </ul>
+    </div>
+
+    <!-- -------------------------------------------
+         8. マスタ更新
+    ------------------------------------------- -->
+    <h2>
+      <div class="section-header">
+        <div class="sec-icon-wrap">📊</div>
+        <div>
+          <div class="sec-title-main">8. マスタ更新</div>
+          <div class="sec-title-sub">スキル・製品情報は実績から賢く育てる</div>
+        </div>
+      </div>
+    </h2>
+
+    <div class="card">
+      <ul>
+        <li>スキルマスタ・製品マスタは、<strong>検査実績に基づいて自動更新</strong>されます。</li>
+      </ul>
+
+      <p class="note">
+        例：特定品番を安定して担当している検査員は、その品番のスキル値が見直される運用を想定しています。
+      </p>
+    </div>
+
+  </div>
+</div>
+
+</body>
+</html>

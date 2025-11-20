@@ -7,6 +7,7 @@ import os
 import sys
 from pathlib import Path
 import warnings  # 警告抑制のため
+import webbrowser
 
 # pandasのUserWarningを抑制（SQLAlchemy接続の推奨警告）
 warnings.filterwarnings('ignore', category=UserWarning, message='.*pandas only supports SQLAlchemy.*')
@@ -37,6 +38,7 @@ from app.export.excel_exporter_service import ExcelExporter
 from app.export.google_sheets_exporter_service import GoogleSheetsExporter
 from app.assignment.inspector_assignment_service import InspectorAssignmentManager
 from app.services.cleaning_request_service import get_cleaning_lots
+from app.config_manager import AppConfigManager
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import matplotlib.font_manager as fm
@@ -90,6 +92,8 @@ class ModernDataExtractorUI:
         # 変数の初期化
         # 設定を先に読み込む（registered_products_pathを使用するため）
         self.config = DatabaseConfig()
+        # アプリケーション設定管理の初期化
+        self.app_config_manager = AppConfigManager()
         self.extractor = None
         self.is_extracting = False
         self.selected_start_date = None
@@ -125,8 +129,12 @@ class ModernDataExtractorUI:
         # Googleスプレッドシートエクスポーターの初期化（設定読み込み後に更新）
         self.google_sheets_exporter = None
         
-        # 検査員割当てマネージャーの初期化
-        self.inspector_manager = InspectorAssignmentManager(log_callback=self.log_message)
+        # 検査員割当てマネージャーの初期化（設定値を渡す）
+        self.inspector_manager = InspectorAssignmentManager(
+            log_callback=self.log_message,
+            product_limit_hard_threshold=self.app_config_manager.get_product_limit_hard_threshold(),
+            required_inspectors_threshold=self.app_config_manager.get_required_inspectors_threshold()
+        )
         
         # 休暇情報テーブル用の変数
         self.vacation_info_frame = None
@@ -537,6 +545,21 @@ class ModernDataExtractorUI:
             text_color="#1E3A8A"  # 濃い青
         )
         title_label.pack(side="left", pady=0)
+
+        self.settings_button = ctk.CTkButton(
+            title_frame,
+            text="設定",
+            command=self.show_settings_dialog,
+            font=ctk.CTkFont(family="Yu Gothic", size=13, weight="bold"),
+            height=40,
+            width=110,
+            fg_color="#10B981",
+            hover_color="#059669",
+            corner_radius=10,
+            border_width=0,
+            text_color="white"
+        )
+        self.settings_button.place(relx=0.99, rely=0.5, anchor="e", x=-20)
         
     
     def create_date_section(self, parent):
@@ -1980,7 +2003,6 @@ class ModernDataExtractorUI:
         )
         self.reload_button.pack(side="left", padx=(0, 15))
         
-        # アプリ終了ボタン（右側）
         self.exit_button = ctk.CTkButton(
             right_buttons_frame,
             text="アプリ終了",
@@ -2134,6 +2156,177 @@ class ModernDataExtractorUI:
     
     # ログセクションは削除
     
+    
+    def show_settings_dialog(self):
+        """設定ダイアログを表示"""
+        dialog = ctk.CTkToplevel(self.root)
+        dialog.title("割り当てルール設定")
+        dialog.geometry("550x400")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        
+        # メインフレーム
+        main_frame = ctk.CTkFrame(dialog)
+        main_frame.pack(fill="both", expand=True, padx=20, pady=20)
+        
+        # タイトル
+        title_label = ctk.CTkLabel(
+            main_frame,
+            text="割り当てルール設定",
+            font=ctk.CTkFont(family="Yu Gothic", size=18, weight="bold")
+        )
+        title_label.pack(pady=(0, 20))
+        
+        # 同一品番の4時間上限設定
+        limit_frame = ctk.CTkFrame(main_frame)
+        limit_frame.pack(fill="x", pady=10)
+        
+        limit_label = ctk.CTkLabel(
+            limit_frame,
+            text="同一品番の時間上限（時間）:",
+            font=ctk.CTkFont(family="Yu Gothic", size=14)
+        )
+        limit_label.pack(side="left", padx=10, pady=10)
+        
+        limit_entry = ctk.CTkEntry(
+            limit_frame,
+            width=100,
+            font=ctk.CTkFont(family="Yu Gothic", size=14)
+        )
+        limit_entry.insert(0, str(self.app_config_manager.get_product_limit_hard_threshold()))
+        limit_entry.pack(side="left", padx=10, pady=10)
+        
+        limit_default_label = ctk.CTkLabel(
+            limit_frame,
+            text=f"（デフォルト: {AppConfigManager.DEFAULT_PRODUCT_LIMIT_HARD_THRESHOLD}時間）",
+            font=ctk.CTkFont(family="Yu Gothic", size=12),
+            text_color="gray"
+        )
+        limit_default_label.pack(side="left", padx=5, pady=10)
+        
+        # 必要人数計算の3時間基準設定
+        threshold_frame = ctk.CTkFrame(main_frame)
+        threshold_frame.pack(fill="x", pady=10)
+        
+        threshold_label = ctk.CTkLabel(
+            threshold_frame,
+            text="必要人数計算の時間基準（時間）:",
+            font=ctk.CTkFont(family="Yu Gothic", size=14)
+        )
+        threshold_label.pack(side="left", padx=10, pady=10)
+        
+        threshold_entry = ctk.CTkEntry(
+            threshold_frame,
+            width=100,
+            font=ctk.CTkFont(family="Yu Gothic", size=14)
+        )
+        threshold_entry.insert(0, str(self.app_config_manager.get_required_inspectors_threshold()))
+        threshold_entry.pack(side="left", padx=10, pady=10)
+        
+        threshold_default_label = ctk.CTkLabel(
+            threshold_frame,
+            text=f"（デフォルト: {AppConfigManager.DEFAULT_REQUIRED_INSPECTORS_THRESHOLD}時間）",
+            font=ctk.CTkFont(family="Yu Gothic", size=12),
+            text_color="gray"
+        )
+        threshold_default_label.pack(side="left", padx=5, pady=10)
+        
+        # 説明ラベル
+        info_label = ctk.CTkLabel(
+            main_frame,
+            text="※ 設定を変更した場合、次回の割り当て処理から反映されます。",
+            font=ctk.CTkFont(family="Yu Gothic", size=12),
+            text_color="gray"
+        )
+        info_label.pack(pady=10)
+        
+        # ボタンフレーム
+        button_frame = ctk.CTkFrame(main_frame)
+        button_frame.pack(fill="x", pady=20)
+        
+        def save_settings():
+            """設定を保存"""
+            try:
+                limit_value = float(limit_entry.get())
+                threshold_value = float(threshold_entry.get())
+                
+                if limit_value <= 0 or threshold_value <= 0:
+                    messagebox.showerror("エラー", "設定値は0より大きい値である必要があります")
+                    return
+                
+                self.app_config_manager.update_product_limit_hard_threshold(limit_value)
+                self.app_config_manager.update_required_inspectors_threshold(threshold_value)
+                
+                # InspectorAssignmentManagerを再初期化して設定値を反映
+                self.inspector_manager = InspectorAssignmentManager(
+                    log_callback=self.log_message,
+                    product_limit_hard_threshold=self.app_config_manager.get_product_limit_hard_threshold(),
+                    required_inspectors_threshold=self.app_config_manager.get_required_inspectors_threshold()
+                )
+                
+                messagebox.showinfo("完了", "設定を保存しました。\n次回の割り当て処理から反映されます。")
+                dialog.destroy()
+            except ValueError:
+                messagebox.showerror("エラー", "数値を入力してください")
+            except Exception as e:
+                messagebox.showerror("エラー", f"設定の保存に失敗しました: {str(e)}")
+        
+        def reset_to_default():
+            """デフォルト値にリセット"""
+            result = messagebox.askyesno(
+                "確認",
+                "設定をデフォルト値に戻しますか？\n"
+                f"同一品番の時間上限: {AppConfigManager.DEFAULT_PRODUCT_LIMIT_HARD_THRESHOLD}時間\n"
+                f"必要人数計算の時間基準: {AppConfigManager.DEFAULT_REQUIRED_INSPECTORS_THRESHOLD}時間"
+            )
+            if result:
+                self.app_config_manager.reset_to_default()
+                limit_entry.delete(0, tk.END)
+                limit_entry.insert(0, str(self.app_config_manager.get_product_limit_hard_threshold()))
+                threshold_entry.delete(0, tk.END)
+                threshold_entry.insert(0, str(self.app_config_manager.get_required_inspectors_threshold()))
+                
+                # InspectorAssignmentManagerを再初期化して設定値を反映
+                self.inspector_manager = InspectorAssignmentManager(
+                    log_callback=self.log_message,
+                    product_limit_hard_threshold=self.app_config_manager.get_product_limit_hard_threshold(),
+                    required_inspectors_threshold=self.app_config_manager.get_required_inspectors_threshold()
+                )
+                
+                messagebox.showinfo("完了", "設定をデフォルト値に戻しました")
+        
+        save_button = ctk.CTkButton(
+            button_frame,
+            text="保存",
+            command=save_settings,
+            font=ctk.CTkFont(family="Yu Gothic", size=14, weight="bold"),
+            width=100,
+            fg_color="#3B82F6",
+            hover_color="#2563EB"
+        )
+        save_button.pack(side="left", padx=10)
+        
+        reset_button = ctk.CTkButton(
+            button_frame,
+            text="デフォルトに戻す",
+            command=reset_to_default,
+            font=ctk.CTkFont(family="Yu Gothic", size=14),
+            width=140,
+            fg_color="#6B7280",
+            hover_color="#4B5563"
+        )
+        reset_button.pack(side="left", padx=10)
+        
+        cancel_button = ctk.CTkButton(
+            button_frame,
+            text="キャンセル",
+            command=dialog.destroy,
+            font=ctk.CTkFont(family="Yu Gothic", size=14),
+            width=100,
+            fg_color="#EF4444",
+            hover_color="#DC2626"
+        )
+        cancel_button.pack(side="right", padx=10)
     
     def reload_config(self):
         """設定のリロード"""
@@ -6636,7 +6829,7 @@ class ModernDataExtractorUI:
             
             # マスタファイルメニュー
             master_menu = tk.Menu(menubar, tearoff=0)
-            menubar.add_cascade(label="マスタファイル", menu=master_menu)
+            menubar.add_cascade(label="🗂️ マスタファイル", menu=master_menu)
             
             # 各マスタファイルを開くメニュー項目
             master_menu.add_command(
@@ -6660,6 +6853,12 @@ class ModernDataExtractorUI:
                 label="検査対象CSVを開く",
                 command=self.open_inspection_target_csv_file
             )
+
+            # 設定メニュー
+            menubar.add_command(label="⚙️ 設定", command=self.show_settings_dialog)
+
+            # ガイドメニュー
+            menubar.add_command(label="📘 ガイド", command=self.open_assignment_rules_guide)
             
         except Exception as e:
             logger.error(f"メニューバーの作成に失敗しました: {e}")
@@ -6696,6 +6895,21 @@ class ModernDataExtractorUI:
                 messagebox.showinfo("情報", "検査員マスタファイルのパスが設定されていません。")
         except Exception as e:
             error_msg = f"検査員マスタファイルを開く際にエラーが発生しました: {str(e)}"
+            self.log_message(error_msg)
+            logger.error(error_msg)
+            messagebox.showerror("エラー", error_msg)
+
+    def open_assignment_rules_guide(self):
+        """ガイド（HTML）を開く"""
+        try:
+            guide_path = Path(__file__).resolve().parent.parent.parent / "inspector_assignment_rules_help.html"
+            if guide_path.exists():
+                webbrowser.open(guide_path.as_uri())
+                self.log_message(f"ガイドを開きました: {guide_path}")
+            else:
+                messagebox.showerror("エラー", f"ガイドファイルが見つかりません:\n{guide_path}")
+        except Exception as e:
+            error_msg = f"ガイドを開く際にエラーが発生しました: {str(e)}"
             self.log_message(error_msg)
             logger.error(error_msg)
             messagebox.showerror("エラー", error_msg)

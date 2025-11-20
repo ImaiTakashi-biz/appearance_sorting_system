@@ -18,6 +18,8 @@ logger = logging.getLogger(__name__)
 PRODUCT_LIMIT_DRAFT_THRESHOLD = 4.5  # ドラフトフェーズでの許容上限（4.5h未満まで許容）
 PRODUCT_LIMIT_HARD_THRESHOLD = 4.0   # 最適化フェーズでの厳格上限（4.0h）
 PRODUCT_LIMIT_FINAL_TOLERANCE = 4.2  # 最終検証での許容上限（4.2h未満まで許容、代替検査員が見つからない場合）
+MAX_ASSIGNMENTS_PER_PRODUCT = 1      # 同一品番の通常割当は1回まで
+MAX_ASSIGNMENTS_PER_PRODUCT_RELAXED = 2  # 緩和時のみ最大2回まで許容
 
 # 勤務時間チェックの余裕時間
 WORK_HOURS_BUFFER = 0.05  # 0.05h（3分）の余裕を確保
@@ -36,16 +38,32 @@ SORT_SEED = 42
 class InspectorAssignmentManager:
     """検査員割当て管理クラス"""
     
-    def __init__(self, log_callback=None, debug_mode=False):
+    def __init__(self, log_callback=None, debug_mode=False, 
+                 product_limit_hard_threshold=None, 
+                 required_inspectors_threshold=None):
         """
         初期化
         
         Args:
             log_callback: ログ出力用のコールバック関数
             debug_mode: デバッグモード（Trueの場合、詳細なデバッグログを出力）
+            product_limit_hard_threshold: 同一品番の4時間上限（Noneの場合はデフォルト値4.0を使用）
+            required_inspectors_threshold: 必要人数計算の3時間基準（Noneの場合はデフォルト値3.0を使用）
         """
         self.log_callback = log_callback
         self.debug_mode = debug_mode
+        
+        # 設定値の適用（Noneの場合はデフォルト値を使用）
+        self.product_limit_hard_threshold = (
+            product_limit_hard_threshold 
+            if product_limit_hard_threshold is not None 
+            else PRODUCT_LIMIT_HARD_THRESHOLD
+        )
+        self.required_inspectors_threshold = (
+            required_inspectors_threshold 
+            if required_inspectors_threshold is not None 
+            else 3.0
+        )
         # 検査員の割り当て履歴を追跡（公平な割り当てのため）
         self.inspector_assignment_count = {}
         self.inspector_last_assignment = {}
@@ -85,6 +103,9 @@ class InspectorAssignmentManager:
         # 形式: {品名: set(検査員コード)} - 各品名ごとに割り当てられた検査員のセット
         # 例: "3D025-G4960"と"3D025-M006A"は別品番だが品名が"ｷﾞﾔB"で同じ場合、同じ検査員を割り当てない
         self.same_day_cleaning_inspectors_by_product_name = {}
+        # 品番ごとの割当回数を追跡
+        # 形式: {検査員コード: {品番: 回数}}
+        self.inspector_product_assignment_counts = {}
         # 【追加】休暇情報を保持
         self.vacation_data = {}  # {検査員名: 休暇情報辞書}
         self.vacation_date = None  # 休暇情報の対象日付
@@ -115,6 +136,40 @@ class InspectorAssignmentManager:
             logger.error(message)
         else:
             logger.info(message)
+
+    def _normalize_shipping_date(self, shipping_date):
+        """
+        出荷予定日の文字列表現などを一貫した Timestamp に変換する。
+        当日洗浄上がり品や当日先行検査などの優先案件は最優先となるよう最小値へマップする。
+        """
+        try:
+            if shipping_date is None or (isinstance(shipping_date, float) and pd.isna(shipping_date)):
+                return pd.Timestamp.max
+
+            if isinstance(shipping_date, str):
+                shipping_date_str = shipping_date.strip()
+                if not shipping_date_str:
+                    return pd.Timestamp.max
+
+                # 当日洗浄・先行検査など文字列表現の優先案件
+                same_day_keywords = [
+                    "当日洗浄上がり品",
+                    "当日洗浄上がり",
+                    "当日洗浄あがり",
+                    "当日洗浄品",
+                    "当日洗浄",
+                    "当日先行検査",
+                    "先行検査",
+                ]
+                if any(keyword in shipping_date_str for keyword in same_day_keywords):
+                    return pd.Timestamp.min
+
+            normalized = pd.to_datetime(shipping_date, errors='coerce')
+            if pd.isna(normalized):
+                return pd.Timestamp.max
+            return normalized
+        except Exception:
+            return pd.Timestamp.max
 
     def _gather_skill_candidates_for_feasibility(self, product_number, process_number, skill_master_df, inspector_master_df):
         """
@@ -831,12 +886,12 @@ class InspectorAssignmentManager:
                 if inspection_time <= 0:
                     required_inspectors = 1
                 else:
-                    # 1人の検査員に3時間を超えないようにする制約を考慮
-                    # 必要人数 = 検査時間 / 3時間（切り上げ、最低2人）
-                    if inspection_time <= 3.0:
+                    # 1人の検査員に設定された時間を超えないようにする制約を考慮
+                    # 必要人数 = 検査時間 / 設定時間（切り上げ、最低2人）
+                    if inspection_time <= self.required_inspectors_threshold:
                         required_inspectors = 1
                     else:
-                        calculated_inspectors = max(2, int(inspection_time / 3.0) + 1)
+                        calculated_inspectors = max(2, int(inspection_time / self.required_inspectors_threshold) + 1)
                         # 5名以上になる場合は5名に制限（特例）
                         required_inspectors = min(5, calculated_inspectors)
                     
@@ -1034,7 +1089,7 @@ class InspectorAssignmentManager:
                                 self.same_day_cleaning_inspectors_by_product_name.setdefault(product_name_str, set()).add(code)
                 
                 # 当日洗浄上がり品で必要人数に達しない場合、検査時間を再分配する
-                if is_same_day_cleaning and inspection_time > 3.0 and len(assigned_inspectors) < required_inspectors:
+                if is_same_day_cleaning and inspection_time > self.required_inspectors_threshold and len(assigned_inspectors) < required_inspectors:
                     self.log_message(f"当日洗浄上がり品 {product_number}: 必要人数 {required_inspectors}人に対して {len(assigned_inspectors)}人しか割り当てられていないため、検査時間を再分配します")
                     
                     current_date = pd.Timestamp.now().date()
@@ -1155,8 +1210,8 @@ class InspectorAssignmentManager:
                         # 検査時間を必要人数で分割
                         divided_time_per_inspector = inspection_time / required_inspectors
                         # 候補を必要人数分選択（候補が不足している場合は可能な限り）
-                        # ただし、最低2人は確保する（3時間基準を満たすため）
-                        min_required = max(2, required_inspectors) if inspection_time > 3.0 else required_inspectors
+                        # ただし、最低2人は確保する（設定時間基準を満たすため）
+                        min_required = max(2, required_inspectors) if inspection_time > self.required_inspectors_threshold else required_inspectors
                         # 【修正】フィルタリング後の候補数を使用（制約を満たす候補のみをカウント）
                         max_available = min(min_required, len(all_candidates_filtered))
                         # 候補が不足している場合は、可能な限り多くの候補を使用
@@ -1270,8 +1325,8 @@ class InspectorAssignmentManager:
                                     # 検査時間を必要人数で分割
                                     divided_time_per_inspector = inspection_time / required_inspectors
                                     # 候補を必要人数分選択（候補が不足している場合は可能な限り）
-                                    # ただし、最低2人は確保する（3時間基準を満たすため）
-                                    min_required = max(2, required_inspectors) if inspection_time > 3.0 else required_inspectors
+                                    # ただし、最低2人は確保する（設定時間基準を満たすため）
+                                    min_required = max(2, required_inspectors) if inspection_time > self.required_inspectors_threshold else required_inspectors
                                     max_available = min(min_required, len(all_candidates_with_new_team))
                                     # 候補が不足している場合は、可能な限り多くの候補を使用
                                     if max_available < min_required:
@@ -1375,17 +1430,17 @@ class InspectorAssignmentManager:
                                         if product_name_str:
                                             self.same_day_cleaning_inspectors_by_product_name.setdefault(product_name_str, set()).add(code)
                 
-                # 3時間基準の最低人数チェック: 検査時間が3時間を超える場合は最低2人必要
+                # 設定時間基準の最低人数チェック: 検査時間が設定時間を超える場合は最低2人必要
                 # 当日洗浄上がり品の場合は優先順位が高いため、可能な限り割り当てる（未割当にしない）
-                if inspection_time > 3.0 and len(assigned_inspectors) < required_inspectors:
+                if inspection_time > self.required_inspectors_threshold and len(assigned_inspectors) < required_inspectors:
                     if is_same_day_cleaning:
-                        # 当日洗浄上がり品の場合は、3時間基準違反でも可能な限り割り当てる（未割当にしない）
+                        # 当日洗浄上がり品の場合は、設定時間基準違反でも可能な限り割り当てる（未割当にしない）
                         if len(assigned_inspectors) > 0:
                             # 1人以上割り当てられている場合は、そのまま割り当てを維持
-                            self.log_message(f"⚠️ 警告: 当日洗浄上がり品 {product_number} は3時間基準違反ですが、優先順位が高いため {len(assigned_inspectors)}人を割り当てます（検査時間: {inspection_time:.1f}h, 必要人数: {required_inspectors}人, 実際の割当人数: {len(assigned_inspectors)}人）", level='warning')
+                            self.log_message(f"⚠️ 警告: 当日洗浄上がり品 {product_number} は{self.required_inspectors_threshold:.1f}時間基準違反ですが、優先順位が高いため {len(assigned_inspectors)}人を割り当てます（検査時間: {inspection_time:.1f}h, 必要人数: {required_inspectors}人, 実際の割当人数: {len(assigned_inspectors)}人）", level='warning')
                         else:
                             # 0人の場合は、制約を大幅に緩和して再試行
-                            self.log_message(f"⚠️ 警告: 当日洗浄上がり品 {product_number} は3時間基準違反で0人ですが、優先順位が高いため制約を大幅に緩和して再試行します（検査時間: {inspection_time:.1f}h, 必要人数: {required_inspectors}人）", level='warning')
+                            self.log_message(f"⚠️ 警告: 当日洗浄上がり品 {product_number} は{self.required_inspectors_threshold:.1f}時間基準違反で0人ですが、優先順位が高いため制約を大幅に緩和して再試行します（検査時間: {inspection_time:.1f}h, 必要人数: {required_inspectors}人）", level='warning')
                             # 制約を大幅に緩和して再試行（未割当ロット再処理と同じロジック）
                             # この処理は後続の未割当ロット再処理で行われるため、ここでは未割当のままにする
                             # ただし、assignability_statusは'logic_conflict'ではなく、後続処理で再試行できるようにする
@@ -1393,18 +1448,18 @@ class InspectorAssignmentManager:
                             result_df.at[index, '分割検査時間'] = 0.0
                             for i in range(1, 6):
                                 result_df.at[index, f'検査員{i}'] = ''
-                            result_df.at[index, 'チーム情報'] = f'未割当(3時間基準違反: 必要{required_inspectors}人に対して{len(assigned_inspectors)}人)'
+                            result_df.at[index, 'チーム情報'] = f'未割当({self.required_inspectors_threshold:.1f}時間基準違反: 必要{required_inspectors}人に対して{len(assigned_inspectors)}人)'
                             result_df.at[index, 'remaining_work_hours'] = round(inspection_time, 2)
                             result_df.at[index, 'assignability_status'] = 'logic_conflict'
                             continue
                     else:
-                        # 当日洗浄上がり品以外の場合は、3時間基準違反で未割当
-                        self.log_message(f"⚠️ 警告: 品番 {product_number} (出荷予定日: {shipping_date}) は3時間基準違反のため未割当とします（検査時間: {inspection_time:.1f}h, 必要人数: {required_inspectors}人, 実際の割当人数: {len(assigned_inspectors)}人）")
+                        # 当日洗浄上がり品以外の場合は、設定時間基準違反で未割当
+                        self.log_message(f"⚠️ 警告: 品番 {product_number} (出荷予定日: {shipping_date}) は{self.required_inspectors_threshold:.1f}時間基準違反のため未割当とします（検査時間: {inspection_time:.1f}h, 必要人数: {required_inspectors}人, 実際の割当人数: {len(assigned_inspectors)}人）")
                         result_df.at[index, '検査員人数'] = 0
                         result_df.at[index, '分割検査時間'] = 0.0
                         for i in range(1, 6):
                             result_df.at[index, f'検査員{i}'] = ''
-                        result_df.at[index, 'チーム情報'] = f'未割当(3時間基準違反: 必要{required_inspectors}人に対して{len(assigned_inspectors)}人)'
+                        result_df.at[index, 'チーム情報'] = f'未割当({self.required_inspectors_threshold:.1f}時間基準違反: 必要{required_inspectors}人に対して{len(assigned_inspectors)}人)'
                         result_df.at[index, 'remaining_work_hours'] = round(inspection_time, 2)
                         result_df.at[index, 'assignability_status'] = 'logic_conflict'
                         continue
@@ -2614,7 +2669,7 @@ class InspectorAssignmentManager:
                 # 1人の検査員に4時間を超えないようにする制約を追加
                 code = candidate['コード']
                 product_hours = self.inspector_product_hours.get(code, {}).get(product_number, 0.0)
-                max_assignable_per_inspector = max(0.0, PRODUCT_LIMIT_HARD_THRESHOLD - product_hours)
+                max_assignable_per_inspector = max(0.0, self.product_limit_hard_threshold - product_hours)
                 
                 # 容量、残り時間、1人あたりの最大割り当て時間の最小値を取る
                 take = min(cap, remaining, max_assignable_per_inspector)
@@ -2692,8 +2747,30 @@ class InspectorAssignmentManager:
                     self.log_message(f"検査員 '{insp['氏名']}' は品番 {product_number} の累計が {current:.1f}h のため除外 (+{divided_time:.1f}hで{PRODUCT_LIMIT_DRAFT_THRESHOLD}h超過)")
                     continue
                 
-                # 4.0h超過の場合はフラグを設定（ドラフトフェーズでは許容、最適化フェーズで是正）
-                insp['over_product_limit'] = projected_hours > PRODUCT_LIMIT_HARD_THRESHOLD
+                # 設定時間超過の場合はフラグを設定（ドラフトフェーズでは許容、最適化フェーズで是正）
+                insp['over_product_limit'] = projected_hours > self.product_limit_hard_threshold
+                insp['__projected_product_hours'] = projected_hours
+                insp['__current_product_hours'] = current
+                if projected_hours >= PRODUCT_LIMIT_FINAL_TOLERANCE:
+                    insp['__near_product_limit'] = True
+                else:
+                    insp.pop('__near_product_limit', None)
+                
+                # 同一品番を同日複数回割り当てないよう制限
+                product_assignment_count = (
+                    self.inspector_product_assignment_counts
+                    .get(code, {})
+                    .get(product_number, 0)
+                )
+                max_assignments_for_product = (
+                    MAX_ASSIGNMENTS_PER_PRODUCT_RELAXED if relax_work_hours else MAX_ASSIGNMENTS_PER_PRODUCT
+                )
+                if product_assignment_count >= max_assignments_for_product:
+                    self.log_message(
+                        f"検査員 '{insp['氏名']}' は品番 {product_number} を既に {product_assignment_count} 回担当しているため候補外"
+                    )
+                    continue
+                insp['__product_assignment_count'] = product_assignment_count
                 # 3.5h以上4.0h以下の場合は警告フラグを付ける（未割当ロット削減のため柔軟に対応）
                 
                 filtered_by_product.append(insp)
@@ -2782,7 +2859,21 @@ class InspectorAssignmentManager:
                     # スキル別平均からの偏差を計算（小さい方が良い）
                     avg_hours = skill_avg_hours.get(skill_level, 0.0)
                     deviation_from_avg = abs(total_hours - avg_hours)
-                    insp['__fairness_priority'] = (total_hours, assignment_count, last_assignment, deviation_from_avg, is_unused)
+                    product_hours = insp.get('__projected_product_hours', self.inspector_product_hours.get(code, 0.0))
+                    product_limit_penalty = 1 if insp.get('over_product_limit', False) else 0
+                    near_limit_penalty = 1 if insp.get('__near_product_limit', False) else 0
+                    product_assignment_count = insp.get('__product_assignment_count', 0)
+                    insp['__fairness_priority'] = (
+                        product_limit_penalty,
+                        near_limit_penalty,
+                        product_assignment_count,
+                        product_hours,
+                        total_hours,
+                        assignment_count,
+                        last_assignment,
+                        deviation_from_avg,
+                        is_unused,
+                    )
                     insp['__candidate_order'] = order_index
             
             # 利用可能な検査員の総数を確認
@@ -2821,14 +2912,20 @@ class InspectorAssignmentManager:
                         is_fixed = insp.get('__is_fixed', False)  # 固定検査員フラグ
                         
                         # 固定検査員を最優先し、その他の公平性指標を考慮
+                        product_hours = insp.get('__projected_product_hours', self.inspector_product_hours.get(code, 0.0))
+                        product_limit_penalty = 1 if insp.get('over_product_limit', False) else 0
+                        product_assignment_count = insp.get('__product_assignment_count', 0)
                         priority = (
-                            not is_fixed,  # False=固定検査員を最優先（登録済み品番の特別処置）
-                            not is_unused,  # False=未使用を優先
-                            total_hours,   # 総勤務時間が少ない順
-                            skill_order_map.get(skill_level, 99),  # スキルレベル（1>2>3>new、1が最高スキル）
-                            assignment_count,  # 割り当て回数が少ない順
-                            near_limit,  # 4時間上限に近い場合は優先度を下げる（False < True）
-                            last_assignment  # 最後の割り当てが古い順
+                            not is_fixed,  # False=固定検査員を優先
+                            product_limit_penalty,  # 4時間上限を超える場合は最終手段
+                            near_limit,  # 4時間上限に近い場合は優先度を下げる
+                            product_assignment_count,  # 同一品番での割当回数
+                            product_hours,  # 品番単位の累計時間が少ない順
+                            not is_unused,  # False=未使用の検査員を優先
+                            total_hours,   # 一日の総作業時間が少ない順
+                            skill_order_map.get(skill_level, 99),  # スキルレベルの優先度
+                            assignment_count,  # 割当回数が少ない順
+                            last_assignment  # 直近の割当が古い順
                         )
                         all_inspectors_with_priority.append((priority, insp))
                 
@@ -2862,14 +2959,20 @@ class InspectorAssignmentManager:
                         is_fixed = insp.get('__is_fixed', False)  # 固定検査員フラグ
                         
                         # 固定検査員を最優先し、その他の公平性指標を考慮
+                        product_hours = insp.get('__projected_product_hours', self.inspector_product_hours.get(code, 0.0))
+                        product_limit_penalty = 1 if insp.get('over_product_limit', False) else 0
+                        product_assignment_count = insp.get('__product_assignment_count', 0)
                         priority = (
-                            not is_fixed,  # False=固定検査員を最優先（登録済み品番の特別処置）
-                            not is_unused,  # False=未使用を優先
-                            total_hours,   # 総勤務時間が少ない順
-                            skill_order_map.get(skill_level, 99),  # スキルレベル（1>2>3>new、1が最高スキル）
-                            assignment_count,  # 割り当て回数が少ない順
-                            near_limit,  # 4時間上限に近い場合は優先度を下げる（False < True）
-                            last_assignment  # 最後の割り当てが古い順
+                            not is_fixed,  # False=固定検査員を優先
+                            product_limit_penalty,  # 4時間上限を超える場合は最終手段
+                            near_limit,  # 4時間上限に近い場合は優先度を下げる
+                            product_assignment_count,  # 同一品番の割当回数
+                            product_hours,  # 品番単位の累計時間が少ない順
+                            not is_unused,  # False=未使用の検査員を優先
+                            total_hours,   # 一日の総作業時間が少ない順
+                            skill_order_map.get(skill_level, 99),  # スキルレベルの優先度
+                            assignment_count,  # 割当回数が少ない順
+                            last_assignment  # 直近の割当が古い順
                         )
                         all_inspectors_with_priority.append((priority, insp))
                 
@@ -2889,6 +2992,12 @@ class InspectorAssignmentManager:
                 self.inspector_last_assignment[code] = current_time
                 self.inspector_work_hours[code] += divided_time
                 self.inspector_daily_assignments[code][current_date] += divided_time
+                # 品番ごとの割当回数を更新
+                if code not in self.inspector_product_assignment_counts:
+                    self.inspector_product_assignment_counts[code] = {}
+                self.inspector_product_assignment_counts[code][product_number] = (
+                    self.inspector_product_assignment_counts[code].get(product_number, 0) + 1
+                )
                 
                 # ログ出力
                 count = self.inspector_assignment_count.get(code, 0)
@@ -2896,6 +3005,9 @@ class InspectorAssignmentManager:
                 self.log_message(f"検査員 '{insp['氏名']}' ({skill_info}, 割り当て回数: {count}) を選択")
                 insp.pop('__fairness_priority', None)
                 insp.pop('__candidate_order', None)
+                insp.pop('__projected_product_hours', None)
+                insp.pop('__current_product_hours', None)
+                insp.pop('__product_assignment_count', None)
             
             return selected_inspectors
             
@@ -2939,13 +3051,19 @@ class InspectorAssignmentManager:
                     
                     # 【追加】優先順位: 0)固定検査員を最優先（登録済み品番の特別処置）, 1)未使用検査員優先, 2)総勤務時間が少ない, 3)スキルレベル(1>2>3>new、1が最高スキル), 4)割り当て回数が少ない, 5)4時間上限に近い場合は優先度を下げる
                     near_limit = insp.get('__near_product_limit', False)  # 4時間上限に近い場合は優先度を下げる
+                    product_hours = insp.get('__projected_product_hours', self.inspector_product_hours.get(code, 0.0))
+                    product_limit_penalty = 1 if insp.get('over_product_limit', False) else 0
+                    product_assignment_count = insp.get('__product_assignment_count', 0)
                     priority = (
                         not is_fixed,  # False=固定検査員を最優先（登録済み品番の特別処置）
+                        product_limit_penalty,  # 4時間上限を超える場合は最終手段
+                        near_limit,  # 4時間上限に近い場合は優先度を下げる（False < True）
+                        product_assignment_count,  # 同一品番の割当回数
+                        product_hours,  # 品番ごとの累計時間
                         not is_unused,  # False=未使用を優先
                         total_hours,   # 総勤務時間が少ない順
-                        skill_order_map.get(skill_level, 99),  # スキル1を優先（ただし未使用・時間バランスより優先度低、1が最高スキル）
+                        skill_order_map.get(skill_level, 99),  # スキル1を優先
                         assignment_count,  # 割り当て回数が少ない順
-                        near_limit,  # 4時間上限に近い場合は優先度を下げる（False < True）
                         last_assignment  # 最後の割り当てが古い順
                     )
                     all_candidates.append((priority, insp, skill_level))
@@ -3035,13 +3153,19 @@ class InspectorAssignmentManager:
                     
                     # 【追加】優先順位: 0)固定検査員を最優先（登録済み品番の特別処置）, 1)未使用検査員優先, 2)総勤務時間が少ない, 3)スキルレベル(1>2>3>new、1が最高スキル), 4)割り当て回数が少ない, 5)4時間上限に近い場合は優先度を下げる
                     near_limit = insp.get('__near_product_limit', False)  # 4時間上限に近い場合は優先度を下げる
+                    product_hours = insp.get('__projected_product_hours', self.inspector_product_hours.get(code, 0.0))
+                    product_limit_penalty = 1 if insp.get('over_product_limit', False) else 0
+                    product_assignment_count = insp.get('__product_assignment_count', 0)
                     priority = (
                         not is_fixed,  # False=固定検査員を最優先（登録済み品番の特別処置）
+                        product_limit_penalty,  # 4時間上限を超える場合は最終手段
+                        near_limit,  # 4時間上限に近い場合は優先度を下げる（False < True）
+                        product_assignment_count,  # 同一品番の割当回数
+                        product_hours,  # 品番単位の累計時間
                         not is_unused,  # False=未使用を優先
                         total_hours,   # 総勤務時間が少ない順
-                        skill_order_map.get(skill_level, 99),  # スキル1を優先（ただし未使用・時間バランスより優先度低、1が最高スキル）
+                        skill_order_map.get(skill_level, 99),  # スキル1を優先
                         assignment_count,  # 割り当て回数が少ない順
-                        near_limit,  # 4時間上限に近い場合は優先度を下げる（False < True）
                         last_assignment  # 最後の割り当てが古い順
                     )
                     all_candidates.append((priority, insp, skill_level))
@@ -3576,7 +3700,7 @@ class InspectorAssignmentManager:
             if total_over_limit > 0:
                 for inspector_code, product_number in self.relaxed_product_limit_assignments:
                     product_hours = self.inspector_product_hours.get(inspector_code, {}).get(product_number, 0.0)
-                    if product_hours <= PRODUCT_LIMIT_HARD_THRESHOLD:
+                    if product_hours <= self.product_limit_hard_threshold:
                         resolved_over_limit += 1
                 resolution_rate = (resolved_over_limit / total_over_limit * 100) if total_over_limit > 0 else 0.0
                 if resolution_rate >= 80:
@@ -3821,8 +3945,8 @@ class InspectorAssignmentManager:
             # 改善ポイント: フェーズ間スラッシング防止用のタブーリストを初期化
             self.tabu_list = {}
             
-            # フェーズ1: 勤務時間超過と同一品番4時間超過を検出・是正（繰り返し処理）
-            self.log_message("全体最適化フェーズ1: 勤務時間超過と同一品番4時間超過の検出と是正を開始")
+            # フェーズ1: 勤務時間超過と同一品番の時間上限超過を検出・是正（繰り返し処理）
+            self.log_message(f"全体最適化フェーズ1: 勤務時間超過と同一品番{self.product_limit_hard_threshold:.1f}時間超過の検出と是正を開始")
             
             max_iterations = 10  # 最大10回繰り返し
             iteration = 0
@@ -3952,12 +4076,12 @@ class InspectorAssignmentManager:
                                         violations_found = True
                                         self.log_message(f"⚠️ 勤務時間超過: 検査員 '{inspector_name}' (コード: {inspector_code}) {daily_hours:.1f}h > {max_hours:.1f}h (超過: {excess:.1f}h, 品番: {product_number}, ロットインデックス: {index})", level='warning')
                                     
-                                    # 改善ポイント: 最適化フェーズでの4時間上限チェック（厳格）
-                                    if product_hours > PRODUCT_LIMIT_HARD_THRESHOLD:
-                                        excess = product_hours - 4.0
+                                    # 改善ポイント: 最適化フェーズでの設定時間上限チェック（厳格）
+                                    if product_hours > self.product_limit_hard_threshold:
+                                        excess = product_hours - self.product_limit_hard_threshold
                                         product_limit_violations.append((index, inspector_code, inspector_name, excess, divided_time, product_number, inspection_time, i))
                                         violations_found = True
-                                        self.log_message(f"⚠️ 同一品番4時間超過: 検査員 '{inspector_name}' (コード: {inspector_code}) 品番 {product_number} {product_hours:.1f}h > 4.0h (超過: {excess:.1f}h, ロットインデックス: {index})", level='warning')
+                                        self.log_message(f"⚠️ 同一品番{self.product_limit_hard_threshold:.1f}時間超過: 検査員 '{inspector_name}' (コード: {inspector_code}) 品番 {product_number} {product_hours:.1f}h > {self.product_limit_hard_threshold:.1f}h (超過: {excess:.1f}h, ロットインデックス: {index})", level='warning')
                 
                 # 違反が見つからない場合は終了
                 if not violations_found:
@@ -4158,7 +4282,7 @@ class InspectorAssignmentManager:
                             violations_with_date.append((violation, shipping_date))
                         
                         # 出荷予定日の古い順にソート（既にソートされているが、念のため）
-                        violations_with_date.sort(key=lambda x: x[1])
+                        violations_with_date.sort(key=lambda x: self._normalize_shipping_date(x[1]))
                         
                         # 出荷予定日が古いロットから順に再割り当てを試みる
                         re_resolved_count = 0
@@ -4342,9 +4466,9 @@ class InspectorAssignmentManager:
                                 # 改善ポイント: 最適化フェーズでの4時間上限チェック（厳格）
                                 # ただし、最終検証では4.2h未満まで許容（代替検査員が見つからない場合の保護）
                                 if product_hours > PRODUCT_LIMIT_FINAL_TOLERANCE:
-                                    final_violations.append((index, inspector_code, inspector_name, "同一品番4時間超過", product_hours, PRODUCT_LIMIT_HARD_THRESHOLD))
-                                    self.log_message(f"❌ 最終チェック: 同一品番4時間超過が残っています - 検査員 '{inspector_name}' 品番 {product_number} {product_hours:.1f}h > {PRODUCT_LIMIT_FINAL_TOLERANCE}h (ロット {index})", level='warning')
-                                elif product_hours > PRODUCT_LIMIT_HARD_THRESHOLD:
+                                    final_violations.append((index, inspector_code, inspector_name, f"同一品番{self.product_limit_hard_threshold:.1f}時間超過", product_hours, self.product_limit_hard_threshold))
+                                    self.log_message(f"❌ 最終チェック: 同一品番{self.product_limit_hard_threshold:.1f}時間超過が残っています - 検査員 '{inspector_name}' 品番 {product_number} {product_hours:.1f}h > {PRODUCT_LIMIT_FINAL_TOLERANCE}h (ロット {index})", level='warning')
+                                elif product_hours > self.product_limit_hard_threshold:
                                     # 4.0h超4.2h未満の場合は、警告のみで違反リストには追加しない（許容）
                                     self.log_message(f"⚠️ 最終チェック: 同一品番4時間をわずかに超過していますが許容します - 検査員 '{inspector_name}' 品番 {product_number} {product_hours:.1f}h (ロット {index})", level='warning')
                                     # relaxed_product_limit_assignmentsに追加して保護
@@ -4405,7 +4529,7 @@ class InspectorAssignmentManager:
                     violations_with_date.append((violation, shipping_date, is_new_product, product_number, is_within_two_weeks))
                 
                 # 出荷予定日の古い順にソート（新製品はさらに優先）
-                violations_with_date.sort(key=lambda x: (x[1], not x[2]))  # 出荷予定日順、新製品を優先
+                violations_with_date.sort(key=lambda x: (self._normalize_shipping_date(x[1]), not x[2]))  # 出荷予定日順、新製品を優先
                 
                 # 出荷予定日が古いロットから順に再割り当てを試みる
                 resolved_count = 0
@@ -4458,11 +4582,11 @@ class InspectorAssignmentManager:
                             if inspection_time <= 0:
                                 required_inspectors = 1
                             else:
-                                # 通常の計算（3時間で割る、最低2人）
-                                if inspection_time <= 3.0:
+                                # 通常の計算（設定時間で割る、最低2人）
+                                if inspection_time <= self.required_inspectors_threshold:
                                     required_inspectors = 1
                                 else:
-                                    calculated_inspectors = max(2, int(inspection_time / 3.0) + 1)
+                                    calculated_inspectors = max(2, int(inspection_time / self.required_inspectors_threshold) + 1)
                                     # 5名以上になる場合は5名に制限（特例）
                                     required_inspectors = min(5, calculated_inspectors)
                             divided_time = inspection_time / required_inspectors
@@ -4544,8 +4668,8 @@ class InspectorAssignmentManager:
                             resolved_count += 1
                         # 出荷予定日が最も古い新製品ロットの場合は割り当てを維持
                         elif is_new_product:
-                            min_shipping_date = min([v[1] for v in violations_with_date])
-                            if shipping_date == min_shipping_date:
+                            min_shipping_date = min((self._normalize_shipping_date(v[1]) for v in violations_with_date), default=pd.Timestamp.max)
+                            if self._normalize_shipping_date(shipping_date) == min_shipping_date:
                                 self.log_message(f"⚠️ 出荷予定日が最も古い新製品ロットのため、ルール違反があっても割り当てを維持します（品番: {product_number}）", level='warning')
                                 # 割り当てを維持（未割当にしない）
                                 resolved_count += 1
@@ -4899,7 +5023,7 @@ class InspectorAssignmentManager:
                                     
                                     # 改善ポイント: 最適化フェーズでの4時間上限チェック（厳格）
                                     candidate_product_hours = self.inspector_product_hours.get(candidate_code, {}).get(product_number, 0.0)
-                                    if candidate_product_hours + divided_time > PRODUCT_LIMIT_HARD_THRESHOLD:
+                                    if candidate_product_hours + divided_time > self.product_limit_hard_threshold:
                                         continue
                                     
                                     # 候補として追加（総勤務時間が少ない順に優先）
@@ -5132,10 +5256,10 @@ class InspectorAssignmentManager:
                                 phase2_5_violations.append((index, inspector_code, inspector_name, "勤務時間超過", daily_hours, max_hours))
                                 self.log_message(f"❌ フェーズ2.5検証: 勤務時間超過が検出されました - 検査員 '{inspector_name}' {daily_hours:.1f}h > {max_hours:.1f}h (ロット {index})")
                             
-                            # 改善ポイント: 最適化フェーズでの4時間上限チェック（厳格）
-                            if product_hours > PRODUCT_LIMIT_HARD_THRESHOLD:
-                                phase2_5_violations.append((index, inspector_code, inspector_name, "同一品番4時間超過", product_hours, PRODUCT_LIMIT_HARD_THRESHOLD))
-                                self.log_message(f"❌ フェーズ2.5検証: 同一品番4時間超過が検出されました - 検査員 '{inspector_name}' 品番 {product_number} {product_hours:.1f}h > {PRODUCT_LIMIT_HARD_THRESHOLD}h (ロット {index})")
+                            # 改善ポイント: 最適化フェーズでの設定時間上限チェック（厳格）
+                            if product_hours > self.product_limit_hard_threshold:
+                                phase2_5_violations.append((index, inspector_code, inspector_name, f"同一品番{self.product_limit_hard_threshold:.1f}時間超過", product_hours, self.product_limit_hard_threshold))
+                                self.log_message(f"❌ フェーズ2.5検証: 同一品番{self.product_limit_hard_threshold:.1f}時間超過が検出されました - 検査員 '{inspector_name}' 品番 {product_number} {product_hours:.1f}h > {self.product_limit_hard_threshold:.1f}h (ロット {index})")
             
             if phase2_5_violations:
                 self.log_message(f"⚠️ 警告: フェーズ2.5検証で {len(phase2_5_violations)}件の違反が検出されました", level='warning')
@@ -5213,12 +5337,14 @@ class InspectorAssignmentManager:
                             
                             # 保護対象でない場合は、通常通りクリア
                             violation_indices.append(index)
+                            normalized_shipping_date = self._normalize_shipping_date(shipping_date)
                             violation_lots.append({
                                 'index': index,
                                 'violation': violation,
                                 'row': row,
                                 'inspection_time': row.get('検査時間', 0),
-                                'shipping_date': shipping_date
+                                'shipping_date': shipping_date,
+                                'normalized_shipping_date': normalized_shipping_date
                             })
                             self.clear_assignment(result_df, index)
                             processed_indices.add(index)
@@ -5263,7 +5389,7 @@ class InspectorAssignmentManager:
                                         self.inspector_product_hours[inspector_code][prod_num] += div_time
                         
                         # 出荷予定日順にソートして再割当
-                        violation_lots.sort(key=lambda x: x['shipping_date'])
+                        violation_lots.sort(key=lambda x: x['normalized_shipping_date'])
                         
                         # 各ロットを再割当
                         for lot_info in violation_lots:
@@ -5288,10 +5414,10 @@ class InspectorAssignmentManager:
                             
                             if available_inspectors:
                                 # 再割当を試みる
-                                if inspection_time <= 3.0:
+                                if inspection_time <= self.required_inspectors_threshold:
                                     required_inspectors = 1
                                 else:
-                                    calculated_inspectors = max(2, int(inspection_time / 3.0) + 1)
+                                    calculated_inspectors = max(2, int(inspection_time / self.required_inspectors_threshold) + 1)
                                     # 5名以上になる場合は5名に制限（特例）
                                     required_inspectors = min(5, calculated_inspectors)
                                 divided_time = inspection_time / required_inspectors
@@ -5402,7 +5528,7 @@ class InspectorAssignmentManager:
                         violations_with_date.append((violation, shipping_date))
                 
                 # 出荷予定日の古い順にソート
-                violations_with_date.sort(key=lambda x: x[1])
+                violations_with_date.sort(key=lambda x: self._normalize_shipping_date(x[1]))
                 
                 # 出荷予定日が古いロットから順に再割り当てを試みる
                 for violation, shipping_date in violations_with_date:
@@ -5598,10 +5724,10 @@ class InspectorAssignmentManager:
                     unassigned_product_name_str = str(unassigned_product_name).strip() if pd.notna(unassigned_product_name) else ''
                     
                     # 必要な検査員数を計算
-                    if unassigned_inspection_time <= 3.0:
+                    if unassigned_inspection_time <= self.required_inspectors_threshold:
                         required_inspectors = 1
                     else:
-                        required_inspectors = max(2, int(unassigned_inspection_time / 3.0) + 1)
+                        required_inspectors = max(2, int(unassigned_inspection_time / self.required_inspectors_threshold) + 1)
                         required_inspectors = min(5, required_inspectors)
                     
                     # 優先度の低いロットから検査員を取得
@@ -5850,10 +5976,10 @@ class InspectorAssignmentManager:
                         continue
                     
                     # 必要人数を計算
-                    if inspection_time <= 3.0:
+                    if inspection_time <= self.required_inspectors_threshold:
                         required_inspectors = 1
                     else:
-                        calculated_inspectors = max(2, int(inspection_time / 3.0) + 1)
+                        calculated_inspectors = max(2, int(inspection_time / self.required_inspectors_threshold) + 1)
                         # 5名以上になる場合は5名に制限（特例）
                         required_inspectors = min(5, calculated_inspectors)
                     
@@ -6389,10 +6515,10 @@ class InspectorAssignmentManager:
                                 phase3_5_violations.append((index, inspector_code, inspector_name, "勤務時間超過", daily_hours, max_hours))
                                 self.log_message(f"❌ フェーズ3.5検証: 勤務時間超過が検出されました - 検査員 '{inspector_name}' {daily_hours:.1f}h > {max_hours:.1f}h (ロット {index})")
                             
-                            # 改善ポイント: 最適化フェーズでの4時間上限チェック（厳格）
-                            if product_hours > PRODUCT_LIMIT_HARD_THRESHOLD:
-                                phase3_5_violations.append((index, inspector_code, inspector_name, "同一品番4時間超過", product_hours, PRODUCT_LIMIT_HARD_THRESHOLD))
-                                self.log_message(f"❌ フェーズ3.5検証: 同一品番4時間超過が検出されました - 検査員 '{inspector_name}' 品番 {product_number} {product_hours:.1f}h > {PRODUCT_LIMIT_HARD_THRESHOLD}h (ロット {index})")
+                            # 改善ポイント: 最適化フェーズでの設定時間上限チェック（厳格）
+                            if product_hours > self.product_limit_hard_threshold:
+                                phase3_5_violations.append((index, inspector_code, inspector_name, f"同一品番{self.product_limit_hard_threshold:.1f}時間超過", product_hours, self.product_limit_hard_threshold))
+                                self.log_message(f"❌ フェーズ3.5検証: 同一品番{self.product_limit_hard_threshold:.1f}時間超過が検出されました - 検査員 '{inspector_name}' 品番 {product_number} {product_hours:.1f}h > {self.product_limit_hard_threshold:.1f}h (ロット {index})")
             
             # 【改善】当日洗浄上がり品の品番単位・品名単位の制約違反をチェック
             same_day_cleaning_violations = []
@@ -6764,12 +6890,14 @@ class InspectorAssignmentManager:
                             
                             # 保護対象でない場合は、通常通りクリア
                             violation_indices.append(index)
+                            normalized_shipping_date = self._normalize_shipping_date(shipping_date)
                             violation_lots.append({
                                 'index': index,
                                 'violation': violation,
                                 'row': row,
                                 'inspection_time': row.get('検査時間', 0),
-                                'shipping_date': shipping_date
+                                'shipping_date': shipping_date,
+                                'normalized_shipping_date': normalized_shipping_date
                             })
                             self.clear_assignment(result_df, index)
                             processed_indices.add(index)
@@ -6814,7 +6942,7 @@ class InspectorAssignmentManager:
                                         self.inspector_product_hours[inspector_code][prod_num] += div_time
                         
                         # 出荷予定日順にソートして再割当
-                        violation_lots.sort(key=lambda x: x['shipping_date'])
+                        violation_lots.sort(key=lambda x: x['normalized_shipping_date'])
                         
                         # 各ロットを再割当
                         for lot_info in violation_lots:
@@ -6839,10 +6967,10 @@ class InspectorAssignmentManager:
                             
                             if available_inspectors:
                                 # 再割当を試みる
-                                if inspection_time <= 3.0:
+                                if inspection_time <= self.required_inspectors_threshold:
                                     required_inspectors = 1
                                 else:
-                                    calculated_inspectors = max(2, int(inspection_time / 3.0) + 1)
+                                    calculated_inspectors = max(2, int(inspection_time / self.required_inspectors_threshold) + 1)
                                     # 5名以上になる場合は5名に制限（特例）
                                     required_inspectors = min(5, calculated_inspectors)
                                 divided_time = inspection_time / required_inspectors
@@ -6953,7 +7081,7 @@ class InspectorAssignmentManager:
                         violations_with_date.append((violation, shipping_date))
                 
                 # 出荷予定日の古い順にソート
-                violations_with_date.sort(key=lambda x: x[1])
+                violations_with_date.sort(key=lambda x: self._normalize_shipping_date(x[1]))
                 
                 # 出荷予定日が古いロットから順に再割り当てを試みる
                 for violation, shipping_date in violations_with_date:
@@ -7284,7 +7412,7 @@ class InspectorAssignmentManager:
                             'name': 'strict',
                             'same_day_cleaning_product_constraint': True,
                             'work_hours_buffer': 0.0,
-                            'product_limit': PRODUCT_LIMIT_HARD_THRESHOLD,
+                            'product_limit': self.product_limit_hard_threshold,
                         },
                         {
                             'name': 'relaxed_product_limit',
@@ -7376,7 +7504,7 @@ class InspectorAssignmentManager:
                                     violations.append(f"勤務時間超過{excess_work_hours:.1f}h")
                                 
                                 current_product_hours = self.inspector_product_hours.get(code, {}).get(product_number, 0.0)
-                                excess_product_hours = max(0, (current_product_hours + divided_time) - PRODUCT_LIMIT_HARD_THRESHOLD)
+                                excess_product_hours = max(0, (current_product_hours + divided_time) - self.product_limit_hard_threshold)
                                 if excess_product_hours > 0:
                                     score += excess_product_hours * 5
                                     violations.append(f"同一品番超過{excess_product_hours:.1f}h")
@@ -7477,15 +7605,15 @@ class InspectorAssignmentManager:
                         self.inspector_product_hours[new_code][product_number] = (
                             self.inspector_product_hours[new_code].get(product_number, 0.0) + divided_time
                         )
-                        # 改善ポイント: 4.0h超過の場合はrelaxed_product_limit_assignmentsに追加
-                        if self.inspector_product_hours[new_code][product_number] > PRODUCT_LIMIT_HARD_THRESHOLD:
+                        # 改善ポイント: 設定時間超過の場合はrelaxed_product_limit_assignmentsに追加
+                        if self.inspector_product_hours[new_code][product_number] > self.product_limit_hard_threshold:
                             self.relaxed_product_limit_assignments.add((new_code, product_number))
                         
                         # 【追加】制約緩和レベルが'scored_relaxation'の場合は、relaxed_product_limit_assignmentsに追加
                         if selected_relaxation_level == 'scored_relaxation':
                             # 同一品番4時間超過または勤務時間超過の場合はrelaxed_product_limit_assignmentsに追加
                             current_product_hours_after = self.inspector_product_hours[new_code][product_number]
-                            if current_product_hours_after > PRODUCT_LIMIT_HARD_THRESHOLD:
+                            if current_product_hours_after > self.product_limit_hard_threshold:
                                 self.relaxed_product_limit_assignments.add((new_code, product_number))
                                 self.log_message(f"制約緩和割り当てをrelaxed_product_limit_assignmentsに追加: {new_code}, {product_number} (同一品番累計: {current_product_hours_after:.1f}h)", level='info')
                         
@@ -7509,8 +7637,8 @@ class InspectorAssignmentManager:
                 # 検査時間が3時間以上の場合は、検査員5名まで増員可能
                 # ただし、既に5名の場合は置き換えのみ
                 
-                # 検査時間が3時間未満の場合は増員をスキップして置き換えのみ
-                if inspection_time < 3.0:
+                # 検査時間が設定時間未満の場合は増員をスキップして置き換えのみ
+                if inspection_time < self.required_inspectors_threshold:
                     # 置き換え処理（増員ではなく）
                     process_number = row.get('現在工程番号', '')
                     # スキルマスタに登録があるか確認
@@ -7553,7 +7681,7 @@ class InspectorAssignmentManager:
                             'name': 'strict',
                             'same_day_cleaning_product_constraint': True,
                             'work_hours_buffer': 0.0,
-                            'product_limit': PRODUCT_LIMIT_HARD_THRESHOLD,
+                            'product_limit': self.product_limit_hard_threshold,
                         },
                         {
                             'name': 'relaxed_product_limit',
@@ -7746,7 +7874,7 @@ class InspectorAssignmentManager:
                         if selected_relaxation_level == 'scored_relaxation':
                             # 同一品番4時間超過の場合はrelaxed_product_limit_assignmentsに追加
                             current_product_hours_after = self.inspector_product_hours[new_code][product_number]
-                            if current_product_hours_after > PRODUCT_LIMIT_HARD_THRESHOLD:
+                            if current_product_hours_after > self.product_limit_hard_threshold:
                                 self.relaxed_product_limit_assignments.add((new_code, product_number))
                                 self.log_message(f"制約緩和割り当てをrelaxed_product_limit_assignmentsに追加: {new_code}, {product_number} (同一品番累計: {current_product_hours_after:.1f}h, 置き換え処理)", level='info')
                         
@@ -7821,8 +7949,8 @@ class InspectorAssignmentManager:
                                 continue
                             # 改善ポイント: 最適化フェーズでの4時間上限チェック（厳格）
                             current_product_hours = self.inspector_product_hours.get(code, {}).get(product_number, 0.0)
-                            if current_product_hours + inspection_time > PRODUCT_LIMIT_HARD_THRESHOLD:
-                                excluded_reasons[insp_name] = f"同一品番4時間超過 ({current_product_hours:.1f}h + {inspection_time:.1f}h = {current_product_hours + inspection_time:.1f}h > {PRODUCT_LIMIT_HARD_THRESHOLD:.1f}h)"
+                            if current_product_hours + inspection_time > self.product_limit_hard_threshold:
+                                excluded_reasons[insp_name] = f"同一品番{self.product_limit_hard_threshold:.1f}時間超過 ({current_product_hours:.1f}h + {inspection_time:.1f}h = {current_product_hours + inspection_time:.1f}h > {self.product_limit_hard_threshold:.1f}h)"
                                 continue
                             total_hours = self.inspector_work_hours.get(code, 0.0)
                             replacement_candidates.append((total_hours, insp))
@@ -7959,8 +8087,8 @@ class InspectorAssignmentManager:
                                 continue
                             # 改善ポイント: 最適化フェーズでの4時間上限チェック（厳格）
                             current_product_hours = self.inspector_product_hours.get(code, {}).get(product_number, 0.0)
-                            if current_product_hours + divided_time > PRODUCT_LIMIT_HARD_THRESHOLD:
-                                excluded_reasons[insp_name] = f"同一品番4時間超過 ({current_product_hours:.1f}h + {divided_time:.1f}h = {current_product_hours + divided_time:.1f}h > {PRODUCT_LIMIT_HARD_THRESHOLD:.1f}h)"
+                            if current_product_hours + divided_time > self.product_limit_hard_threshold:
+                                excluded_reasons[insp_name] = f"同一品番{self.product_limit_hard_threshold:.1f}時間超過 ({current_product_hours:.1f}h + {divided_time:.1f}h = {current_product_hours + divided_time:.1f}h > {self.product_limit_hard_threshold:.1f}h)"
                                 continue
                             total_hours = self.inspector_work_hours.get(code, 0.0)
                             addition_candidates.append((total_hours, insp))
@@ -8056,8 +8184,8 @@ class InspectorAssignmentManager:
                 self.log_message(f"⚠️ 新規品 {product_number} (出荷予定日: {shipping_date_str}) のルール違反を是正できませんでしたが、出荷予定日が2週間以内のため保護します")
                 # 現在の品番別累計時間を取得
                 current_product_hours = self.inspector_product_hours.get(inspector_code, {}).get(product_number, 0.0)
-                # 改善ポイント: 4.0h超過の場合は、relaxed_product_limit_assignmentsに追加
-                if current_product_hours + divided_time > PRODUCT_LIMIT_HARD_THRESHOLD:
+                # 改善ポイント: 設定時間超過の場合は、relaxed_product_limit_assignmentsに追加
+                if current_product_hours + divided_time > self.product_limit_hard_threshold:
                     self.relaxed_product_limit_assignments.add((inspector_code, product_number))
                 return True  # 保護したのでTrueを返す
             else:
