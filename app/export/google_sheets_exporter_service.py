@@ -3,6 +3,7 @@ Googleスプレッドシートエクスポート機能
 検査員割振り結果をGoogleスプレッドシートに出力する
 """
 
+from typing import Optional, Any, List, Dict
 import pandas as pd
 from datetime import datetime
 from loguru import logger
@@ -12,7 +13,11 @@ import re
 class GoogleSheetsExporter:
     """Googleスプレッドシートエクスポート機能を提供するクラス"""
     
-    def __init__(self, sheets_url=None, credentials_path=None):
+    def __init__(
+        self,
+        sheets_url: Optional[str] = None,
+        credentials_path: Optional[str] = None
+    ) -> None:
         """
         初期化
         
@@ -25,8 +30,13 @@ class GoogleSheetsExporter:
         self.client = None
         self.spreadsheet = None
         
-    def _get_client(self):
-        """gspreadクライアントを取得"""
+    def _get_client(self) -> Optional[Any]:
+        """
+        gspreadクライアントを取得
+        
+        Returns:
+            gspreadクライアントオブジェクト、失敗時はNone
+        """
         try:
             import gspread
             from google.oauth2.service_account import Credentials

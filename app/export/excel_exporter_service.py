@@ -1,3 +1,4 @@
+from typing import Optional, Any
 import pandas as pd
 import os
 from datetime import datetime
@@ -10,12 +11,20 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 class ExcelExporter:
     """Excelエクスポート機能を提供するクラス"""
     
-    def __init__(self):
+    def __init__(self) -> None:
         """初期化"""
         pass
     
-    def _is_file_open(self, file_path):
-        """ファイルが開かれているかチェック"""
+    def _is_file_open(self, file_path: str) -> bool:
+        """
+        ファイルが開かれているかチェック
+        
+        Args:
+            file_path: ファイルパス
+        
+        Returns:
+            ファイルが開かれている場合はTrue、それ以外はFalse
+        """
         try:
             if os.path.exists(file_path):
                 with open(file_path, 'a'):
@@ -25,8 +34,20 @@ class ExcelExporter:
         except IOError:
             return True
     
-    def _apply_header_style(self, writer, sheet_name, df):
-        """ヘッダー行にスタイルを適用"""
+    def _apply_header_style(
+        self,
+        writer: Any,
+        sheet_name: str,
+        df: pd.DataFrame
+    ) -> None:
+        """
+        ヘッダー行にスタイルを適用
+        
+        Args:
+            writer: ExcelWriterオブジェクト
+            sheet_name: シート名
+            df: DataFrame
+        """
         try:
             workbook = writer.book
             worksheet = writer.sheets[sheet_name]
@@ -53,8 +74,20 @@ class ExcelExporter:
         except Exception as e:
             logger.error(f"ヘッダースタイル適用エラー: {str(e)}")
     
-    def _adjust_column_widths(self, writer, sheet_name, df):
-        """列幅を自動調整（ベクトル化処理で高速化）"""
+    def _adjust_column_widths(
+        self,
+        writer: Any,
+        sheet_name: str,
+        df: pd.DataFrame
+    ) -> None:
+        """
+        列幅を自動調整（ベクトル化処理で高速化）
+        
+        Args:
+            writer: ExcelWriterオブジェクト
+            sheet_name: シート名
+            df: DataFrame
+        """
         try:
             worksheet = writer.sheets[sheet_name]
             
@@ -89,8 +122,16 @@ class ExcelExporter:
         except Exception as e:
             logger.error(f"列幅調整エラー: {str(e)}")
     
-    def export_lot_assignment_to_excel(self, assignment_df):
-        """ロット割り当て結果をExcelファイルにエクスポート"""
+    def export_lot_assignment_to_excel(self, assignment_df: pd.DataFrame) -> bool:
+        """
+        ロット割り当て結果をExcelファイルにエクスポート
+        
+        Args:
+            assignment_df: ロット割り当て結果のDataFrame
+        
+        Returns:
+            エクスポート成功時はTrue、失敗時はFalse
+        """
         try:
             if assignment_df is None or assignment_df.empty:
                 messagebox.showwarning("警告", "エクスポートするロット割り当てデータがありません。")

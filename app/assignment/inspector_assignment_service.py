@@ -3,13 +3,14 @@
 検査員の割当て、スキルマッチング、新製品チーム対応などの機能を提供
 """
 
+from typing import Optional, List, Dict, Any, Tuple, Callable, Set, Union
+from datetime import date, timedelta
 import pandas as pd
 import numpy as np
 import logging
 import copy
 import openpyxl
 from pathlib import Path
-from datetime import timedelta
 
 logger = logging.getLogger(__name__)
 
@@ -31,16 +32,17 @@ PENALTY_PRODUCT_VARIETY_BETA = 5.0 / 60.0  # 担当品番種類数に対する�
 # フェーズ間スラッシング防止
 TABU_LIST_MAX_ITERATIONS = 3  # 再配置直後のロットを何回のイテレーションで除外するか
 
-# ソート安定性確保用の固定シード
-SORT_SEED = 42
-
 
 class InspectorAssignmentManager:
     """検査員割当て管理クラス"""
     
-    def __init__(self, log_callback=None, debug_mode=False, 
-                 product_limit_hard_threshold=None, 
-                 required_inspectors_threshold=None):
+    def __init__(
+        self,
+        log_callback: Optional[Callable[[str], None]] = None,
+        debug_mode: bool = False,
+        product_limit_hard_threshold: Optional[float] = None,
+        required_inspectors_threshold: Optional[float] = None
+    ) -> None:
         """
         初期化
         
@@ -131,7 +133,12 @@ class InspectorAssignmentManager:
         self.log_buffer = []  # ログをバッファリング
         self.log_batch_size = 10  # バッチサイズ
     
-    def log_message(self, message, debug=False, level='info'):
+    def log_message(
+        self,
+        message: str,
+        debug: bool = False,
+        level: str = 'info'
+    ) -> None:
         """
         ログメッセージを出力（バッチ化対応・高速化）
         
@@ -160,7 +167,7 @@ class InspectorAssignmentManager:
             else:
                 logger.info(message)
     
-    def _flush_log_buffer(self):
+    def _flush_log_buffer(self) -> None:
         """ログバッファをフラッシュ（まとめて出力）"""
         if not self.log_buffer:
             return
@@ -179,7 +186,7 @@ class InspectorAssignmentManager:
         # バッファをクリア
         self.log_buffer.clear()
     
-    def enable_log_batching(self, batch_size=10):
+    def enable_log_batching(self, batch_size: int = 10) -> None:
         """
         ログ出力のバッチ化を有効化（高速化オプション）
         
@@ -192,14 +199,14 @@ class InspectorAssignmentManager:
         self.log_batch_enabled = True
         self.log_batch_size = batch_size
     
-    def disable_log_batching(self):
+    def disable_log_batching(self) -> None:
         """ログ出力のバッチ化を無効化（従来の動作に戻す）"""
         # 既存のバッファをフラッシュ
         if self.log_buffer:
             self._flush_log_buffer()
         self.log_batch_enabled = False
     
-    def _build_inspector_index(self, inspector_master_df):
+    def _build_inspector_index(self, inspector_master_df: pd.DataFrame) -> None:
         """
         検査員マスタのインデックスを作成（高速化：O(1)アクセス用）
         
@@ -242,7 +249,11 @@ class InspectorAssignmentManager:
                 id_key = str(inspector_id).strip()
                 self.inspector_id_to_row[id_key] = row
     
-    def _get_inspector_by_name(self, inspector_name, inspector_master_df):
+    def _get_inspector_by_name(
+        self,
+        inspector_name: Any,
+        inspector_master_df: pd.DataFrame
+    ) -> pd.DataFrame:
         """
         検査員名から検査員情報を取得（高速化：O(1)アクセス）
         
@@ -273,7 +284,11 @@ class InspectorAssignmentManager:
             self.inspector_name_to_row[name_key] = inspector_info.iloc[0]
         return inspector_info
     
-    def _get_inspector_by_code(self, inspector_code, inspector_master_df):
+    def _get_inspector_by_code(
+        self,
+        inspector_code: Any,
+        inspector_master_df: pd.DataFrame
+    ) -> pd.DataFrame:
         """
         検査員コードから検査員情報を取得（高速化：O(1)アクセス）
         
@@ -301,7 +316,11 @@ class InspectorAssignmentManager:
             self.inspector_code_to_row[code_key] = inspector_info.iloc[0]
         return inspector_info
     
-    def _get_inspector_by_id(self, inspector_id, inspector_master_df):
+    def _get_inspector_by_id(
+        self,
+        inspector_id: Any,
+        inspector_master_df: pd.DataFrame
+    ) -> pd.DataFrame:
         """
         検査員IDから検査員情報を取得（高速化：O(1)アクセス）
         
@@ -329,10 +348,16 @@ class InspectorAssignmentManager:
             self.inspector_id_to_row[id_key] = inspector_info.iloc[0]
         return inspector_info
 
-    def _normalize_shipping_date(self, shipping_date):
+    def _normalize_shipping_date(self, shipping_date: Any) -> pd.Timestamp:
         """
         出荷予定日の文字列表現などを一貫した Timestamp に変換する。
         当日洗浄上がり品や当日先行検査などの優先案件は最優先となるよう最小値へマップする。
+        
+        Args:
+            shipping_date: 出荷予定日（文字列、日付、Timestampなど）
+        
+        Returns:
+            pd.Timestamp: 正規化されたTimestamp
         """
         try:
             if shipping_date is None or (isinstance(shipping_date, float) and pd.isna(shipping_date)):
@@ -362,11 +387,71 @@ class InspectorAssignmentManager:
             return normalized
         except Exception:
             return pd.Timestamp.max
+    
+    def _convert_shipping_date(self, val: Any) -> Union[str, pd.Timestamp, Any]:
+        """
+        出荷予定日を日付型に変換（当日洗浄品は文字列として保持）
+        
+        複数のメソッドで使用されるため、共通メソッドとして定義
+        
+        Args:
+            val: 出荷予定日の値（文字列、日付、Timestampなど）
+        
+        Returns:
+            当日洗浄品の場合は文字列、その他の場合はpd.Timestampまたは元の値
+        """
+        if pd.isna(val):
+            return val
+        
+        val_str = str(val).strip()
+        
+        # 当日洗浄品の場合は文字列として保持
+        if self._is_same_day_cleaning(val_str):
+            return val_str
+        
+        # その他の場合は日付型に変換
+        try:
+            return pd.to_datetime(val, errors='coerce')
+        except Exception:
+            return val
+    
+    def _is_same_day_cleaning(self, val_str: str) -> bool:
+        """
+        当日洗浄品かどうかを判定
+        
+        Args:
+            val_str: 判定する文字列
+        
+        Returns:
+            当日洗浄品の場合はTrue、それ以外はFalse
+        """
+        return (
+            val_str == "当日洗浄上がり品" or 
+            val_str == "当日洗浄品" or
+            "当日洗浄" in val_str or
+            val_str == "先行検査" or
+            val_str == "当日先行検査"
+        )
 
-    def _gather_skill_candidates_for_feasibility(self, product_number, process_number, skill_master_df, inspector_master_df):
+    def _gather_skill_candidates_for_feasibility(
+        self,
+        product_number: str,
+        process_number: Optional[Any],
+        skill_master_df: pd.DataFrame,
+        inspector_master_df: pd.DataFrame
+    ) -> List[Dict[str, Any]]:
         """
         スキルマスタを基に該当品番の候補検査員を抽出する。
         勤務時間や4時間ルールのような動的制約は考慮せず、スキル適合と新製品チームのみで構成。
+        
+        Args:
+            product_number: 品番
+            process_number: 工程番号（オプション）
+            skill_master_df: スキルマスタのDataFrame
+            inspector_master_df: 検査員マスタのDataFrame
+        
+        Returns:
+            候補検査員のリスト（各要素は辞書形式）
         """
         candidates = []
         try:
@@ -430,8 +515,21 @@ class InspectorAssignmentManager:
             self.log_message(f"候補抽出中にエラーが発生しました（品番 {product_number}）: {exc}")
             return []
 
-    def _calculate_remaining_capacity(self, inspector_code, inspector_master_df):
-        """指定検査員の当日残り勤務時間を計算する。0未満の場合は0を返す。"""
+    def _calculate_remaining_capacity(
+        self,
+        inspector_code: str,
+        inspector_master_df: pd.DataFrame
+    ) -> float:
+        """
+        指定検査員の当日残り勤務時間を計算する。0未満の場合は0を返す。
+        
+        Args:
+            inspector_code: 検査員コード
+            inspector_master_df: 検査員マスタのDataFrame
+        
+        Returns:
+            残り勤務時間（時間単位）
+        """
         current_date = pd.Timestamp.now().date()
         daily_hours = self.inspector_daily_assignments.get(inspector_code, {}).get(current_date, 0.0)
         max_hours = self.get_inspector_max_hours(inspector_code, inspector_master_df)
@@ -439,7 +537,12 @@ class InspectorAssignmentManager:
         remaining = max_hours - daily_hours - WORK_HOURS_BUFFER
         return max(0.0, remaining)
 
-    def _calculate_assignability_status(self, row, base_candidates, inspector_master_df):
+    def _calculate_assignability_status(
+        self,
+        row: Union[Dict[str, Any], Any],
+        base_candidates: List[Dict[str, Any]],
+        inspector_master_df: pd.DataFrame
+    ) -> Tuple[str, float]:
         """
         事前のアサイン可能性判定を行う。
         base_candidates はスキル的に対応可能な検査員リスト。
@@ -449,6 +552,16 @@ class InspectorAssignmentManager:
         - skill_mismatch: スキル該当者が0
         - capacity_shortage: 候補の残時間合計が不足
         - ready: 理論上割当可能
+        
+        Args:
+            row: 行データ（辞書またはオブジェクト）
+            base_candidates: スキル的に対応可能な検査員リスト
+            inspector_master_df: 検査員マスタのDataFrame
+        
+        Returns:
+            Tuple[status, available_capacity]
+            - status: 割当可能性ステータス
+            - available_capacity: 利用可能な容量
         """
         # rowが辞書の場合はget、そうでない場合は直接アクセス
         if isinstance(row, dict):
@@ -473,13 +586,306 @@ class InspectorAssignmentManager:
 
         return "ready", total_capacity
 
-    def _calculate_feasible_inspector_count(self, product_number, process_number, skill_master_df, inspector_master_df):
-        """feasible_inspector_count の算出用ヘルパー。"""
+    def _calculate_feasible_inspector_count(
+        self,
+        product_number: str,
+        process_number: Optional[Any],
+        skill_master_df: pd.DataFrame,
+        inspector_master_df: pd.DataFrame
+    ) -> Tuple[int, List[Dict[str, Any]]]:
+        """
+        feasible_inspector_count の算出用ヘルパー
+        
+        Args:
+            product_number: 品番
+            process_number: 工程番号（オプション）
+            skill_master_df: スキルマスタのDataFrame
+            inspector_master_df: 検査員マスタのDataFrame
+        
+        Returns:
+            Tuple[候補者数, 候補者リスト]
+        """
         candidates = self._gather_skill_candidates_for_feasibility(product_number, process_number, skill_master_df, inspector_master_df)
         return len(candidates), candidates
     
-    def create_inspector_assignment_table(self, assignment_df, product_master_df, product_master_path=None, process_master_path=None, inspection_target_keywords=None):
-        """検査員割振りテーブルを作成（高速化版：itertuplesとマージ最適化）"""
+    def _prepare_result_dataframe(self, inspector_df: pd.DataFrame) -> pd.DataFrame:
+        """
+        結果用のDataFrameを準備
+        
+        Args:
+            inspector_df: 元のDataFrame
+        
+        Returns:
+            新しい列が追加されたDataFrame
+        """
+        result_df = inspector_df.copy()
+        
+        # 新しい列を追加
+        result_df['検査員人数'] = 0
+        result_df['分割検査時間'] = 0.0
+        for i in range(1, 6):
+            result_df[f'検査員{i}'] = ''
+        result_df['チーム情報'] = ''
+        # ボトルネック優先度・可視化用カラム
+        result_df['feasible_inspector_count'] = 0
+        result_df['available_capacity_hours'] = 0.0
+        result_df['assignability_status'] = 'pending'
+        result_df['remaining_work_hours'] = 0.0
+        result_df['over_product_limit_flag'] = False
+        
+        return result_df
+    
+    def _add_sorting_columns(
+        self,
+        result_df: pd.DataFrame,
+        skill_master_df: pd.DataFrame
+    ) -> pd.DataFrame:
+        """
+        ソート用の補助列を追加
+        
+        Args:
+            result_df: 結果DataFrame
+            skill_master_df: スキルマスタのDataFrame
+        
+        Returns:
+            補助列が追加されたDataFrame
+        """
+        # 【追加】固定検査員が設定されている品番を最優先にするソートキーを追加
+        def has_fixed_inspectors(row: Any) -> bool:
+            product_number = row['品番']
+            fixed_inspector_names = self.fixed_inspectors_by_product.get(product_number, [])
+            return len(fixed_inspector_names) > 0
+        
+        result_df['_has_fixed_inspectors'] = result_df.apply(has_fixed_inspectors, axis=1)
+        
+        # 新規品かどうかを判定する列を追加（ソート前に）
+        # 高速化: ベクトル化（applyの代わりにisinを使用）
+        if len(skill_master_df) > 0:
+            skill_product_numbers = set(skill_master_df.iloc[:, 0].astype(str).str.strip().unique())
+            result_df['_is_new_product'] = ~result_df['品番'].astype(str).str.strip().isin(skill_product_numbers)
+        else:
+            result_df['_is_new_product'] = True
+        
+        return result_df
+    
+    def _calculate_feasibility_and_candidates(
+        self,
+        result_df: pd.DataFrame,
+        skill_master_df: pd.DataFrame,
+        inspector_master_df: pd.DataFrame
+    ) -> pd.DataFrame:
+        """
+        事前にスキルベースの候補人数と割当可能性を算出
+        
+        Args:
+            result_df: 結果DataFrame
+            skill_master_df: スキルマスタのDataFrame
+            inspector_master_df: 検査員マスタのDataFrame
+        
+        Returns:
+            候補情報が追加されたDataFrame
+        """
+        base_candidate_cache: Dict[int, List[Dict[str, Any]]] = {}
+        feasible_counts: List[int] = []
+        assign_statuses: List[str] = []
+        capacity_list: List[float] = []
+        
+        # 列名のインデックスマップを作成（itertuples用）
+        result_cols = {col: idx for idx, col in enumerate(result_df.columns)}
+
+        for row_idx, row in enumerate(result_df.itertuples(index=False)):
+            product_number = row[result_cols['品番']]
+            process_number = row[result_cols.get('現在工程番号', -1)] if '現在工程番号' in result_cols else ''
+            if process_number == -1:
+                process_number = ''
+            
+            # 行データを辞書形式に変換（_calculate_assignability_status用）
+            row_dict = {col: row[result_cols[col]] for col in result_df.columns}
+            
+            feasible_count, base_candidates = self._calculate_feasible_inspector_count(
+                product_number,
+                process_number,
+                skill_master_df,
+                inspector_master_df
+            )
+            base_candidate_cache[row_idx] = base_candidates
+            feasible_counts.append(feasible_count)
+            status, total_capacity = self._calculate_assignability_status(row_dict, base_candidates, inspector_master_df)
+            assign_statuses.append(status)
+            capacity_list.append(round(total_capacity, 2))
+
+        result_df['feasible_inspector_count'] = feasible_counts
+        result_df['assignability_status'] = assign_statuses
+        result_df['available_capacity_hours'] = capacity_list
+        # 後続フェーズで利用するためにベース候補を保持
+        # 高速化: 参照で保持（必要に応じてassign_inspectors内でコピー）
+        result_df['_base_candidates'] = [base_candidate_cache[idx] for idx in result_df.index]
+        
+        return result_df
+    
+    def _sort_lots_by_priority(
+        self,
+        result_df: pd.DataFrame,
+        result_cols: Dict[str, int]
+    ) -> pd.DataFrame:
+        """
+        ロットを優先順位でソート
+        
+        Args:
+            result_df: 結果DataFrame
+            result_cols: 列名のインデックスマップ
+        
+        Returns:
+            ソートされたDataFrame
+        """
+        # 出荷予定日の優先順位を設定（厳守ルール）
+        # 優先度: 1=当日、2=当日洗浄品、3=先行検査品、4=翌日/翌営業日、5=それ以降
+        today = pd.Timestamp.now().normalize()
+        today_date = today.date()
+        
+        # 翌営業日の計算（金曜日の場合は翌週の月曜日）
+        def get_next_business_day(date_val: date) -> date:
+            """翌営業日を取得（金曜日の場合は翌週の月曜日）"""
+            weekday = date_val.weekday()  # 0=月曜日, 4=金曜日
+            if weekday == 4:  # 金曜日
+                return date_val + timedelta(days=3)  # 翌週の月曜日
+            else:
+                return date_val + timedelta(days=1)  # 翌日
+        
+        next_business_day = get_next_business_day(today_date)
+        
+        def calculate_priority(row: Any) -> int:
+            shipping_date = row['出荷予定日']
+            is_new_product = row['_is_new_product']
+            
+            if pd.notna(shipping_date):
+                # 1. 当日の日付かどうかをチェック
+                try:
+                    date_value = pd.to_datetime(shipping_date, errors='coerce')
+                    if pd.notna(date_value):
+                        shipping_date_date = date_value.date()
+                        if shipping_date_date == today_date:
+                            return 1  # 当日が最優先
+                except Exception:
+                    pass
+                
+                # 2. 当日洗浄上がり品かどうかをチェック
+                shipping_date_str = str(shipping_date).strip()
+                if (shipping_date_str == "当日洗浄上がり品" or 
+                    shipping_date_str == "当日洗浄品" or
+                    "当日洗浄" in shipping_date_str):
+                    return 2  # 当日洗浄品が2番目
+                
+                # 3. 先行検査品かどうかをチェック
+                if (shipping_date_str == "先行検査" or
+                    shipping_date_str == "当日先行検査"):
+                    return 3  # 先行検査品が3番目
+                
+                # 4. 翌日または翌営業日かどうかをチェック
+                try:
+                    date_value = pd.to_datetime(shipping_date, errors='coerce')
+                    if pd.notna(date_value):
+                        shipping_date_date = date_value.date()
+                        if shipping_date_date == next_business_day:
+                            return 4  # 翌日/翌営業日が4番目
+                except Exception:
+                    pass
+                
+                # 5. それ以降の日付
+                try:
+                    date_value = pd.to_datetime(shipping_date, errors='coerce')
+                    if pd.notna(date_value):
+                        return 5  # それ以降の日付が5番目
+                except Exception:
+                    pass
+                
+                # 翌日以降の新規品かどうかをチェック（既存のロジックを維持）
+                if is_new_product:
+                    try:
+                        date_value = pd.to_datetime(shipping_date, errors='coerce')
+                        if pd.notna(date_value):
+                            shipping_date_date = date_value.date()
+                            if shipping_date_date > today_date:
+                                return 3  # 翌日以降の新規品が3番目
+                    except Exception:
+                        pass
+            
+            return 4  # その他が最後
+        
+        result_df['_shipping_priority'] = result_df.apply(calculate_priority, axis=1)
+        
+        # 同一品番の当日洗浄上がり品/先行検査品のロット数を事前にカウント（各ロットに均等に検査員を分散させるため）
+        same_day_cleaning_product_counts: Dict[str, int] = {}
+        for row_idx, row in enumerate(result_df.itertuples(index=False)):
+            shipping_date = row[result_cols.get('出荷予定日', -1)] if '出荷予定日' in result_cols else 'N/A'
+            shipping_date_str = str(shipping_date).strip() if pd.notna(shipping_date) else ''
+            is_same_day_cleaning = (
+                shipping_date_str == "当日洗浄上がり品" or
+                shipping_date_str == "当日洗浄品" or
+                "当日洗浄" in shipping_date_str or
+                shipping_date_str == "先行検査" or
+                shipping_date_str == "当日先行検査"
+            )
+            if is_same_day_cleaning:
+                product_number = row[result_cols['品番']]
+                same_day_cleaning_product_counts[product_number] = same_day_cleaning_product_counts.get(product_number, 0) + 1
+        
+        # 各ロットにロット数を記録
+        # 高速化: ベクトル化（applyの代わりに条件分岐をベクトル化）
+        shipping_date_col = result_df.get('出荷予定日', pd.Series([''] * len(result_df), index=result_df.index))
+        shipping_date_str = shipping_date_col.astype(str).str.strip()
+        is_same_day_cleaning_mask = (
+            shipping_date_str.isin(["当日洗浄上がり品", "当日洗浄品", "先行検査", "当日先行検査"]) |
+            shipping_date_str.str.contains("当日洗浄", na=False)
+        )
+        product_numbers = result_df['品番'].astype(str).str.strip()
+        result_df['_same_day_cleaning_lot_count'] = (
+            is_same_day_cleaning_mask * product_numbers.map(same_day_cleaning_product_counts).fillna(0)
+        ).astype(int)
+        
+        result_df['_sort_product_id'] = result_df['品番'].astype(str)
+        # 【変更】固定検査員が設定されている品番を最優先にソート
+        # 登録済み品番リストの固定検査員が設定されている品番は、出荷予定日よりも優先して割り当てる
+        result_df = result_df.sort_values(
+            ['_has_fixed_inspectors', '_shipping_priority', 'feasible_inspector_count', '出荷予定日', '_sort_product_id'],
+            ascending=[False, True, True, True, True],  # _has_fixed_inspectors: False=固定検査員ありを優先（False < TrueなのでFalseが先）
+            na_position='last'
+        ).reset_index(drop=True)
+        
+        # 固定検査員が設定されている品番のロット数をログ出力
+        fixed_inspector_lots = result_df[result_df['_has_fixed_inspectors'] == True]
+        if not fixed_inspector_lots.empty:
+            fixed_products = fixed_inspector_lots['品番'].unique()
+            self.log_message(f"固定検査員が設定されている品番のロットを最優先で割り当てます: {len(fixed_inspector_lots)}ロット（品番: {list(fixed_products)}）")
+        
+        # 一時列を削除
+        result_df = result_df.drop(columns=['_shipping_priority'], errors='ignore')
+        
+        self.log_message("並び順ロジック: 出荷予定日の優先順位ごとに候補数が少ないロットを優先してソートしました。")
+        
+        return result_df
+    
+    def create_inspector_assignment_table(
+        self,
+        assignment_df: pd.DataFrame,
+        product_master_df: pd.DataFrame,
+        product_master_path: Optional[str] = None,
+        process_master_path: Optional[str] = None,
+        inspection_target_keywords: Optional[List[str]] = None
+    ) -> Optional[pd.DataFrame]:
+        """
+        検査員割振りテーブルを作成（高速化版：itertuplesとマージ最適化）
+        
+        Args:
+            assignment_df: ロット割当結果のDataFrame
+            product_master_df: 製品マスタのDataFrame
+            product_master_path: 製品マスタファイルのパス（オプション）
+            process_master_path: 工程マスタファイルのパス（オプション）
+            inspection_target_keywords: 検査対象キーワードリスト（オプション）
+        
+        Returns:
+            検査員割当てテーブルのDataFrame、失敗時はNone
+        """
         try:
             if assignment_df.empty:
                 self.log_message("ロット割り当て結果がありません")
@@ -742,8 +1148,29 @@ class InspectorAssignmentManager:
             logger.error(error_msg)
             return None
     
-    def assign_inspectors(self, inspector_df, inspector_master_df, skill_master_df, show_skill_values=False, process_master_df=None, inspection_target_keywords=None):
-        """検査員を割り当てる"""
+    def assign_inspectors(
+        self,
+        inspector_df: pd.DataFrame,
+        inspector_master_df: pd.DataFrame,
+        skill_master_df: pd.DataFrame,
+        show_skill_values: bool = False,
+        process_master_df: Optional[pd.DataFrame] = None,
+        inspection_target_keywords: Optional[List[str]] = None
+    ) -> pd.DataFrame:
+        """
+        検査員を割り当てる
+        
+        Args:
+            inspector_df: 検査対象のロットデータ（品番、不足数、検査時間など）
+            inspector_master_df: 検査員マスタデータ（氏名、コード、最大勤務時間など）
+            skill_master_df: スキルマスタデータ（品番ごとの検査員スキル）
+            show_skill_values: スキル値を表示するかどうか
+            process_master_df: 工程マスタデータ（オプション）
+            inspection_target_keywords: 検査対象キーワードリスト（オプション）
+        
+        Returns:
+            割り当て結果を含むDataFrame（検査員1〜5列が追加される）
+        """
         try:
             if inspector_df is None or inspector_df.empty:
                 return inspector_df
@@ -759,227 +1186,25 @@ class InspectorAssignmentManager:
             # 【高速化】検査員マスタのインデックスを構築
             self._build_inspector_index(inspector_master_df)
             
-            # 出荷予定日を日付型に変換する関数（当日洗浄品は文字列として保持）
-            def convert_shipping_date(val):
-                if pd.isna(val):
-                    return val
-                val_str = str(val).strip()
-                # 当日洗浄品の場合は文字列として保持
-                if (val_str == "当日洗浄上がり品" or 
-                    val_str == "当日洗浄品" or
-                    "当日洗浄" in val_str or
-                    val_str == "先行検査" or
-                    val_str == "当日先行検査"):
-                    return val_str  # 文字列として保持
-                # その他の場合は日付型に変換
-                try:
-                    return pd.to_datetime(val, errors='coerce')
-                except:
-                    return val
-            
-            # 結果用のDataFrameを作成
-            result_df = inspector_df.copy()
-            
-            # 新しい列を追加
-            result_df['検査員人数'] = 0
-            result_df['分割検査時間'] = 0.0
-            result_df['検査員1'] = ''
-            result_df['検査員2'] = ''
-            result_df['検査員3'] = ''
-            result_df['検査員4'] = ''
-            result_df['検査員5'] = ''
-            result_df['チーム情報'] = ''
-            # ボトルネック優先度・可視化用カラム
-            result_df['feasible_inspector_count'] = 0
-            result_df['available_capacity_hours'] = 0.0
-            result_df['assignability_status'] = 'pending'
-            result_df['remaining_work_hours'] = 0.0
-            result_df['over_product_limit_flag'] = False
+            # 結果用のDataFrameを準備
+            result_df = self._prepare_result_dataframe(inspector_df)
             
             # 出荷予定日でソート（古い順）- 最優先ルール
             # 日付形式を統一してからソート（当日洗浄品は文字列として保持）
-            result_df['出荷予定日'] = result_df['出荷予定日'].apply(convert_shipping_date)
+            result_df['出荷予定日'] = result_df['出荷予定日'].apply(self._convert_shipping_date)
             
-            # 【追加】固定検査員が設定されている品番を最優先にするソートキーを追加
-            # 登録済み品番リストの固定検査員が設定されている品番は、出荷予定日よりも優先して割り当てる
-            def has_fixed_inspectors(row):
-                product_number = row['品番']
-                fixed_inspector_names = self.fixed_inspectors_by_product.get(product_number, [])
-                return len(fixed_inspector_names) > 0
-            
-            result_df['_has_fixed_inspectors'] = result_df.apply(has_fixed_inspectors, axis=1)
-            
-            # 新規品かどうかを判定する列を追加（ソート前に）
-            def is_new_product_row(row):
-                product_number = row['品番']
-                skill_rows = skill_master_df[skill_master_df.iloc[:, 0] == product_number]
-                return skill_rows.empty
-            
-            result_df['_is_new_product'] = result_df.apply(is_new_product_row, axis=1)
+            # ソート用の補助列を追加
+            result_df = self._add_sorting_columns(result_df, skill_master_df)
 
             # 事前にスキルベースの候補人数と割当可能性を算出
-            base_candidate_cache = {}
-            feasible_counts = []
-            assign_statuses = []
-            capacity_list = []
-            
-            # 列名のインデックスマップを作成（itertuples用）
-            result_cols = {col: idx for idx, col in enumerate(result_df.columns)}
-
-            for row_idx, row in enumerate(result_df.itertuples(index=False)):
-                product_number = row[result_cols['品番']]
-                process_number = row[result_cols.get('現在工程番号', -1)] if '現在工程番号' in result_cols else ''
-                if process_number == -1:
-                    process_number = ''
-                
-                # 行データを辞書形式に変換（_calculate_assignability_status用）
-                row_dict = {col: row[result_cols[col]] for col in result_df.columns}
-                
-                feasible_count, base_candidates = self._calculate_feasible_inspector_count(
-                    product_number,
-                    process_number,
-                    skill_master_df,
-                    inspector_master_df
-                )
-                base_candidate_cache[row_idx] = base_candidates
-                feasible_counts.append(feasible_count)
-                status, total_capacity = self._calculate_assignability_status(row_dict, base_candidates, inspector_master_df)
-                assign_statuses.append(status)
-                capacity_list.append(round(total_capacity, 2))
-                shipping_date = row[result_cols.get('出荷予定日', -1)]
-
-            result_df['feasible_inspector_count'] = feasible_counts
-            result_df['assignability_status'] = assign_statuses
-            result_df['available_capacity_hours'] = capacity_list
-            # 後続フェーズで利用するためにベース候補を保持（深いコピーで再利用）
-            result_df['_base_candidates'] = [copy.deepcopy(base_candidate_cache[idx]) for idx in result_df.index]
-            
-            # 並び順ロジック: 出荷予定日の優先順位ごとに候補数が少ないロットを優先
-            # 1. 出荷予定日の優先順位（1=当日、2=当日洗浄品、3=先行検査品、4=翌日、5=それ以降）
-            # 2. 各優先順位グループ内で feasible_inspector_count（昇順）※候補が少ないロットを優先
-            # 3. 出荷予定日（日付順）
-            # 4. 品番ID（ソート安定性確保）
-            
-            # 出荷予定日の優先順位を設定（厳守ルール）
-            # 優先度: 1=当日、2=当日洗浄品、3=先行検査品、4=翌日/翌営業日、5=それ以降
-            today = pd.Timestamp.now().normalize()
-            today_date = today.date()
-            
-            # 翌営業日の計算（金曜日の場合は翌週の月曜日）
-            def get_next_business_day(date_val):
-                """翌営業日を取得（金曜日の場合は翌週の月曜日）"""
-                weekday = date_val.weekday()  # 0=月曜日, 4=金曜日
-                if weekday == 4:  # 金曜日
-                    return date_val + timedelta(days=3)  # 翌週の月曜日
-                else:
-                    return date_val + timedelta(days=1)  # 翌日
-            
-            next_business_day = get_next_business_day(today_date)
-            
-            def calculate_priority(row):
-                shipping_date = row['出荷予定日']
-                is_new_product = row['_is_new_product']
-                
-                if pd.notna(shipping_date):
-                    # 1. 当日の日付かどうかをチェック
-                    try:
-                        date_value = pd.to_datetime(shipping_date, errors='coerce')
-                        if pd.notna(date_value):
-                            shipping_date_date = date_value.date()
-                            if shipping_date_date == today_date:
-                                return 1  # 当日が最優先
-                    except Exception:
-                        pass
-                    
-                    # 2. 当日洗浄上がり品かどうかをチェック
-                    shipping_date_str = str(shipping_date).strip()
-                    if (shipping_date_str == "当日洗浄上がり品" or 
-                        shipping_date_str == "当日洗浄品" or
-                        "当日洗浄" in shipping_date_str):
-                        return 2  # 当日洗浄品が2番目
-                    
-                    # 3. 先行検査品かどうかをチェック
-                    if (shipping_date_str == "先行検査" or
-                        shipping_date_str == "当日先行検査"):
-                        return 3  # 先行検査品が3番目
-                    
-                    # 4. 翌日または翌営業日かどうかをチェック
-                    try:
-                        date_value = pd.to_datetime(shipping_date, errors='coerce')
-                        if pd.notna(date_value):
-                            shipping_date_date = date_value.date()
-                            if shipping_date_date == next_business_day:
-                                return 4  # 翌日/翌営業日が4番目
-                    except Exception:
-                        pass
-                    
-                    # 5. それ以降の日付
-                    try:
-                        date_value = pd.to_datetime(shipping_date, errors='coerce')
-                        if pd.notna(date_value):
-                            return 5  # それ以降の日付が5番目
-                    except Exception:
-                        pass
-                    
-                    # 翌日以降の新規品かどうかをチェック（既存のロジックを維持）
-                    if is_new_product:
-                        try:
-                            date_value = pd.to_datetime(shipping_date, errors='coerce')
-                            if pd.notna(date_value):
-                                shipping_date_date = date_value.date()
-                                if shipping_date_date > today_date:
-                                    return 3  # 翌日以降の新規品が3番目
-                        except Exception:
-                            pass
-                
-                return 4  # その他が最後
-            
-            result_df['_shipping_priority'] = result_df.apply(calculate_priority, axis=1)
-            
-            # 同一品番の当日洗浄上がり品/先行検査品のロット数を事前にカウント（各ロットに均等に検査員を分散させるため）
-            same_day_cleaning_product_counts = {}
-            for row_idx, row in enumerate(result_df.itertuples(index=False)):
-                shipping_date = row[result_cols.get('出荷予定日', -1)] if '出荷予定日' in result_cols else 'N/A'
-                shipping_date_str = str(shipping_date).strip() if pd.notna(shipping_date) else ''
-                is_same_day_cleaning = (
-                    shipping_date_str == "当日洗浄上がり品" or
-                    shipping_date_str == "当日洗浄品" or
-                    "当日洗浄" in shipping_date_str or
-                    shipping_date_str == "先行検査" or
-                    shipping_date_str == "当日先行検査"
-                )
-                if is_same_day_cleaning:
-                    product_number = row[result_cols['品番']]
-                    same_day_cleaning_product_counts[product_number] = same_day_cleaning_product_counts.get(product_number, 0) + 1
-            
-            # 各ロットにロット数を記録
-            result_df['_same_day_cleaning_lot_count'] = result_df.apply(
-                lambda row: same_day_cleaning_product_counts.get(row['品番'], 0) if (
-                    str(row.get('出荷予定日', '')).strip() in ["当日洗浄上がり品", "当日洗浄品", "先行検査", "当日先行検査"] or
-                    "当日洗浄" in str(row.get('出荷予定日', '')).strip()
-                ) else 0,
-                axis=1
+            result_df = self._calculate_feasibility_and_candidates(
+                result_df, skill_master_df, inspector_master_df
             )
             
-            result_df['_sort_product_id'] = result_df['品番'].astype(str)
-            # 【変更】固定検査員が設定されている品番を最優先にソート
-            # 登録済み品番リストの固定検査員が設定されている品番は、出荷予定日よりも優先して割り当てる
-            result_df = result_df.sort_values(
-                ['_has_fixed_inspectors', '_shipping_priority', 'feasible_inspector_count', '出荷予定日', '_sort_product_id'],
-                ascending=[False, True, True, True, True],  # _has_fixed_inspectors: False=固定検査員ありを優先（False < TrueなのでFalseが先）
-                na_position='last'
-            ).reset_index(drop=True)
-            
-            # 固定検査員が設定されている品番のロット数をログ出力
-            fixed_inspector_lots = result_df[result_df['_has_fixed_inspectors'] == True]
-            if not fixed_inspector_lots.empty:
-                fixed_products = fixed_inspector_lots['品番'].unique()
-                self.log_message(f"固定検査員が設定されている品番のロットを最優先で割り当てます: {len(fixed_inspector_lots)}ロット（品番: {list(fixed_products)}）")
-            
-            # 一時列を削除
-            result_df = result_df.drop(columns=['_shipping_priority'], errors='ignore')
-            
-            self.log_message("並び順ロジック: 出荷予定日の優先順位ごとに候補数が少ないロットを優先してソートしました。")
+            # 並び順ロジック: 出荷予定日の優先順位ごとに候補数が少ないロットを優先
+            # 列名のインデックスマップを作成（itertuples用）
+            result_cols = {col: idx for idx, col in enumerate(result_df.columns)}
+            result_df = self._sort_lots_by_priority(result_df, result_cols)
             
             # 各ロットに対して検査員を割り当て
             result_cols_after_sort = {col: idx for idx, col in enumerate(result_df.columns)}
@@ -1025,7 +1250,8 @@ class InspectorAssignmentManager:
                 base_candidates = result_df.at[index, '_base_candidates'] if '_base_candidates' in result_df.columns else []
                 if not isinstance(base_candidates, list):
                     base_candidates = []
-                available_inspectors = copy.deepcopy(base_candidates)
+                # 高速化: 浅いコピーで十分（変更が必要な場合のみ深いコピー）
+                available_inspectors = [insp.copy() for insp in base_candidates] if base_candidates else []
                 
                 # 【追加】固定検査員が設定されている品番の場合、固定検査員を優先的に配置
                 # 登録済み品番リストの固定検査員が設定されている品番は、出荷予定日よりも優先して割り当てる
@@ -1336,14 +1562,16 @@ class InspectorAssignmentManager:
                     
                     # 既に割り当てられた検査員も含めて、全候補で再割り当て
                     # 既に割り当てられた検査員の情報を保持
-                    existing_assigned = copy.deepcopy(assigned_inspectors)
+                    # 高速化: 浅いコピーで十分（変更が必要な場合のみ）
+                    existing_assigned = [insp.copy() for insp in assigned_inspectors]
                     
                     # 最新の状態を再取得（既にこの品番に割り当てられた検査員を取得）
                     already_assigned_to_this_product = self.same_day_cleaning_inspectors.get(product_number, set())
                     
                     # 全候補を統合
                     # 当日洗浄上がり品の場合は、既に割り当てられた検査員を追加しない（品番単位の制約を維持）
-                    all_candidates = copy.deepcopy(filtered_candidates)
+                    # 高速化: 浅いコピーで十分
+                    all_candidates = [c.copy() for c in filtered_candidates]
                     # 当日洗浄上がり品でない場合のみ、既に割り当てられた検査員を追加
                     if not is_same_day_cleaning:
                         for existing in existing_assigned:
@@ -1498,7 +1726,8 @@ class InspectorAssignmentManager:
                                     all_candidates_with_new_team.extend(new_product_candidates_filtered)
                                 else:
                                     # 全候補を統合（元の候補情報を使用）
-                                    all_candidates_with_new_team = copy.deepcopy(all_candidates)
+                                    # 高速化: 浅いコピーで十分
+                                    all_candidates_with_new_team = [c.copy() for c in all_candidates]
                                     all_candidates_with_new_team.extend(new_product_candidates)
                                 
                                 # 【追加】総検査時間が少ない検査員を優先するソート
@@ -2002,7 +2231,17 @@ class InspectorAssignmentManager:
             
             return inspector_df
     
-    def get_available_inspectors(self, product_number, process_number, skill_master_df, inspector_master_df, shipping_date=None, allow_new_team_fallback=False, process_master_df=None, inspection_target_keywords=None):
+    def get_available_inspectors(
+        self,
+        product_number: str,
+        process_number: Optional[Any],
+        skill_master_df: pd.DataFrame,
+        inspector_master_df: pd.DataFrame,
+        shipping_date: Optional[Any] = None,
+        allow_new_team_fallback: bool = False,
+        process_master_df: Optional[pd.DataFrame] = None,
+        inspection_target_keywords: Optional[List[str]] = None
+    ) -> List[Dict[str, Any]]:
         """
         利用可能な検査員を取得
         
@@ -2017,6 +2256,9 @@ class InspectorAssignmentManager:
                 False: 新規品対応チームを使用しない（通常の品番の場合）
             process_master_df: 工程マスタのDataFrame（先行検査品・当日洗浄品用）
             inspection_target_keywords: 検査対象CSVのキーワードリスト（先行検査品・当日洗浄品用）
+        
+        Returns:
+            利用可能な検査員のリスト
         """
         try:
             available_inspectors = []
@@ -2495,7 +2737,10 @@ class InspectorAssignmentManager:
             self.log_message("エラーのため新製品チームにフォールバックします")
             return self.get_new_product_team_inspectors(inspector_master_df)
     
-    def load_process_master(self, process_master_path):
+    def load_process_master(
+        self,
+        process_master_path: str
+    ) -> Optional[pd.DataFrame]:
         """
         工程マスタ.xlsxを読み込む（キャッシュ対応・高速化）
         
@@ -2503,7 +2748,7 @@ class InspectorAssignmentManager:
             process_master_path: 工程マスタファイルのパス
             
         Returns:
-            DataFrame: 工程マスタのDataFrame（Noneの場合は読み込み失敗）
+            工程マスタのDataFrame（Noneの場合は読み込み失敗）
         """
         try:
             if not process_master_path or not Path(process_master_path).exists():
@@ -2540,11 +2785,11 @@ class InspectorAssignmentManager:
             return None
     
     def infer_process_number_from_process_master(
-        self, 
-        product_number, 
-        process_master_df, 
-        inspection_target_keywords
-    ):
+        self,
+        product_number: str,
+        process_master_df: pd.DataFrame,
+        inspection_target_keywords: Optional[List[str]]
+    ) -> Optional[str]:
         """
         工程マスタから工程番号を推定する
         
@@ -2554,7 +2799,7 @@ class InspectorAssignmentManager:
             inspection_target_keywords: 検査対象CSVのA列のキーワードリスト（外観, エアー, バリ, 顕微鏡, 棒通し）
             
         Returns:
-            str: 推定された工程番号（見つからない場合はNone）
+            推定された工程番号（見つからない場合はNone）
         """
         try:
             if process_master_df is None or process_master_df.empty:
@@ -2601,22 +2846,22 @@ class InspectorAssignmentManager:
     
     def get_process_name_from_process_master(
         self,
-        product_number,
-        process_number,
-        process_master_df,
-        inspection_target_keywords
-    ):
+        product_number: str,
+        process_number: Optional[Any],
+        process_master_df: pd.DataFrame,
+        inspection_target_keywords: Optional[List[str]]
+    ) -> Optional[str]:
         """
         工程マスタから工程名を取得する
         
         Args:
             product_number: 品番
-            process_number: 工程番号（推定されたもの）
+            process_number: 工程番号
             process_master_df: 工程マスタのDataFrame
-            inspection_target_keywords: 検査対象CSVのA列のキーワードリスト（外観, エアー, バリ, 顕微鏡, 棒通し）
-            
+            inspection_target_keywords: 検査対象CSVのキーワードリスト
+        
         Returns:
-            str: 工程名（見つからない場合はNone）
+            工程名（見つからない場合はNone）
         """
         try:
             if process_master_df is None or process_master_df.empty:
@@ -2657,8 +2902,19 @@ class InspectorAssignmentManager:
             self.log_message(f"工程名の取得中にエラーが発生しました: {str(e)}")
             return None
     
-    def get_new_product_team_inspectors(self, inspector_master_df):
-        """新製品チームの検査員を取得"""
+    def get_new_product_team_inspectors(
+        self,
+        inspector_master_df: pd.DataFrame
+    ) -> List[Dict[str, Any]]:
+        """
+        新製品チームの検査員を取得
+        
+        Args:
+            inspector_master_df: 検査員マスタのDataFrame
+        
+        Returns:
+            新製品チームの検査員リスト
+        """
         try:
             new_product_team_inspectors = []
             
@@ -2768,7 +3024,15 @@ class InspectorAssignmentManager:
             self.log_message(f"新製品チームメンバー取得中にエラーが発生しました: {str(e)}")
             return []
     
-    def assign_inspectors_asymmetric(self, available_inspectors, required_hours, inspector_master_df, product_number, is_new_product=False, max_inspectors=None):
+    def assign_inspectors_asymmetric(
+        self,
+        available_inspectors: List[Dict[str, Any]],
+        required_hours: float,
+        inspector_master_df: pd.DataFrame,
+        product_number: str,
+        is_new_product: bool = False,
+        max_inspectors: Optional[int] = None
+    ) -> Tuple[List[Dict[str, Any]], float, float]:
         """
         改善ポイント: 非対称分配＋部分割当の実装
         
@@ -2777,7 +3041,7 @@ class InspectorAssignmentManager:
         余裕のある検査員（総検査時間が少ない検査員）を優先的に割り当てる。
         
         Args:
-            available_inspectors: 候補検査員リスト
+            available_inspectors: 候補検査員リスト（各要素は辞書形式）
             required_hours: 必要な検査時間（時間単位）
             inspector_master_df: 検査員マスタ
             product_number: 品番
@@ -2785,10 +3049,11 @@ class InspectorAssignmentManager:
             max_inspectors: 最大検査員数（特例: 5名制限など）
             
         Returns:
-            (assigned_inspectors, remaining_hours, assigned_time_sum)
-            - assigned_inspectors: 割り当てられた検査員リスト（各要素に'割当時間'キーが追加される）
-            - remaining_hours: 残りの未割当時間
-            - assigned_time_sum: 割り当てられた時間の合計
+            Tuple[
+                List[Dict[str, Any]],  # 割り当てられた検査員リスト（各要素に'割当時間'キーが追加される）
+                float,                  # 残りの未割当時間
+                float                    # 割り当てられた時間の合計
+            ]
         """
         try:
             if not available_inspectors:
@@ -2920,8 +3185,31 @@ class InspectorAssignmentManager:
             self.log_message(f"非対称分配中にエラーが発生しました: {str(e)}")
             return [], required_hours, 0.0
     
-    def select_inspectors(self, available_inspectors, required_count, divided_time, inspector_master_df, product_number, is_new_product=False, relax_work_hours=False):
-        """検査員を選択する（スキル組み合わせ考慮・勤務時間考慮・公平な割り当て方式）"""
+    def select_inspectors(
+        self,
+        available_inspectors: List[Dict[str, Any]],
+        required_count: int,
+        divided_time: float,
+        inspector_master_df: pd.DataFrame,
+        product_number: str,
+        is_new_product: bool = False,
+        relax_work_hours: bool = False
+    ) -> List[Dict[str, Any]]:
+        """
+        検査員を選択する（スキル組み合わせ考慮・勤務時間考慮・公平な割り当て方式）
+        
+        Args:
+            available_inspectors: 利用可能な検査員リスト
+            required_count: 必要な検査員数
+            divided_time: 分割検査時間
+            inspector_master_df: 検査員マスタ
+            product_number: 品番
+            is_new_product: 新規品フラグ
+            relax_work_hours: 勤務時間チェックを緩和するか
+        
+        Returns:
+            選択された検査員リスト
+        """
         try:
             # 特例: 一ロットで検査員が5名以上必要になる場合、5名に制限
             if required_count > 5:
@@ -3024,8 +3312,31 @@ class InspectorAssignmentManager:
             self.log_message(f"検査員選択中にエラーが発生しました: {str(e)}")
             return []
     
-    def select_inspectors_with_skill_combination(self, available_inspectors, required_count, divided_time, current_time, current_date, inspector_master_df, product_number=None):
-        """スキル組み合わせを考慮した検査員選択"""
+    def select_inspectors_with_skill_combination(
+        self,
+        available_inspectors: List[Dict[str, Any]],
+        required_count: int,
+        divided_time: float,
+        current_time: pd.Timestamp,
+        current_date: date,
+        inspector_master_df: pd.DataFrame,
+        product_number: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        スキル組み合わせを考慮した検査員選択
+        
+        Args:
+            available_inspectors: 利用可能な検査員リスト
+            required_count: 必要な検査員数
+            divided_time: 分割検査時間
+            current_time: 現在時刻
+            current_date: 現在日付
+            inspector_master_df: 検査員マスタ
+            product_number: 品番（オプション）
+        
+        Returns:
+            選択された検査員リスト
+        """
         try:
             # 特例: 一ロットで検査員が5名以上必要になる場合、5名に制限
             if required_count > 5:
@@ -3231,8 +3542,21 @@ class InspectorAssignmentManager:
             self.log_message(f"スキル組み合わせ選択中にエラーが発生しました: {str(e)}")
             return []
     
-    def select_two_inspectors_with_skill_combination(self, skill_groups, product_number=None):
-        """2人の検査員をスキル組み合わせ考慮で選択（バランス重視版）"""
+    def select_two_inspectors_with_skill_combination(
+        self,
+        skill_groups: Dict[str, List[Dict[str, Any]]],
+        product_number: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        2人の検査員をスキル組み合わせ考慮で選択（バランス重視版）
+        
+        Args:
+            skill_groups: スキルレベル別の検査員グループ
+            product_number: 品番（オプション）
+        
+        Returns:
+            選択された検査員リスト
+        """
         try:
             selected = []
             skill_order_map = {1: 0, 2: 1, 3: 2, 'new': 3}
@@ -3338,8 +3662,21 @@ class InspectorAssignmentManager:
             self.log_message(f"2人選択中にエラーが発生しました: {str(e)}")
             return []
     
-    def select_three_inspectors_with_skill_combination(self, skill_groups, product_number=None):
-        """3人の検査員をスキル組み合わせ考慮で選択（バランス重視版）"""
+    def select_three_inspectors_with_skill_combination(
+        self,
+        skill_groups: Dict[str, List[Dict[str, Any]]],
+        product_number: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        3人の検査員をスキル組み合わせ考慮で選択（バランス重視版）
+        
+        Args:
+            skill_groups: スキルレベル別の検査員グループ
+            product_number: 品番（オプション）
+        
+        Returns:
+            選択された検査員リスト
+        """
         try:
             selected = []
             skill_order_map = {1: 0, 2: 1, 3: 2, 'new': 3}
@@ -3485,8 +3822,27 @@ class InspectorAssignmentManager:
             self.log_message(f"3人選択中にエラーが発生しました: {str(e)}")
             return []
     
-    def filter_available_inspectors(self, available_inspectors, divided_time, inspector_master_df, product_number, relax_work_hours=False):
-        """勤務時間と品番上限を考慮して利用可能な検査員をフィルタリングする（第1パスは緩和版）。"""
+    def filter_available_inspectors(
+        self,
+        available_inspectors: List[Dict[str, Any]],
+        divided_time: float,
+        inspector_master_df: pd.DataFrame,
+        product_number: str,
+        relax_work_hours: bool = False
+    ) -> List[Dict[str, Any]]:
+        """
+        勤務時間と品番上限を考慮して利用可能な検査員をフィルタリングする（第1パスは緩和版）。
+        
+        Args:
+            available_inspectors: 利用可能な検査員リスト
+            divided_time: 分割検査時間
+            inspector_master_df: 検査員マスタ
+            product_number: 品番
+            relax_work_hours: 勤務時間チェックを緩和するか
+        
+        Returns:
+            フィルタリングされた検査員リスト
+        """
         try:
             filtered_inspectors = []
             current_date = pd.Timestamp.now().date()
@@ -3607,7 +3963,12 @@ class InspectorAssignmentManager:
             self.log_message(f"検査員フィルタリング中にエラーが発生しました: {str(e)}")
             return available_inspectors
     
-    def set_vacation_data(self, vacation_data: dict, target_date, inspector_master_df=None):
+    def set_vacation_data(
+        self,
+        vacation_data: Dict[str, Dict[str, Any]],
+        target_date: date,
+        inspector_master_df: Optional[pd.DataFrame] = None
+    ) -> None:
         """
         休暇情報を設定する
         
@@ -3648,7 +4009,7 @@ class InspectorAssignmentManager:
         
         self.log_message(f"休暇情報を設定しました: {len(self.inspector_name_to_vacation)}名、対象日: {target_date}")
     
-    def get_vacation_info(self, inspector_name: str) -> dict:
+    def get_vacation_info(self, inspector_name: str) -> Optional[Dict[str, Any]]:
         """
         検査員の休暇情報を取得する
         
@@ -3677,12 +4038,20 @@ class InspectorAssignmentManager:
         work_status = vacation_info.get("work_status")
         return work_status == "休み"
     
-    def get_inspector_max_hours(self, inspector_code, inspector_master_df):
+    def get_inspector_max_hours(
+        self,
+        inspector_code: str,
+        inspector_master_df: pd.DataFrame
+    ) -> float:
         """
         検査員の最大勤務時間を取得（検査員マスタから、休暇情報を考慮）
         
         Args:
             inspector_code: 検査員コード
+            inspector_master_df: 検査員マスタのDataFrame
+        
+        Returns:
+            最大勤務時間（時間単位）
             inspector_master_df: 検査員マスタDataFrame
         
         Returns:
@@ -3752,8 +4121,16 @@ class InspectorAssignmentManager:
             self.log_message(f"最大勤務時間取得エラー: {str(e)}", level='warning')
             return 8.0
 
-    def print_assignment_statistics(self, inspector_master_df=None):
-        """割り当て統計を表示"""
+    def print_assignment_statistics(
+        self,
+        inspector_master_df: Optional[pd.DataFrame] = None
+    ) -> None:
+        """
+        割り当て統計を表示
+        
+        Args:
+            inspector_master_df: 検査員マスタのDataFrame（オプション）
+        """
         try:
             if not self.inspector_assignment_count:
                 self.log_message("📊 割り当て統計: まだ割り当てがありません")
@@ -3853,7 +4230,12 @@ class InspectorAssignmentManager:
         except Exception as e:
             self.log_message(f"❌ 統計表示中にエラーが発生しました: {str(e)}", level='error')
     
-    def print_detailed_kpi_statistics(self, result_df, inspector_master_df, skill_master_df):
+    def print_detailed_kpi_statistics(
+        self,
+        result_df: pd.DataFrame,
+        inspector_master_df: pd.DataFrame,
+        skill_master_df: pd.DataFrame
+    ) -> None:
         """
         改善ポイント: 最終ログ出力の拡充
         
@@ -3975,35 +4357,38 @@ class InspectorAssignmentManager:
         except Exception as e:
             self.log_message(f"❌ 詳細KPI統計表示中にエラーが発生しました: {str(e)}", level='error')
     
-    def optimize_assignments(self, result_df, inspector_master_df, skill_master_df, show_skill_values=False, process_master_df=None, inspection_target_keywords=None):
-        """全体最適化：勤務時間超過の是正と偏りの調整"""
+    def optimize_assignments(
+        self,
+        result_df: pd.DataFrame,
+        inspector_master_df: pd.DataFrame,
+        skill_master_df: pd.DataFrame,
+        show_skill_values: bool = False,
+        process_master_df: Optional[pd.DataFrame] = None,
+        inspection_target_keywords: Optional[List[str]] = None
+    ) -> pd.DataFrame:
+        """
+        全体最適化：勤務時間超過の是正と偏りの調整
+        
+        Args:
+            result_df: 割当結果のDataFrame
+            inspector_master_df: 検査員マスタデータ
+            skill_master_df: スキルマスタデータ
+            show_skill_values: スキル値を表示するかどうか
+            process_master_df: 工程マスタデータ（オプション）
+            inspection_target_keywords: 検査対象キーワードリスト（オプション）
+        
+        Returns:
+            最適化された割当結果のDataFrame
+        """
         try:
             # 【高速化】検査員マスタのインデックスを構築
             self._build_inspector_index(inspector_master_df)
             
             self.log_message("全体最適化フェーズ0: result_dfから実際の割り当てを再計算")
             
-            # 出荷予定日を日付型に変換する関数（当日洗浄品は文字列として保持）
-            def convert_shipping_date(val):
-                if pd.isna(val):
-                    return val
-                val_str = str(val).strip()
-                # 当日洗浄品の場合は文字列として保持
-                if (val_str == "当日洗浄上がり品" or 
-                    val_str == "当日洗浄品" or
-                    "当日洗浄" in val_str or
-                    val_str == "先行検査" or
-                    val_str == "当日先行検査"):
-                    return val_str  # 文字列として保持
-                # その他の場合は日付型に変換
-                try:
-                    return pd.to_datetime(val, errors='coerce')
-                except:
-                    return val
-            
             # 最優先ルール: 出荷予定日の古い順にソート（処理の最初に必ず実行）
             # 出荷予定日を変換（当日洗浄品は文字列として保持）
-            result_df['出荷予定日'] = result_df['出荷予定日'].apply(convert_shipping_date)
+            result_df['出荷予定日'] = result_df['出荷予定日'].apply(self._convert_shipping_date)
             
             current_date = pd.Timestamp.now().date()
             
@@ -4183,7 +4568,7 @@ class InspectorAssignmentManager:
                 
                 # 最優先ルール: 出荷予定日の古い順にソート（毎回のイテレーションで確実に）
                 # 出荷予定日を変換（当日洗浄品は文字列として保持）
-                result_df['出荷予定日'] = result_df['出荷予定日'].apply(convert_shipping_date)
+                result_df['出荷予定日'] = result_df['出荷予定日'].apply(self._convert_shipping_date)
                 
                 # ソート用のキー関数: 新しい優先順位に従う
                 current_date = pd.Timestamp.now().date()
@@ -4998,7 +5383,7 @@ class InspectorAssignmentManager:
                         
                         # 出荷予定日の古い順にソート（順序を維持）
                         # 出荷予定日を変換（当日洗浄品は文字列として保持）
-                        result_df['出荷予定日'] = result_df['出荷予定日'].apply(convert_shipping_date)
+                        result_df['出荷予定日'] = result_df['出荷予定日'].apply(self._convert_shipping_date)
                         
                         # ソート用のキー関数: 新しい優先順位に従う
                         current_date = pd.Timestamp.now().date()
@@ -6173,7 +6558,7 @@ class InspectorAssignmentManager:
                 ).reset_index(drop=True)
                 
                 # 出荷予定日を変換（当日洗浄品は文字列として保持）
-                unassigned_df['出荷予定日'] = unassigned_df['出荷予定日'].apply(convert_shipping_date)
+                unassigned_df['出荷予定日'] = unassigned_df['出荷予定日'].apply(self._convert_shipping_date)
                 
                 # 各未割当ロットを再処理
                 original_indices = unassigned_df['_original_index'].tolist()  # 元のインデックスを保存
@@ -7389,7 +7774,7 @@ class InspectorAssignmentManager:
             
             # 最終的に出荷予定日順にソート（最優先ルールの維持）
             # 出荷予定日を変換（当日洗浄品は文字列として保持）
-            result_df['出荷予定日'] = result_df['出荷予定日'].apply(convert_shipping_date)
+            result_df['出荷予定日'] = result_df['出荷予定日'].apply(self._convert_shipping_date)
             
             # ソート用のキー関数: 新しい優先順位に従う
             current_date = pd.Timestamp.now().date()
@@ -7544,8 +7929,43 @@ class InspectorAssignmentManager:
             logger.error(error_msg, exc_info=True)
             return result_df
     
-    def fix_single_violation(self, index, inspector_code, inspector_name, divided_time, product_number, inspection_time, inspector_col_num, result_df, inspector_master_df, skill_master_df, inspector_max_hours, current_date, show_skill_values):
-        """単一の違反（勤務時間超過または同一品番4時間超過）を是正"""
+    def fix_single_violation(
+        self,
+        index: int,
+        inspector_code: str,
+        inspector_name: str,
+        divided_time: float,
+        product_number: str,
+        inspection_time: float,
+        inspector_col_num: int,
+        result_df: pd.DataFrame,
+        inspector_master_df: pd.DataFrame,
+        skill_master_df: pd.DataFrame,
+        inspector_max_hours: Dict[str, float],
+        current_date: date,
+        show_skill_values: bool
+    ) -> bool:
+        """
+        単一の違反（勤務時間超過または同一品番4時間超過）を是正
+        
+        Args:
+            index: 行インデックス
+            inspector_code: 検査員コード
+            inspector_name: 検査員名
+            divided_time: 分割検査時間
+            product_number: 品番
+            inspection_time: 検査時間
+            inspector_col_num: 検査員列番号
+            result_df: 結果DataFrame
+            inspector_master_df: 検査員マスタ
+            skill_master_df: スキルマスタ
+            inspector_max_hours: 検査員ごとの最大勤務時間辞書
+            current_date: 現在日付
+            show_skill_values: スキル値を表示するか
+        
+        Returns:
+            是正成功時はTrue、失敗時はFalse
+        """
         try:
             # 違反件数をカウント
             self.violation_count += 1
@@ -8442,8 +8862,14 @@ class InspectorAssignmentManager:
                 pass
             return False
     
-    def clear_assignment(self, result_df, index):
-        """ロットの割り当てをクリア（未割当にする）"""
+    def clear_assignment(self, result_df: pd.DataFrame, index: int) -> None:
+        """
+        ロットの割り当てをクリア（未割当にする）
+        
+        Args:
+            result_df: 結果DataFrame
+            index: 行インデックス
+        """
         try:
             current_date = pd.Timestamp.now().date()
             row = result_df.iloc[index]
@@ -8487,8 +8913,25 @@ class InspectorAssignmentManager:
         except Exception as e:
             self.log_message(f"未割当処理中にエラーが発生しました: {str(e)}")
     
-    def check_work_hours_capacity(self, inspector_code, additional_hours, max_hours, current_date):
-        """検査員の勤務時間に余裕があるかチェック"""
+    def check_work_hours_capacity(
+        self,
+        inspector_code: str,
+        additional_hours: float,
+        max_hours: float,
+        current_date: date
+    ) -> bool:
+        """
+        検査員の勤務時間に余裕があるかチェック
+        
+        Args:
+            inspector_code: 検査員コード
+            additional_hours: 追加する時間
+            max_hours: 最大勤務時間
+            current_date: 現在日付
+        
+        Returns:
+            余裕がある場合はTrue、それ以外はFalse
+        """
         try:
             daily_hours = self.inspector_daily_assignments.get(inspector_code, {}).get(current_date, 0.0)
             # 0.05時間（3分）の余裕を持たせる
@@ -8496,8 +8939,22 @@ class InspectorAssignmentManager:
         except:
             return False
     
-    def update_team_info(self, result_df, index, inspector_master_df, show_skill_values=False):
-        """チーム情報を更新（最適化後に呼び出す）"""
+    def update_team_info(
+        self,
+        result_df: pd.DataFrame,
+        index: int,
+        inspector_master_df: pd.DataFrame,
+        show_skill_values: bool = False
+    ) -> None:
+        """
+        チーム情報を更新（最適化後に呼び出す）
+        
+        Args:
+            result_df: 結果DataFrame
+            index: 行インデックス
+            inspector_master_df: 検査員マスタ
+            show_skill_values: スキル値を表示するか
+        """
         try:
             # 検査員人数が0の場合、既存のチーム情報が「未割当」で始まる場合は保持
             inspector_count = result_df.at[index, '検査員人数']
@@ -8547,12 +9004,16 @@ class InspectorAssignmentManager:
             self.log_message(f"チーム情報更新中にエラーが発生しました: {str(e)}")
             return ""
     
-    def add_products_to_master(self, new_products, product_master_path):
+    def add_products_to_master(
+        self,
+        new_products: List[Dict[str, Any]],
+        product_master_path: str
+    ) -> None:
         """
         製品マスタ.xlsxに新しい品番を追加
         
         Args:
-            new_products: 追加する品番のリスト（辞書のリスト）
+            new_products: 追加する品番のリスト（各要素は辞書形式）
             product_master_path: 製品マスタファイルのパス
         """
         try:
@@ -8641,7 +9102,7 @@ class InspectorAssignmentManager:
             logger.error(error_msg, exc_info=True)
             raise
     
-    def reset_assignment_history(self):
+    def reset_assignment_history(self) -> None:
         """割り当て履歴をリセット"""
         self.inspector_assignment_count = {}
         self.inspector_last_assignment = {}

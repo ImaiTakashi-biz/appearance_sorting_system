@@ -3,6 +3,7 @@
 環境変数からAccessデータベースの設定を読み込む
 """
 
+from typing import Optional, List
 import os
 import sys
 from pathlib import Path
@@ -22,12 +23,12 @@ class DatabaseConfig:
     _connection_cache_timestamp = None
     _connection_cache_ttl = CONNECTION_CACHE_TTL
 
-    def __init__(self, env_file_path: str = "config.env"):
+    def __init__(self, env_file_path: str = "config.env") -> None:
         """
         初期化
 
         Args:
-            env_file_path (str): 環境変数ファイルのパス
+            env_file_path: 環境変数ファイルのパス
         """
         # exe化されている場合とそうでない場合でconfig.envのパスを決定
         if getattr(sys, 'frozen', False):
@@ -78,7 +79,7 @@ class DatabaseConfig:
             # 通常のPython実行の場合
             return file_path
 
-    def _load_config(self):
+    def _load_config(self) -> None:
         """設定ファイルを読み込み"""
         try:
             # 環境変数ファイルの存在確認

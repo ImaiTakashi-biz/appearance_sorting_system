@@ -23,11 +23,12 @@ MANIFEST
 
 # PyInstaller
 *.manifest
-*.spec
+# build.specはプロジェクト設定ファイルとして含める（除外しない）
+# *.spec
 build/
 dist/
-# 生成されたアイコンファイル
-appearance_sorting_system.ico
+# appearance_sorting_system.icoはリソースファイルとして含める（除外しない）
+# appearance_sorting_system.ico
 
 # Installer logs
 pip-log.txt
@@ -140,8 +141,9 @@ config.env
 .env.production
 # Google認証情報ファイル（機密情報を含む）
 aptest-*.json
-*-*.json
-*.json
+# その他のJSONファイルは個別に判断（プロジェクト設定ファイルなどは含める）
+# app_settings.jsonはネットワーク共有パスで管理されるため、ローカルファイルは除外
+app_settings.json
 
 # Data files (機密情報を含む可能性)
 *.csv
