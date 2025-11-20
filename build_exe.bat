@@ -27,7 +27,18 @@ if errorlevel 1 (
     echo 既存のICOファイルを使用するか、PNGファイルを確認してください。
 )
 
-REM JSONファイルの存在確認
+REM 必須ファイルの存在確認
+if not exist "config.env" (
+    echo エラー: config.env が見つかりません。
+    echo ビルドを続行しますが、アプリケーションが起動しない可能性があります。
+    pause
+)
+
+if not exist "app_settings.json" (
+    echo 警告: app_settings.json が見つかりません。
+    echo ビルドを続行しますが、デフォルト設定が使用されます。
+)
+
 if not exist "aptest-384703-24764f69b34f.json" (
     echo 警告: aptest-384703-24764f69b34f.json が見つかりません。
     echo ビルドを続行しますが、Google Sheets機能が動作しない可能性があります。
@@ -55,8 +66,9 @@ echo.
 echo 配布時の注意事項:
 echo 1. dist\外観検査振分支援システム.exe を配布してください
 echo 2. config.env はexeに埋め込まれています（別途配置不要）
-echo 3. aptest-384703-24764f69b34f.json はexeに埋め込まれています
-echo 4. logsフォルダは自動的に作成されます
+echo 3. app_settings.json はexeに埋め込まれています（別途配置不要）
+echo 4. aptest-384703-24764f69b34f.json はexeに埋め込まれています（別途配置不要）
+echo 5. logsフォルダは自動的に作成されます
 echo.
 pause
 

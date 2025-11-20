@@ -2641,9 +2641,15 @@ class ModernDataExtractorUI:
             self.root.after(0, lambda: messagebox.showerror("エラー", error_msg))
             
         finally:
-            # データベース接続を切断
+            # データベース接続を確実に切断
             if connection:
-                connection.close()
+                try:
+                    connection.close()
+                    logger.debug("データベース接続をクローズしました")
+                except Exception as e:
+                    logger.warning(f"データベース接続のクローズでエラー: {e}")
+                finally:
+                    connection = None  # 参照をクリア
             
             # UIの状態をリセット（エラー時のみ）
             if not success:
@@ -3719,16 +3725,33 @@ class ModernDataExtractorUI:
             inspector_master_df = masters.get('inspector')
             skill_master_df = masters.get('skill')
             
+            # 必須マスタファイルの読み込み失敗をチェック
+            missing_masters = []
             if product_master_df is None:
+                missing_masters.append("製品マスタ")
                 self.log_message("製品マスタの読み込みに失敗しました")
-                return
             
             if inspector_master_df is None:
+                missing_masters.append("検査員マスタ")
                 self.log_message("検査員マスタの読み込みに失敗しました")
-                return
             
             if skill_master_df is None:
+                missing_masters.append("スキルマスタ")
                 self.log_message("スキルマスタの読み込みに失敗しました")
+            
+            # 必須マスタファイルが読み込めなかった場合、ユーザーに通知
+            if missing_masters:
+                error_msg = (
+                    "必須マスタファイルの読み込みに失敗しました。\n\n"
+                    f"読み込み失敗: {', '.join(missing_masters)}\n\n"
+                    "以下の点を確認してください：\n"
+                    "1. config.envファイルのパス設定が正しいか\n"
+                    "2. マスタファイルが存在し、アクセス可能か\n"
+                    "3. ファイルが他のアプリケーションで開かれていないか\n"
+                    "4. ネットワークパスの場合、接続が確立されているか\n\n"
+                    "ログファイルを確認してください。"
+                )
+                self.root.after(0, lambda: messagebox.showerror("マスタファイル読み込みエラー", error_msg))
                 return
             
             # マスタデータを保存
@@ -6555,6 +6578,13 @@ class ModernDataExtractorUI:
         try:
             # ログ出力
             logger.info("アプリケーションを終了しています...")
+            
+            # 【高速化】ログバッファをフラッシュ（終了時）
+            if hasattr(self.inspector_manager, 'log_batch_enabled') and self.inspector_manager.log_batch_enabled:
+                try:
+                    self.inspector_manager._flush_log_buffer()
+                except Exception as e:
+                    logger.debug(f"ログバッファのフラッシュでエラー（無視）: {e}")
             
             # リソースのクリーンアップ
             self.cleanup_resources()
