@@ -27,11 +27,13 @@ class AppConfigManager:
         """
         # パスが指定されていない場合は、config.envから読み込む
         if config_file_path is None:
-            # 環境変数から読み込む
-            self.config_file_path = os.getenv(
-                "APP_SETTINGS_PATH",
-                r"\\192.168.1.200\共有\dev_tools\外観検査振分支援システム\master\app_settings.json"
-            )
+            # 環境変数から読み込む（config.envで必須）
+            self.config_file_path = os.getenv("APP_SETTINGS_PATH")
+            if not self.config_file_path:
+                raise ValueError(
+                    "APP_SETTINGS_PATHが設定されていません。\n"
+                    "config.envにAPP_SETTINGS_PATHを設定してください。"
+                )
         else:
             self.config_file_path = config_file_path
         
@@ -48,20 +50,44 @@ class AppConfigManager:
             if config_path.exists():
                 with open(config_path, 'r', encoding='utf-8') as f:
                     config = json.load(f)
-                    self.product_limit_hard_threshold = config.get(
+                    
+                    # バリデーション: product_limit_hard_threshold
+                    product_limit = config.get(
                         'product_limit_hard_threshold', 
                         self.DEFAULT_PRODUCT_LIMIT_HARD_THRESHOLD
                     )
-                    self.required_inspectors_threshold = config.get(
+                    if not isinstance(product_limit, (int, float)) or product_limit <= 0:
+                        logger.warning(
+                            f"無効なproduct_limit_hard_threshold値: {product_limit}。"
+                            f"デフォルト値({self.DEFAULT_PRODUCT_LIMIT_HARD_THRESHOLD})を使用します。"
+                        )
+                        product_limit = self.DEFAULT_PRODUCT_LIMIT_HARD_THRESHOLD
+                    self.product_limit_hard_threshold = float(product_limit)
+                    
+                    # バリデーション: required_inspectors_threshold
+                    threshold = config.get(
                         'required_inspectors_threshold',
                         self.DEFAULT_REQUIRED_INSPECTORS_THRESHOLD
                     )
+                    if not isinstance(threshold, (int, float)) or threshold <= 0:
+                        logger.warning(
+                            f"無効なrequired_inspectors_threshold値: {threshold}。"
+                            f"デフォルト値({self.DEFAULT_REQUIRED_INSPECTORS_THRESHOLD})を使用します。"
+                        )
+                        threshold = self.DEFAULT_REQUIRED_INSPECTORS_THRESHOLD
+                    self.required_inspectors_threshold = float(threshold)
+                    
                 # ログ出力を削除（不要な出力を抑制）
             else:
                 # 設定ファイルが存在しない場合はデフォルト値を使用
                 logger.warning(f"設定ファイルが見つかりません: {self.config_file_path}。デフォルト値を使用します。")
                 self.product_limit_hard_threshold = self.DEFAULT_PRODUCT_LIMIT_HARD_THRESHOLD
                 self.required_inspectors_threshold = self.DEFAULT_REQUIRED_INSPECTORS_THRESHOLD
+        except json.JSONDecodeError as e:
+            logger.error(f"設定ファイルのJSON形式が不正です: {e}")
+            logger.warning(f"デフォルト値を使用します。")
+            self.product_limit_hard_threshold = self.DEFAULT_PRODUCT_LIMIT_HARD_THRESHOLD
+            self.required_inspectors_threshold = self.DEFAULT_REQUIRED_INSPECTORS_THRESHOLD
         except Exception as e:
             logger.error(f"設定ファイルの読み込みに失敗しました: {e}")
             logger.warning(f"デフォルト値を使用します。")

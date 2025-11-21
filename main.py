@@ -71,7 +71,14 @@ def main() -> None:
         root = tk.Tk()
         root.withdraw()
         error_msg = str(e)
-        if "ACCESS_FILE_PATH" in error_msg or "ACCESS_TABLE_NAME" in error_msg:
+        if "APP_SETTINGS_PATH" in error_msg:
+            message = (
+                "アプリケーション設定ファイルのパスが設定されていません。\n\n"
+                f"エラー詳細: {error_msg}\n\n"
+                "config.envファイルに以下の設定を追加してください：\n"
+                "- APP_SETTINGS_PATH"
+            )
+        elif "ACCESS_FILE_PATH" in error_msg or "ACCESS_TABLE_NAME" in error_msg:
             message = (
                 "必須設定が不足しています。\n\n"
                 f"エラー詳細: {error_msg}\n\n"

@@ -224,7 +224,7 @@ class ExcelExporter:
             messagebox.showerror("エクスポートエラー", error_msg)
             return False
     
-    def export_main_data_to_excel(self, main_df):
+    def export_main_data_to_excel(self, main_df: pd.DataFrame) -> bool:
         """抽出データをExcelファイルにエクスポート"""
         try:
             if main_df is None or main_df.empty:
@@ -318,7 +318,7 @@ class ExcelExporter:
             messagebox.showerror("エクスポートエラー", error_msg)
             return False
     
-    def export_inspector_assignment_to_excel(self, inspector_df):
+    def export_inspector_assignment_to_excel(self, inspector_df: pd.DataFrame) -> bool:
         """検査員割振り結果をExcelファイルにエクスポート"""
         try:
             if inspector_df is None or inspector_df.empty:
@@ -410,6 +410,4 @@ class ExcelExporter:
             error_msg = f"Excelエクスポート中にエラーが発生しました: {str(e)}"
             logger.error(error_msg)
             messagebox.showerror("エクスポートエラー", error_msg)
-            return False# �g�p��:
-# exporter = ExcelExporter()
-# exporter.export_main_data_to_excel(...)
+            return False

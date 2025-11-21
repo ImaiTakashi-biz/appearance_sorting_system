@@ -8,6 +8,7 @@ import os
 import sys
 from pathlib import Path
 from app.env_loader import load_env_file
+from app.utils.path_resolver import resolve_resource_path
 from loguru import logger
 import pyodbc
 
@@ -59,25 +60,7 @@ class DatabaseConfig:
         Returns:
             解決されたファイルパス
         """
-        if getattr(sys, 'frozen', False):
-            # exe化されている場合
-            # まず一時ディレクトリ（sys._MEIPASS）を確認（埋め込まれたファイル）
-            temp_dir = Path(sys._MEIPASS)
-            temp_file = temp_dir / Path(file_path).name
-            if temp_file.exists():
-                return str(temp_file)
-            
-            # 次にexeと同じ階層を確認
-            exe_dir = Path(sys.executable).parent
-            exe_file = exe_dir / Path(file_path).name
-            if exe_file.exists():
-                return str(exe_file)
-            
-            # 見つからない場合は元のパスを返す
-            return file_path
-        else:
-            # 通常のPython実行の場合
-            return file_path
+        return resolve_resource_path(file_path)
 
     def _load_config(self) -> None:
         """設定ファイルを読み込み"""

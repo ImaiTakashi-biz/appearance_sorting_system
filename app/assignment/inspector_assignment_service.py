@@ -160,13 +160,13 @@ class InspectorAssignmentManager:
             # 従来通り即座に出力
             if self.log_callback:
                 self.log_callback(message)
-            if level == 'warning':
-                logger.warning(message)
-            elif level == 'error':
-                logger.error(message)
-            else:
-                logger.info(message)
-    
+        if level == 'warning':
+            logger.warning(message)
+        elif level == 'error':
+            logger.error(message)
+        else:
+            logger.info(message)
+
     def _flush_log_buffer(self) -> None:
         """ログバッファをフラッシュ（まとめて出力）"""
         if not self.log_buffer:
@@ -229,25 +229,36 @@ class InspectorAssignmentManager:
         self.inspector_code_to_row = {}
         self.inspector_id_to_row = {}
         
-        # インデックスを構築
-        for idx, row in inspector_master_df.iterrows():
+        # インデックスを構築（itertuples()で高速化）
+        # 列インデックスを事前に取得
+        name_col_idx = inspector_master_df.columns.get_loc('#氏名') if '#氏名' in inspector_master_df.columns else -1
+        code_col_idx = inspector_master_df.columns.get_loc('#コード') if '#コード' in inspector_master_df.columns else -1
+        id_col_idx = inspector_master_df.columns.get_loc('#ID') if '#ID' in inspector_master_df.columns else -1
+        
+        for row_tuple in inspector_master_df.itertuples(index=True):
+            idx = row_tuple[0]  # インデックス
+            row = inspector_master_df.loc[idx]  # Seriesとして取得（互換性のため）
+            
             # 氏名→行データのマッピング
-            name = row.get('#氏名', '')
-            if pd.notna(name) and str(name).strip():
-                name_key = str(name).strip()
-                self.inspector_name_to_row[name_key] = row
+            if name_col_idx >= 0:
+                name = row_tuple[name_col_idx + 1]  # itertuplesはインデックスを含むため+1
+                if pd.notna(name) and str(name).strip():
+                    name_key = str(name).strip()
+                    self.inspector_name_to_row[name_key] = row
             
             # コード→行データのマッピング
-            code = row.get('#コード', '')
-            if pd.notna(code) and str(code).strip():
-                code_key = str(code).strip()
-                self.inspector_code_to_row[code_key] = row
+            if code_col_idx >= 0:
+                code = row_tuple[code_col_idx + 1]
+                if pd.notna(code) and str(code).strip():
+                    code_key = str(code).strip()
+                    self.inspector_code_to_row[code_key] = row
             
             # ID→行データのマッピング
-            inspector_id = row.get('#ID', '')
-            if pd.notna(inspector_id) and str(inspector_id).strip():
-                id_key = str(inspector_id).strip()
-                self.inspector_id_to_row[id_key] = row
+            if id_col_idx >= 0:
+                inspector_id = row_tuple[id_col_idx + 1]
+                if pd.notna(inspector_id) and str(inspector_id).strip():
+                    id_key = str(inspector_id).strip()
+                    self.inspector_id_to_row[id_key] = row
     
     def _get_inspector_by_name(
         self,
@@ -387,7 +398,7 @@ class InspectorAssignmentManager:
             return normalized
         except Exception:
             return pd.Timestamp.max
-    
+
     def _convert_shipping_date(self, val: Any) -> Union[str, pd.Timestamp, Any]:
         """
         出荷予定日を日付型に変換（当日洗浄品は文字列として保持）
@@ -2785,7 +2796,7 @@ class InspectorAssignmentManager:
             return None
     
     def infer_process_number_from_process_master(
-        self,
+        self, 
         product_number: str,
         process_master_df: pd.DataFrame,
         inspection_target_keywords: Optional[List[str]]
@@ -2859,7 +2870,7 @@ class InspectorAssignmentManager:
             process_number: 工程番号
             process_master_df: 工程マスタのDataFrame
             inspection_target_keywords: 検査対象CSVのキーワードリスト
-        
+            
         Returns:
             工程名（見つからない場合はNone）
         """
@@ -3986,9 +3997,13 @@ class InspectorAssignmentManager:
         if inspector_master_df is not None and '#氏名' in inspector_master_df.columns:
             # 別名列がある場合はそれを使用
             if '休暇予定表の別名' in inspector_master_df.columns:
-                for _, row in inspector_master_df.iterrows():
-                    inspector_name = row['#氏名']
-                    alias_name = row.get('休暇予定表の別名', '')
+                # 列インデックスを事前に取得（itertuples()で高速化）
+                name_col_idx = inspector_master_df.columns.get_loc('#氏名')
+                alias_col_idx = inspector_master_df.columns.get_loc('休暇予定表の別名')
+                
+                for row_tuple in inspector_master_df.itertuples(index=False):
+                    inspector_name = row_tuple[name_col_idx]
+                    alias_name = row_tuple[alias_col_idx] if alias_col_idx < len(row_tuple) else ''
                     
                     # 別名が設定されている場合は別名で検索、なければ氏名で検索
                     vacation_name = alias_name.strip() if pd.notna(alias_name) and alias_name.strip() else inspector_name
@@ -4750,7 +4765,8 @@ class InspectorAssignmentManager:
                                     # その他の型（datetime.date等）の場合はそのまま使用
                                     try:
                                         violation_date = violation_date_raw.date() if hasattr(violation_date_raw, 'date') else violation_date_raw
-                                    except:
+                                    except Exception as e:
+                                        logger.debug(f"違反日付の変換でエラーが発生しました（デフォルト値を使用）: {e}")
                                         violation_date = pd.Timestamp.max.date()
                             else:
                                 violation_date = pd.Timestamp.max.date()
@@ -4871,13 +4887,15 @@ class InspectorAssignmentManager:
                                                     shipping_date = shipping_date_parsed.date()
                                                 else:
                                                     shipping_date = pd.Timestamp.max.date()
-                                            except:
+                                            except Exception as e:
+                                                logger.debug(f"出荷日の変換でエラーが発生しました（デフォルト値を使用）: {e}")
                                                 shipping_date = pd.Timestamp.max.date()
                                     else:
                                         # その他の型（datetime.date等）の場合はそのまま使用
                                         try:
                                             shipping_date = shipping_date_raw.date() if hasattr(shipping_date_raw, 'date') else shipping_date_raw
-                                        except:
+                                        except Exception as e:
+                                            logger.debug(f"出荷日の変換でエラーが発生しました（デフォルト値を使用）: {e}")
                                             shipping_date = pd.Timestamp.max.date()
                                 else:
                                     shipping_date = pd.Timestamp.max.date()
@@ -5958,16 +5976,31 @@ class InspectorAssignmentManager:
                         self.inspector_work_hours = {}
                         self.inspector_product_hours = {}
                         
-                        for idx, r in result_df.iterrows():
+                        # 列インデックスを事前に取得（itertuples()で高速化）
+                        prod_num_col_idx_p2_5_f = result_df.columns.get_loc('品番')
+                        div_time_col_idx_p2_5_f = result_df.columns.get_loc('分割検査時間') if '分割検査時間' in result_df.columns else -1
+                        inspector_col_indices_p2_5_f = {}
+                        for i in range(1, 6):
+                            col_name = f'検査員{i}'
+                            if col_name in result_df.columns:
+                                inspector_col_indices_p2_5_f[i] = result_df.columns.get_loc(col_name)
+                        
+                        for row_tuple in result_df.itertuples(index=True):
+                            idx = row_tuple[0]  # インデックス
                             if idx in violation_indices or idx in protected_indices:
                                 continue  # クリアしたロットと保護されたロットはスキップ
-                            prod_num = r['品番']
-                            div_time = r.get('分割検査時間', 0.0)
+                            
+                            prod_num = row_tuple[prod_num_col_idx_p2_5_f + 1]  # +1はインデックス分
+                            div_time = row_tuple[div_time_col_idx_p2_5_f + 1] if div_time_col_idx_p2_5_f >= 0 and div_time_col_idx_p2_5_f + 1 < len(row_tuple) else 0.0
                             
                             for i in range(1, 6):
-                                inspector_col = f'検査員{i}'
-                                if pd.notna(r.get(inspector_col)) and str(r[inspector_col]).strip() != '':
-                                    inspector_name = str(r[inspector_col]).strip()
+                                if i not in inspector_col_indices_p2_5_f:
+                                    continue
+                                inspector_col_idx = inspector_col_indices_p2_5_f[i]
+                                inspector_value = row_tuple[inspector_col_idx + 1] if inspector_col_idx + 1 < len(row_tuple) else None
+                                
+                                if pd.notna(inspector_value) and str(inspector_value).strip() != '':
+                                    inspector_name = str(inspector_value).strip()
                                     if '(' in inspector_name:
                                         inspector_name = inspector_name.split('(')[0].strip()
                                     if not inspector_name:
@@ -6059,21 +6092,34 @@ class InspectorAssignmentManager:
                                 else:
                                     self.log_message(f"⚠️ ロットインデックス {index} の再割当に失敗しました（利用可能な検査員が見つかりません）")
                             else:
-                                self.log_message(f"⚠️ ロットインデックス {index} の再割当に失敗しました（利用可能な検査員が0人）")
+                                    self.log_message(f"⚠️ ロットインデックス {index} の再割当に失敗しました（利用可能な検査員が0人）")
                         
                         # 履歴を再計算（再割当後の状態）
                         self.inspector_daily_assignments = {}
                         self.inspector_work_hours = {}
                         self.inspector_product_hours = {}
                         
-                        for idx, r in result_df.iterrows():
-                            prod_num = r['品番']
-                            div_time = r.get('分割検査時間', 0.0)
+                        # 列インデックスを事前に取得（itertuples()で高速化）
+                        prod_num_col_idx_p3 = result_df.columns.get_loc('品番')
+                        div_time_col_idx_p3 = result_df.columns.get_loc('分割検査時間') if '分割検査時間' in result_df.columns else -1
+                        inspector_col_indices_p3 = {}
+                        for i in range(1, 6):
+                            col_name = f'検査員{i}'
+                            if col_name in result_df.columns:
+                                inspector_col_indices_p3[i] = result_df.columns.get_loc(col_name)
+                        
+                        for row_tuple in result_df.itertuples(index=False):
+                            prod_num = row_tuple[prod_num_col_idx_p3]
+                            div_time = row_tuple[div_time_col_idx_p3] if div_time_col_idx_p3 >= 0 and div_time_col_idx_p3 < len(row_tuple) else 0.0
                             
                             for i in range(1, 6):
-                                inspector_col = f'検査員{i}'
-                                if pd.notna(r.get(inspector_col)) and str(r[inspector_col]).strip() != '':
-                                    inspector_name = str(r[inspector_col]).strip()
+                                if i not in inspector_col_indices_p3:
+                                    continue
+                                inspector_col_idx = inspector_col_indices_p3[i]
+                                inspector_value = row_tuple[inspector_col_idx] if inspector_col_idx < len(row_tuple) else None
+                                
+                                if pd.notna(inspector_value) and str(inspector_value).strip() != '':
+                                    inspector_name = str(inspector_value).strip()
                                     if '(' in inspector_name:
                                         inspector_name = inspector_name.split('(')[0].strip()
                                     if not inspector_name:
@@ -6122,7 +6168,8 @@ class InspectorAssignmentManager:
                                 # 日付文字列の場合は変換を試みる
                                 try:
                                     shipping_date = pd.to_datetime(shipping_date_raw)
-                                except:
+                                except Exception as e:
+                                    logger.debug(f"出荷日の変換でエラーが発生しました（デフォルト値を使用）: {e}")
                                     shipping_date = pd.Timestamp.min
                             else:
                                 shipping_date = shipping_date_raw
@@ -6215,9 +6262,20 @@ class InspectorAssignmentManager:
             self.same_day_cleaning_inspectors = {}
             self.same_day_cleaning_inspectors_by_product_name = {}
             
-            for index, row in result_df.iterrows():
-                product_number = row['品番']
-                shipping_date_raw = row.get('出荷予定日', None)
+            # 列インデックスを事前に取得（itertuples()で高速化）
+            prod_num_col_idx = result_df.columns.get_loc('品番')
+            shipping_date_col_idx = result_df.columns.get_loc('出荷予定日') if '出荷予定日' in result_df.columns else -1
+            product_name_col_idx = result_df.columns.get_loc('品名') if '品名' in result_df.columns else -1
+            inspector_col_indices = {}
+            for i in range(1, 6):
+                col_name = f'検査員{i}'
+                if col_name in result_df.columns:
+                    inspector_col_indices[i] = result_df.columns.get_loc(col_name)
+            
+            for row_tuple in result_df.itertuples(index=True):
+                index = row_tuple[0]  # インデックス
+                product_number = row_tuple[prod_num_col_idx + 1]  # +1はインデックス分
+                shipping_date_raw = row_tuple[shipping_date_col_idx + 1] if shipping_date_col_idx >= 0 and shipping_date_col_idx + 1 < len(row_tuple) else None
                 shipping_date_str = str(shipping_date_raw).strip() if pd.notna(shipping_date_raw) else ''
                 is_same_day_cleaning = (
                     shipping_date_str == "当日洗浄上がり品" or
@@ -6229,13 +6287,16 @@ class InspectorAssignmentManager:
                 
                 if is_same_day_cleaning:
                     # 品名を取得
-                    product_name = row.get('品名', '')
+                    product_name = row_tuple[product_name_col_idx + 1] if product_name_col_idx >= 0 and product_name_col_idx + 1 < len(row_tuple) else ''
                     product_name_str = str(product_name).strip() if pd.notna(product_name) else ''
                     
                     # 実際に割り当てられている検査員を取得
                     for i in range(1, 6):
-                        inspector_col = f'検査員{i}'
-                        inspector_value = row.get(inspector_col, '')
+                        if i not in inspector_col_indices:
+                            continue
+                        inspector_col_idx = inspector_col_indices[i]
+                        inspector_value = row_tuple[inspector_col_idx + 1] if inspector_col_idx + 1 < len(row_tuple) else None
+                        
                         if pd.notna(inspector_value) and str(inspector_value).strip() != '':
                             inspector_name = str(inspector_value).strip()
                             if '(' in inspector_name:
@@ -6256,8 +6317,13 @@ class InspectorAssignmentManager:
             
             # 【改善】アプローチ3: 当日洗浄上がり品の未割当ロットがある場合、優先度の低いロットから検査員を再割当て
             same_day_cleaning_unassigned = []
-            for index, row in result_df.iterrows():
-                shipping_date_raw = row.get('出荷予定日', None)
+            # 列インデックスを事前に取得（itertuples()で高速化）
+            shipping_date_col_idx_u = result_df.columns.get_loc('出荷予定日') if '出荷予定日' in result_df.columns else -1
+            inspector_count_col_idx = result_df.columns.get_loc('検査員人数') if '検査員人数' in result_df.columns else -1
+            
+            for row_tuple in result_df.itertuples(index=True):
+                index = row_tuple[0]  # インデックス
+                shipping_date_raw = row_tuple[shipping_date_col_idx_u + 1] if shipping_date_col_idx_u >= 0 and shipping_date_col_idx_u + 1 < len(row_tuple) else None
                 shipping_date_str = str(shipping_date_raw).strip() if pd.notna(shipping_date_raw) else ''
                 is_same_day_cleaning = (
                     shipping_date_str == "当日洗浄上がり品" or
@@ -6268,7 +6334,7 @@ class InspectorAssignmentManager:
                 )
                 
                 if is_same_day_cleaning:
-                    inspector_count = row.get('検査員人数', 0)
+                    inspector_count = row_tuple[inspector_count_col_idx + 1] if inspector_count_col_idx >= 0 and inspector_count_col_idx + 1 < len(row_tuple) else 0
                     if inspector_count == 0 or pd.isna(inspector_count) or inspector_count == 0:
                         same_day_cleaning_unassigned.append(index)
             
@@ -6285,15 +6351,20 @@ class InspectorAssignmentManager:
                 current_date = pd.Timestamp.now().date()
                 two_weeks_later = current_date + timedelta(days=14)
                 
-                for index, row in result_df.iterrows():
+                # 列インデックスを事前に取得（itertuples()で高速化）
+                shipping_date_col_idx_l = result_df.columns.get_loc('出荷予定日') if '出荷予定日' in result_df.columns else -1
+                inspector_count_col_idx_l = result_df.columns.get_loc('検査員人数') if '検査員人数' in result_df.columns else -1
+                
+                for row_tuple in result_df.itertuples(index=True):
+                    index = row_tuple[0]  # インデックス
                     if index in same_day_cleaning_unassigned:
                         continue  # 当日洗浄上がり品の未割当ロットは除外
                     
-                    inspector_count = row.get('検査員人数', 0)
+                    inspector_count = row_tuple[inspector_count_col_idx_l + 1] if inspector_count_col_idx_l >= 0 and inspector_count_col_idx_l + 1 < len(row_tuple) else 0
                     if inspector_count == 0 or pd.isna(inspector_count) or inspector_count == 0:
                         continue  # 未割当ロットは除外
                     
-                    shipping_date_raw = row.get('出荷予定日', None)
+                    shipping_date_raw = row_tuple[shipping_date_col_idx_l + 1] if shipping_date_col_idx_l >= 0 and shipping_date_col_idx_l + 1 < len(row_tuple) else None
                     shipping_date_str = str(shipping_date_raw).strip() if pd.notna(shipping_date_raw) else ''
                     is_same_day_cleaning = (
                         shipping_date_str == "当日洗浄上がり品" or
@@ -6310,6 +6381,8 @@ class InspectorAssignmentManager:
                             if pd.notna(shipping_date):
                                 shipping_date_date = shipping_date.date() if hasattr(shipping_date, 'date') else shipping_date
                                 if shipping_date_date > two_weeks_later:
+                                    # rowオブジェクトが必要な場合は、元のDataFrameから取得
+                                    row = result_df.loc[index]
                                     low_priority_lots.append((index, row, shipping_date_date))
                         except Exception as e:
                             # 日付変換に失敗した場合はスキップ
@@ -6567,12 +6640,22 @@ class InspectorAssignmentManager:
                 unassigned_df = unassigned_df.drop(columns=['_priority', '_priority_value', '_priority_date', '_is_new_product', '_original_index'])
                 
                 # 各未割当ロットを再処理
-                for idx, row in unassigned_df.iterrows():
+                # 列インデックスを事前に取得（itertuples()で高速化）
+                prod_num_col_idx_u = unassigned_df.columns.get_loc('品番')
+                inspection_time_col_idx = unassigned_df.columns.get_loc('検査時間') if '検査時間' in unassigned_df.columns else -1
+                process_num_col_idx = unassigned_df.columns.get_loc('現在工程番号') if '現在工程番号' in unassigned_df.columns else -1
+                lot_qty_col_idx = unassigned_df.columns.get_loc('ロット数量') if 'ロット数量' in unassigned_df.columns else -1
+                
+                for row_tuple in unassigned_df.itertuples(index=True):
+                    idx = row_tuple[0]  # インデックス
                     original_index = original_indices[idx]  # 元のインデックスを取得
-                    product_number = row['品番']
-                    inspection_time = row.get('検査時間', 0.0)
-                    process_number = row.get('現在工程番号', '')
-                    lot_quantity = row.get('ロット数量', 0)
+                    product_number = row_tuple[prod_num_col_idx_u + 1]  # +1はインデックス分
+                    inspection_time = row_tuple[inspection_time_col_idx + 1] if inspection_time_col_idx >= 0 and inspection_time_col_idx + 1 < len(row_tuple) else 0.0
+                    process_number = row_tuple[process_num_col_idx + 1] if process_num_col_idx >= 0 and process_num_col_idx + 1 < len(row_tuple) else ''
+                    lot_quantity = row_tuple[lot_qty_col_idx + 1] if lot_qty_col_idx >= 0 and lot_qty_col_idx + 1 < len(row_tuple) else 0
+                    
+                    # rowオブジェクトが必要な場合は、元のDataFrameから取得
+                    row = unassigned_df.loc[idx]
                     
                     # ロット数量が0の場合は検査員を割り当てない
                     if lot_quantity == 0 or pd.isna(lot_quantity) or inspection_time == 0 or pd.isna(inspection_time):
@@ -6810,13 +6893,25 @@ class InspectorAssignmentManager:
                         # 【改善】制約を緩和する前に、現在のresult_dfから実際に割り当てられている検査員を確認
                         # 品番単位の制約を再構築
                         already_assigned_to_this_product = set()
-                        for other_index, other_row in result_df.iterrows():
+                        # 列インデックスを事前に取得（itertuples()で高速化）
+                        prod_num_col_idx_o = result_df.columns.get_loc('品番')
+                        shipping_date_col_idx_o = result_df.columns.get_loc('出荷予定日') if '出荷予定日' in result_df.columns else -1
+                        inspector_col_indices_o = {}
+                        for j in range(1, 6):
+                            col_name = f'検査員{j}'
+                            if col_name in result_df.columns:
+                                inspector_col_indices_o[j] = result_df.columns.get_loc(col_name)
+                        
+                        for other_row_tuple in result_df.itertuples(index=True):
+                            other_index = other_row_tuple[0]  # インデックス
                             if other_index == original_index:  # 自分自身は除外
                                 continue
-                            if other_row['品番'] != product_number:
+                            
+                            other_prod_num = other_row_tuple[prod_num_col_idx_o + 1]  # +1はインデックス分
+                            if other_prod_num != product_number:
                                 continue
                             
-                            other_shipping_date_raw = other_row.get('出荷予定日', None)
+                            other_shipping_date_raw = other_row_tuple[shipping_date_col_idx_o + 1] if shipping_date_col_idx_o >= 0 and shipping_date_col_idx_o + 1 < len(other_row_tuple) else None
                             other_shipping_date_str = str(other_shipping_date_raw).strip() if pd.notna(other_shipping_date_raw) else ''
                             is_other_same_day_cleaning = (
                                 other_shipping_date_str == "当日洗浄上がり品" or
@@ -6829,8 +6924,11 @@ class InspectorAssignmentManager:
                             if is_other_same_day_cleaning:
                                 # 他のロットに割り当てられている検査員を取得
                                 for j in range(1, 6):
-                                    other_inspector_col = f'検査員{j}'
-                                    other_inspector_value = other_row.get(other_inspector_col, '')
+                                    if j not in inspector_col_indices_o:
+                                        continue
+                                    other_inspector_col_idx = inspector_col_indices_o[j]
+                                    other_inspector_value = other_row_tuple[other_inspector_col_idx + 1] if other_inspector_col_idx + 1 < len(other_row_tuple) else None
+                                    
                                     if pd.notna(other_inspector_value) and str(other_inspector_value).strip() != '':
                                         other_inspector_name = str(other_inspector_value).strip()
                                         if '(' in other_inspector_name:
@@ -6848,18 +6946,24 @@ class InspectorAssignmentManager:
                         product_name_str = str(product_name).strip() if pd.notna(product_name) else ''
                         already_assigned_to_same_product_name = set()
                         if product_name_str:
-                            for other_index, other_row in result_df.iterrows():
+                            # 列インデックスを事前に取得（itertuples()で高速化）
+                            prod_name_col_idx = result_df.columns.get_loc('品名') if '品名' in result_df.columns else -1
+                            
+                            for other_row_tuple in result_df.itertuples(index=True):
+                                other_index = other_row_tuple[0]  # インデックス
                                 if other_index == original_index:  # 自分自身は除外
                                     continue
-                                if other_row['品番'] == product_number:
+                                
+                                other_prod_num = other_row_tuple[prod_num_col_idx_o + 1]  # +1はインデックス分
+                                if other_prod_num == product_number:
                                     continue  # 同じ品番は既にチェック済み
                                 
-                                other_product_name = other_row.get('品名', '')
+                                other_product_name = other_row_tuple[prod_name_col_idx + 1] if prod_name_col_idx >= 0 and prod_name_col_idx + 1 < len(other_row_tuple) else ''
                                 other_product_name_str = str(other_product_name).strip() if pd.notna(other_product_name) else ''
                                 if other_product_name_str != product_name_str:
                                     continue
                                 
-                                other_shipping_date_raw = other_row.get('出荷予定日', None)
+                                other_shipping_date_raw = other_row_tuple[shipping_date_col_idx_o + 1] if shipping_date_col_idx_o >= 0 and shipping_date_col_idx_o + 1 < len(other_row_tuple) else None
                                 other_shipping_date_str = str(other_shipping_date_raw).strip() if pd.notna(other_shipping_date_raw) else ''
                                 is_other_same_day_cleaning = (
                                     other_shipping_date_str == "当日洗浄上がり品" or
@@ -6872,8 +6976,11 @@ class InspectorAssignmentManager:
                                 if is_other_same_day_cleaning:
                                     # 他の品番のロットに割り当てられている検査員を取得
                                     for j in range(1, 6):
-                                        other_inspector_col = f'検査員{j}'
-                                        other_inspector_value = other_row.get(other_inspector_col, '')
+                                        if j not in inspector_col_indices_o:
+                                            continue
+                                        other_inspector_col_idx = inspector_col_indices_o[j]
+                                        other_inspector_value = other_row_tuple[other_inspector_col_idx + 1] if other_inspector_col_idx + 1 < len(other_row_tuple) else None
+                                        
                                         if pd.notna(other_inspector_value) and str(other_inspector_value).strip() != '':
                                             other_inspector_name = str(other_inspector_value).strip()
                                             if '(' in other_inspector_name:
@@ -7016,14 +7123,27 @@ class InspectorAssignmentManager:
                 self.inspector_product_hours = {}
                 
                 current_date_temp = pd.Timestamp.now().date()
-                for index, row in result_df.iterrows():
-                    product_number = row['品番']
-                    divided_time = row.get('分割検査時間', 0.0)
+                # 列インデックスを事前に取得（itertuples()で高速化）
+                prod_num_col_idx_t = result_df.columns.get_loc('品番')
+                div_time_col_idx_t = result_df.columns.get_loc('分割検査時間') if '分割検査時間' in result_df.columns else -1
+                inspector_col_indices_t = {}
+                for i in range(1, 6):
+                    col_name = f'検査員{i}'
+                    if col_name in result_df.columns:
+                        inspector_col_indices_t[i] = result_df.columns.get_loc(col_name)
+                
+                for row_tuple in result_df.itertuples(index=False):
+                    product_number = row_tuple[prod_num_col_idx_t]
+                    divided_time = row_tuple[div_time_col_idx_t] if div_time_col_idx_t >= 0 and div_time_col_idx_t < len(row_tuple) else 0.0
                     
                     for i in range(1, 6):
-                        inspector_col = f'検査員{i}'
-                        if pd.notna(row.get(inspector_col)) and str(row[inspector_col]).strip() != '':
-                            inspector_name = str(row[inspector_col]).strip()
+                        if i not in inspector_col_indices_t:
+                            continue
+                        inspector_col_idx = inspector_col_indices_t[i]
+                        inspector_value = row_tuple[inspector_col_idx] if inspector_col_idx < len(row_tuple) else None
+                        
+                        if pd.notna(inspector_value) and str(inspector_value).strip() != '':
+                            inspector_name = str(inspector_value).strip()
                             if '(' in inspector_name:
                                 inspector_name = inspector_name.split('(')[0].strip()
                             if not inspector_name:
@@ -7060,14 +7180,27 @@ class InspectorAssignmentManager:
             self.inspector_work_hours = {}
             self.inspector_product_hours = {}
             
-            for index, row in result_df.iterrows():
-                product_number = row['品番']
-                divided_time = row.get('分割検査時間', 0.0)
+            # 列インデックスを事前に取得（itertuples()で高速化）
+            prod_num_col_idx = result_df.columns.get_loc('品番')
+            div_time_col_idx = result_df.columns.get_loc('分割検査時間') if '分割検査時間' in result_df.columns else -1
+            inspector_col_indices = {}
+            for i in range(1, 6):
+                col_name = f'検査員{i}'
+                if col_name in result_df.columns:
+                    inspector_col_indices[i] = result_df.columns.get_loc(col_name)
+            
+            for row_tuple in result_df.itertuples(index=False):
+                product_number = row_tuple[prod_num_col_idx]
+                divided_time = row_tuple[div_time_col_idx] if div_time_col_idx >= 0 and div_time_col_idx < len(row_tuple) else 0.0
                 
                 for i in range(1, 6):
-                    inspector_col = f'検査員{i}'
-                    if pd.notna(row.get(inspector_col)) and str(row[inspector_col]).strip() != '':
-                        inspector_name = str(row[inspector_col]).strip()
+                    if i not in inspector_col_indices:
+                        continue
+                    inspector_col_idx = inspector_col_indices[i]
+                    inspector_value = row_tuple[inspector_col_idx] if inspector_col_idx < len(row_tuple) else None
+                    
+                    if pd.notna(inspector_value) and str(inspector_value).strip() != '':
+                        inspector_name = str(inspector_value).strip()
                         if '(' in inspector_name:
                             inspector_name = inspector_name.split('(')[0].strip()
                         if not inspector_name:
@@ -7094,14 +7227,28 @@ class InspectorAssignmentManager:
             
             # 勤務時間超過を再チェック
             phase3_5_violations = []
-            for index, row in result_df.iterrows():
-                product_number = row['品番']
-                divided_time = row.get('分割検査時間', 0.0)
+            # 列インデックスを事前に取得（itertuples()で高速化）
+            prod_num_col_idx_v = result_df.columns.get_loc('品番')
+            div_time_col_idx_v = result_df.columns.get_loc('分割検査時間') if '分割検査時間' in result_df.columns else -1
+            inspector_col_indices_v = {}
+            for i in range(1, 6):
+                col_name = f'検査員{i}'
+                if col_name in result_df.columns:
+                    inspector_col_indices_v[i] = result_df.columns.get_loc(col_name)
+            
+            for row_tuple in result_df.itertuples(index=True):
+                index = row_tuple[0]  # インデックス
+                product_number = row_tuple[prod_num_col_idx_v + 1]  # +1はインデックス分
+                divided_time = row_tuple[div_time_col_idx_v + 1] if div_time_col_idx_v >= 0 and div_time_col_idx_v + 1 < len(row_tuple) else 0.0
                 
                 for i in range(1, 6):
-                    inspector_col = f'検査員{i}'
-                    if pd.notna(row.get(inspector_col)) and str(row[inspector_col]).strip() != '':
-                        inspector_name = str(row[inspector_col]).strip()
+                    if i not in inspector_col_indices_v:
+                        continue
+                    inspector_col_idx = inspector_col_indices_v[i]
+                    inspector_value = row_tuple[inspector_col_idx + 1] if inspector_col_idx + 1 < len(row_tuple) else None
+                    
+                    if pd.notna(inspector_value) and str(inspector_value).strip() != '':
+                        inspector_name = str(inspector_value).strip()
                         if '(' in inspector_name:
                             inspector_name = inspector_name.split('(')[0].strip()
                         if not inspector_name:
@@ -7126,9 +7273,20 @@ class InspectorAssignmentManager:
             
             # 【改善】当日洗浄上がり品の品番単位・品名単位の制約違反をチェック
             same_day_cleaning_violations = []
-            for index, row in result_df.iterrows():
-                product_number = row['品番']
-                shipping_date_raw = row.get('出荷予定日', None)
+            # 列インデックスを事前に取得（itertuples()で高速化）
+            prod_num_col_idx_vc2 = result_df.columns.get_loc('品番')
+            shipping_date_col_idx_vc2 = result_df.columns.get_loc('出荷予定日') if '出荷予定日' in result_df.columns else -1
+            product_name_col_idx_vc2 = result_df.columns.get_loc('品名') if '品名' in result_df.columns else -1
+            inspector_col_indices_vc2 = {}
+            for i in range(1, 6):
+                col_name = f'検査員{i}'
+                if col_name in result_df.columns:
+                    inspector_col_indices_vc2[i] = result_df.columns.get_loc(col_name)
+            
+            for row_tuple in result_df.itertuples(index=True):
+                index = row_tuple[0]  # インデックス
+                product_number = row_tuple[prod_num_col_idx_vc2 + 1]  # +1はインデックス分
+                shipping_date_raw = row_tuple[shipping_date_col_idx_vc2 + 1] if shipping_date_col_idx_vc2 >= 0 and shipping_date_col_idx_vc2 + 1 < len(row_tuple) else None
                 shipping_date_str = str(shipping_date_raw).strip() if pd.notna(shipping_date_raw) else ''
                 is_same_day_cleaning = (
                     shipping_date_str == "当日洗浄上がり品" or
@@ -7140,15 +7298,18 @@ class InspectorAssignmentManager:
                 
                 if is_same_day_cleaning:
                     # 品名を取得
-                    product_name = row.get('品名', '')
+                    product_name = row_tuple[product_name_col_idx_vc2 + 1] if product_name_col_idx_vc2 >= 0 and product_name_col_idx_vc2 + 1 < len(row_tuple) else ''
                     product_name_str = str(product_name).strip() if pd.notna(product_name) else ''
                     
                     # このロットに割り当てられている検査員を取得
                     assigned_codes_in_lot = set()
                     assigned_names_in_lot = {}
                     for i in range(1, 6):
-                        inspector_col = f'検査員{i}'
-                        inspector_value = row.get(inspector_col, '')
+                        if i not in inspector_col_indices_vc2:
+                            continue
+                        inspector_col_idx = inspector_col_indices_vc2[i]
+                        inspector_value = row_tuple[inspector_col_idx + 1] if inspector_col_idx + 1 < len(row_tuple) else None
+                        
                         if pd.notna(inspector_value) and str(inspector_value).strip() != '':
                             inspector_name = str(inspector_value).strip()
                             if '(' in inspector_name:
@@ -7166,13 +7327,16 @@ class InspectorAssignmentManager:
                     for code in assigned_codes_in_lot:
                         inspector_name = assigned_names_in_lot.get(code, '')
                         # この品番の他のロットで同じ検査員が使われているかチェック
-                        for other_index, other_row in result_df.iterrows():
+                        for other_row_tuple in result_df.itertuples(index=True):
+                            other_index = other_row_tuple[0]  # インデックス
                             if other_index == index:
                                 continue
-                            if other_row['品番'] != product_number:
+                            
+                            other_prod_num = other_row_tuple[prod_num_col_idx_vc2 + 1]  # +1はインデックス分
+                            if other_prod_num != product_number:
                                 continue
                             
-                            other_shipping_date_raw = other_row.get('出荷予定日', None)
+                            other_shipping_date_raw = other_row_tuple[shipping_date_col_idx_vc2 + 1] if shipping_date_col_idx_vc2 >= 0 and shipping_date_col_idx_vc2 + 1 < len(other_row_tuple) else None
                             other_shipping_date_str = str(other_shipping_date_raw).strip() if pd.notna(other_shipping_date_raw) else ''
                             is_other_same_day_cleaning = (
                                 other_shipping_date_str == "当日洗浄上がり品" or
@@ -7185,8 +7349,11 @@ class InspectorAssignmentManager:
                             if is_other_same_day_cleaning:
                                 # 他のロットに同じ検査員が割り当てられているかチェック
                                 for j in range(1, 6):
-                                    other_inspector_col = f'検査員{j}'
-                                    other_inspector_value = other_row.get(other_inspector_col, '')
+                                    if j not in inspector_col_indices_vc2:
+                                        continue
+                                    other_inspector_col_idx = inspector_col_indices_vc2[j]
+                                    other_inspector_value = other_row_tuple[other_inspector_col_idx + 1] if other_inspector_col_idx + 1 < len(other_row_tuple) else None
+                                    
                                     if pd.notna(other_inspector_value) and str(other_inspector_value).strip() != '':
                                         other_inspector_name = str(other_inspector_value).strip()
                                         if '(' in other_inspector_name:
@@ -7216,18 +7383,21 @@ class InspectorAssignmentManager:
                         for code in assigned_codes_in_lot:
                             inspector_name = assigned_names_in_lot.get(code, '')
                             # 同じ品名の他の品番で同じ検査員が使われているかチェック
-                            for other_index, other_row in result_df.iterrows():
+                            for other_row_tuple in result_df.itertuples(index=True):
+                                other_index = other_row_tuple[0]  # インデックス
                                 if other_index == index:
                                     continue
-                                if other_row['品番'] == product_number:
+                                
+                                other_prod_num = other_row_tuple[prod_num_col_idx_vc2 + 1]  # +1はインデックス分
+                                if other_prod_num == product_number:
                                     continue  # 同じ品番は既にチェック済み
                                 
-                                other_product_name = other_row.get('品名', '')
+                                other_product_name = other_row_tuple[product_name_col_idx_vc2 + 1] if product_name_col_idx_vc2 >= 0 and product_name_col_idx_vc2 + 1 < len(other_row_tuple) else ''
                                 other_product_name_str = str(other_product_name).strip() if pd.notna(other_product_name) else ''
                                 if other_product_name_str != product_name_str:
                                     continue
                                 
-                                other_shipping_date_raw = other_row.get('出荷予定日', None)
+                                other_shipping_date_raw = other_row_tuple[shipping_date_col_idx_vc2 + 1] if shipping_date_col_idx_vc2 >= 0 and shipping_date_col_idx_vc2 + 1 < len(other_row_tuple) else None
                                 other_shipping_date_str = str(other_shipping_date_raw).strip() if pd.notna(other_shipping_date_raw) else ''
                                 is_other_same_day_cleaning = (
                                     other_shipping_date_str == "当日洗浄上がり品" or
@@ -7240,8 +7410,11 @@ class InspectorAssignmentManager:
                                 if is_other_same_day_cleaning:
                                     # 他の品番のロットに同じ検査員が割り当てられているかチェック
                                     for j in range(1, 6):
-                                        other_inspector_col = f'検査員{j}'
-                                        other_inspector_value = other_row.get(other_inspector_col, '')
+                                        if j not in inspector_col_indices_vc2:
+                                            continue
+                                        other_inspector_col_idx = inspector_col_indices_vc2[j]
+                                        other_inspector_value = other_row_tuple[other_inspector_col_idx + 1] if other_inspector_col_idx + 1 < len(other_row_tuple) else None
+                                        
                                         if pd.notna(other_inspector_value) and str(other_inspector_value).strip() != '':
                                             other_inspector_name = str(other_inspector_value).strip()
                                             if '(' in other_inspector_name:
@@ -7256,6 +7429,8 @@ class InspectorAssignmentManager:
                                                     # 同じ品名の異なる品番に同一検査員が割り当てられている（違反）
                                                     violation_key = (index, code, "同一品名異品番同一検査員")
                                                     if violation_key not in [v[:3] for v in same_day_cleaning_violations]:
+                                                        # other_row['品番']が必要な場合は、元のDataFrameから取得
+                                                        other_row = result_df.loc[other_index]
                                                         same_day_cleaning_violations.append((
                                                             index, code, inspector_name, "同一品名異品番同一検査員", product_number, other_row['品番']
                                                         ))
@@ -7511,16 +7686,31 @@ class InspectorAssignmentManager:
                         self.inspector_work_hours = {}
                         self.inspector_product_hours = {}
                         
-                        for idx, r in result_df.iterrows():
+                        # 列インデックスを事前に取得（itertuples()で高速化）
+                        prod_num_col_idx_p3_5 = result_df.columns.get_loc('品番')
+                        div_time_col_idx_p3_5 = result_df.columns.get_loc('分割検査時間') if '分割検査時間' in result_df.columns else -1
+                        inspector_col_indices_p3_5 = {}
+                        for i in range(1, 6):
+                            col_name = f'検査員{i}'
+                            if col_name in result_df.columns:
+                                inspector_col_indices_p3_5[i] = result_df.columns.get_loc(col_name)
+                        
+                        for row_tuple in result_df.itertuples(index=True):
+                            idx = row_tuple[0]  # インデックス
                             if idx in violation_indices or idx in protected_indices:
                                 continue  # クリアしたロットと保護されたロットはスキップ
-                            prod_num = r['品番']
-                            div_time = r.get('分割検査時間', 0.0)
+                            
+                            prod_num = row_tuple[prod_num_col_idx_p3_5 + 1]  # +1はインデックス分
+                            div_time = row_tuple[div_time_col_idx_p3_5 + 1] if div_time_col_idx_p3_5 >= 0 and div_time_col_idx_p3_5 + 1 < len(row_tuple) else 0.0
                             
                             for i in range(1, 6):
-                                inspector_col = f'検査員{i}'
-                                if pd.notna(r.get(inspector_col)) and str(r[inspector_col]).strip() != '':
-                                    inspector_name = str(r[inspector_col]).strip()
+                                if i not in inspector_col_indices_p3_5:
+                                    continue
+                                inspector_col_idx = inspector_col_indices_p3_5[i]
+                                inspector_value = row_tuple[inspector_col_idx + 1] if inspector_col_idx + 1 < len(row_tuple) else None
+                                
+                                if pd.notna(inspector_value) and str(inspector_value).strip() != '':
+                                    inspector_name = str(inspector_value).strip()
                                     if '(' in inspector_name:
                                         inspector_name = inspector_name.split('(')[0].strip()
                                     if not inspector_name:
@@ -7612,21 +7802,34 @@ class InspectorAssignmentManager:
                                 else:
                                     self.log_message(f"⚠️ ロットインデックス {index} の再割当に失敗しました（利用可能な検査員が見つかりません）")
                             else:
-                                self.log_message(f"⚠️ ロットインデックス {index} の再割当に失敗しました（利用可能な検査員が0人）")
+                                    self.log_message(f"⚠️ ロットインデックス {index} の再割当に失敗しました（利用可能な検査員が0人）")
                         
                         # 履歴を再計算（再割当後の状態）
                         self.inspector_daily_assignments = {}
                         self.inspector_work_hours = {}
                         self.inspector_product_hours = {}
                         
-                        for idx, r in result_df.iterrows():
-                            prod_num = r['品番']
-                            div_time = r.get('分割検査時間', 0.0)
+                        # 列インデックスを事前に取得（itertuples()で高速化）
+                        prod_num_col_idx = result_df.columns.get_loc('品番')
+                        div_time_col_idx = result_df.columns.get_loc('分割検査時間') if '分割検査時間' in result_df.columns else -1
+                        inspector_col_indices = {}
+                        for i in range(1, 6):
+                            col_name = f'検査員{i}'
+                            if col_name in result_df.columns:
+                                inspector_col_indices[i] = result_df.columns.get_loc(col_name)
+                        
+                        for row_tuple in result_df.itertuples(index=False):
+                            prod_num = row_tuple[prod_num_col_idx]
+                            div_time = row_tuple[div_time_col_idx] if div_time_col_idx >= 0 and div_time_col_idx < len(row_tuple) else 0.0
                             
                             for i in range(1, 6):
-                                inspector_col = f'検査員{i}'
-                                if pd.notna(r.get(inspector_col)) and str(r[inspector_col]).strip() != '':
-                                    inspector_name = str(r[inspector_col]).strip()
+                                if i not in inspector_col_indices:
+                                    continue
+                                inspector_col_idx = inspector_col_indices[i]
+                                inspector_value = row_tuple[inspector_col_idx] if inspector_col_idx < len(row_tuple) else None
+                                
+                                if pd.notna(inspector_value) and str(inspector_value).strip() != '':
+                                    inspector_name = str(inspector_value).strip()
                                     if '(' in inspector_name:
                                         inspector_name = inspector_name.split('(')[0].strip()
                                     if not inspector_name:
@@ -7675,7 +7878,8 @@ class InspectorAssignmentManager:
                                 # 日付文字列の場合は変換を試みる
                                 try:
                                     shipping_date = pd.to_datetime(shipping_date_raw)
-                                except:
+                                except Exception as e:
+                                    logger.debug(f"出荷日の変換でエラーが発生しました（デフォルト値を使用）: {e}")
                                     shipping_date = pd.Timestamp.min
                             else:
                                 shipping_date = shipping_date_raw
@@ -7735,14 +7939,28 @@ class InspectorAssignmentManager:
                 self.inspector_work_hours = {}
                 self.inspector_product_hours = {}
                 
-                for index, row in result_df.iterrows():
-                    product_number = row['品番']
-                    divided_time = row.get('分割検査時間', 0.0)
+                # 列インデックスを事前に取得（itertuples()で高速化）
+                prod_num_col_idx_u2 = result_df.columns.get_loc('品番')
+                div_time_col_idx_u2 = result_df.columns.get_loc('分割検査時間') if '分割検査時間' in result_df.columns else -1
+                inspector_col_indices_u2 = {}
+                for i in range(1, 6):
+                    col_name = f'検査員{i}'
+                    if col_name in result_df.columns:
+                        inspector_col_indices_u2[i] = result_df.columns.get_loc(col_name)
+                
+                for row_tuple in result_df.itertuples(index=True):
+                    index = row_tuple[0]  # インデックス
+                    product_number = row_tuple[prod_num_col_idx_u2 + 1]  # +1はインデックス分
+                    divided_time = row_tuple[div_time_col_idx_u2 + 1] if div_time_col_idx_u2 >= 0 and div_time_col_idx_u2 + 1 < len(row_tuple) else 0.0
                     
                     for i in range(1, 6):
-                        inspector_col = f'検査員{i}'
-                        if pd.notna(row.get(inspector_col)) and str(row[inspector_col]).strip() != '':
-                            inspector_name = str(row[inspector_col]).strip()
+                        if i not in inspector_col_indices_u2:
+                            continue
+                        inspector_col_idx = inspector_col_indices_u2[i]
+                        inspector_value = row_tuple[inspector_col_idx + 1] if inspector_col_idx + 1 < len(row_tuple) else None
+                        
+                        if pd.notna(inspector_value) and str(inspector_value).strip() != '':
+                            inspector_name = str(inspector_value).strip()
                             if '(' in inspector_name:
                                 inspector_name = inspector_name.split('(')[0].strip()
                             if not inspector_name:
@@ -7842,9 +8060,18 @@ class InspectorAssignmentManager:
             self.log_message("最終結果を出荷予定日の古い順でソートしました（最優先ルール）")
             
             # チーム情報を更新（未割当の理由を保持）
-            for index, row in result_df.iterrows():
-                inspector_count = row.get('検査員人数', 0)
-                current_team_info = row.get('チーム情報', '')
+            # 列インデックスを事前に取得（itertuples()で高速化）
+            inspector_count_col_idx_ti = result_df.columns.get_loc('検査員人数') if '検査員人数' in result_df.columns else -1
+            team_info_col_idx = result_df.columns.get_loc('チーム情報') if 'チーム情報' in result_df.columns else -1
+            status_col_idx = result_df.columns.get_loc('assignability_status') if 'assignability_status' in result_df.columns else -1
+            prod_num_col_idx_ti = result_df.columns.get_loc('品番')
+            inspection_time_col_idx_ti = result_df.columns.get_loc('検査時間') if '検査時間' in result_df.columns else -1
+            lot_qty_col_idx_ti = result_df.columns.get_loc('ロット数量') if 'ロット数量' in result_df.columns else -1
+            
+            for row_tuple in result_df.itertuples(index=True):
+                index = row_tuple[0]  # インデックス
+                inspector_count = row_tuple[inspector_count_col_idx_ti + 1] if inspector_count_col_idx_ti >= 0 and inspector_count_col_idx_ti + 1 < len(row_tuple) else 0
+                current_team_info = row_tuple[team_info_col_idx + 1] if team_info_col_idx >= 0 and team_info_col_idx + 1 < len(row_tuple) else ''
                 
                 # 検査員人数が0で、チーム情報が空または「未割当」のみの場合は詳細な理由を再設定
                 if (inspector_count == 0 or pd.isna(inspector_count)) and (
@@ -7853,10 +8080,13 @@ class InspectorAssignmentManager:
                     str(current_team_info).strip() == '未割当'
                 ):
                     # assignability_statusから理由を推測
-                    status = row.get('assignability_status', '')
-                    product_number = row.get('品番', '')
-                    inspection_time = row.get('検査時間', 0)
-                    lot_quantity = row.get('ロット数量', 0)
+                    status = row_tuple[status_col_idx + 1] if status_col_idx >= 0 and status_col_idx + 1 < len(row_tuple) else ''
+                    product_number = row_tuple[prod_num_col_idx_ti + 1]  # +1はインデックス分
+                    inspection_time = row_tuple[inspection_time_col_idx_ti + 1] if inspection_time_col_idx_ti >= 0 and inspection_time_col_idx_ti + 1 < len(row_tuple) else 0
+                    lot_quantity = row_tuple[lot_qty_col_idx_ti + 1] if lot_qty_col_idx_ti >= 0 and lot_qty_col_idx_ti + 1 < len(row_tuple) else 0
+                    
+                    # rowオブジェクトが必要な場合は、元のDataFrameから取得
+                    row = result_df.loc[index]
                     
                     if status == 'quantity_zero':
                         reason = "ロット数量0" if (lot_quantity == 0 or pd.isna(lot_quantity)) else "検査時間0"
@@ -7897,10 +8127,22 @@ class InspectorAssignmentManager:
             self.log_message("チーム情報の再計算が完了しました")
             
             self.log_message("全体最適化が完了しました")
-            for idx, row in result_df.iterrows():
-                if row.get('検査員人数', 0) > 0:
-                    remaining = row.get('remaining_work_hours', 0.0) or 0.0
-                    if remaining <= 0.05 and row.get('assignability_status') in {'capacity_shortage', 'capacity_shortage_partial', 'partial_assigned'}:
+            # 列インデックスを事前に取得（itertuples()で高速化）
+            inspector_count_col_idx_f = result_df.columns.get_loc('検査員人数') if '検査員人数' in result_df.columns else -1
+            remaining_col_idx = result_df.columns.get_loc('remaining_work_hours') if 'remaining_work_hours' in result_df.columns else -1
+            status_col_idx_f = result_df.columns.get_loc('assignability_status') if 'assignability_status' in result_df.columns else -1
+            
+            for row_tuple in result_df.itertuples(index=True):
+                idx = row_tuple[0]  # インデックス
+                inspector_count = row_tuple[inspector_count_col_idx_f + 1] if inspector_count_col_idx_f >= 0 and inspector_count_col_idx_f + 1 < len(row_tuple) else 0
+                
+                if inspector_count > 0:
+                    remaining = row_tuple[remaining_col_idx + 1] if remaining_col_idx >= 0 and remaining_col_idx + 1 < len(row_tuple) else 0.0
+                    if remaining is None or pd.isna(remaining):
+                        remaining = 0.0
+                    status = row_tuple[status_col_idx_f + 1] if status_col_idx_f >= 0 and status_col_idx_f + 1 < len(row_tuple) else ''
+                    
+                    if remaining <= 0.05 and status in {'capacity_shortage', 'capacity_shortage_partial', 'partial_assigned'}:
                         result_df.at[idx, 'assignability_status'] = 'fully_assigned'
             # 未割当カテゴリの可視化
             unresolved = result_df[(result_df['検査員人数'] == 0) | (result_df['remaining_work_hours'] > 0.05)]
@@ -8858,7 +9100,8 @@ class InspectorAssignmentManager:
             # エラー時も未割当にする
             try:
                 self.clear_assignment(result_df, index)
-            except:
+            except Exception as e:
+                logger.debug(f"割り当てクリア処理でエラーが発生しました（無視）: {e}")
                 pass
             return False
     
@@ -8936,7 +9179,8 @@ class InspectorAssignmentManager:
             daily_hours = self.inspector_daily_assignments.get(inspector_code, {}).get(current_date, 0.0)
             # 0.05時間（3分）の余裕を持たせる
             return daily_hours + additional_hours <= max_hours - 0.05
-        except:
+        except Exception as e:
+            logger.debug(f"勤務時間チェック処理でエラーが発生しました（デフォルト: False）: {e}")
             return False
     
     def update_team_info(

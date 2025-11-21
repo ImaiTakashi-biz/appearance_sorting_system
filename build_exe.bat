@@ -19,12 +19,16 @@ if errorlevel 1 (
 )
 
 REM アイコンファイルの変換
-echo.
-echo アイコンファイルを変換中...
-python convert_icon.py
-if errorlevel 1 (
-    echo 警告: アイコンファイルの変換に失敗しました。
-    echo 既存のICOファイルを使用するか、PNGファイルを確認してください。
+if exist "convert_icon.py" (
+    echo.
+    echo アイコンファイルを変換中...
+    python convert_icon.py
+    if errorlevel 1 (
+        echo 警告: アイコンファイルの変換に失敗しました。
+        echo 既存のICOファイルを使用するか、PNGファイルを確認してください。
+    )
+) else (
+    echo 情報: convert_icon.pyが見つかりません。既存のICOファイルを使用します。
 )
 
 REM 必須ファイルの存在確認

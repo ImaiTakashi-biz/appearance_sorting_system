@@ -39,6 +39,7 @@ from app.export.google_sheets_exporter_service import GoogleSheetsExporter
 from app.assignment.inspector_assignment_service import InspectorAssignmentManager
 from app.services.cleaning_request_service import get_cleaning_lots
 from app.config_manager import AppConfigManager
+from app.utils.path_resolver import resolve_resource_path
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import matplotlib.font_manager as fm
@@ -151,6 +152,15 @@ class ModernDataExtractorUI:
         # グラフ表示状態管理
         self.show_graph = False
         self.graph_frame = None
+        
+        # 品番予測検索用の変数
+        self.product_code_autocomplete_list = []  # 重複除去済み品番リスト
+        self.autocomplete_dropdown = None  # ドロップダウンリスト
+        self.autocomplete_search_job = None  # 遅延実行用のジョブID
+        self.autocomplete_hide_job = None  # 非表示処理用のジョブID
+        self.autocomplete_mouse_inside = False  # マウスがドロップダウンフレーム内にあるか
+        self.min_search_length = 2  # 検索開始最小文字数
+        self.max_display_items = 20  # 最大表示件数
         
         # マスタデータ保存用変数
         self.inspector_master_data = None
@@ -296,11 +306,12 @@ class ModernDataExtractorUI:
         except Exception as e:
             logger.error(f"メインスクロールバインド中にエラーが発生しました: {str(e)}")
     
-    def setup_logging(self, execution_id: str = None):
+    def setup_logging(self, execution_id: str = None, use_existing_file: bool = False):
         """ログ設定
         
         Args:
             execution_id: 実行ID（指定された場合、そのIDを含むファイル名でログを作成）
+            use_existing_file: Trueの場合、既存のログファイルを使用（データ抽出時の統合用）
         """
         from pathlib import Path
         from datetime import datetime
@@ -325,13 +336,21 @@ class ModernDataExtractorUI:
         log_dir.mkdir(parents=True, exist_ok=True)
         
         # ログファイルのパス
-        if execution_id:
+        if use_existing_file and hasattr(self, 'current_log_file') and self.current_log_file:
+            # 既存のログファイルを使用（データ抽出時の統合用）
+            log_file = self.current_log_file
+        elif execution_id:
             # 実行ごとにファイルを作成（日時を含む）
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             log_file = log_dir / f"app_{timestamp}_{execution_id}.log"
         else:
-            # 初期起動時は日付ごとにファイルを分ける（後方互換性のため）
-            log_file = log_dir / f"app_{datetime.now().strftime('%Y%m%d')}.log"
+            # 起動時は日時付きのファイル名を使用（毎回新規作成）
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            log_file = log_dir / f"app_{timestamp}.log"
+        
+        # 起動時に作成されたログファイルのパスを保存（データ抽出時の統合用）
+        if not hasattr(self, 'current_log_file') or not use_existing_file:
+            self.current_log_file = log_file
         
         # コンソール出力用のフィルタ関数（重要なログのみ）
         def console_filter(record):
@@ -444,28 +463,15 @@ class ModernDataExtractorUI:
         Returns:
             解決されたアイコンファイルのパス
         """
-        if getattr(sys, 'frozen', False):
-            temp_dir = Path(sys._MEIPASS)
-            temp_file = temp_dir / icon_filename
-            if temp_file.exists():
-                logger.debug(f"アイコンファイルを一時ディレクトリから使用しました: {temp_file}")
-                return str(temp_file)
-
-            exe_dir = Path(sys.executable).parent
-            exe_file = exe_dir / icon_filename
-            if exe_file.exists():
-                logger.debug(f"アイコンファイルを実行ファイルのディレクトリから使用しました: {exe_file}")
-                return str(exe_file)
-
-            logger.debug(f"アイコンファイルが見つかりませんでした: {icon_filename}")
-            return icon_filename
+        script_dir = Path(__file__).parent.parent.parent
+        resolved_path = resolve_resource_path(icon_filename, base_dir=script_dir)
+        
+        if resolved_path != icon_filename:
+            logger.debug(f"アイコンファイルを読み込みました: {resolved_path}")
         else:
-            script_dir = Path(__file__).parent.parent.parent
-            icon_path = script_dir / icon_filename
-            if icon_path.exists():
-                logger.debug(f"アイコンファイルを読み込みました: {icon_path}")
-                return str(icon_path)
-            return icon_filename
+            logger.debug(f"アイコンファイルが見つかりませんでした: {icon_filename}")
+        
+        return resolved_path
     
     def _get_image_path(self, image_filename: str) -> str:
         """
@@ -477,29 +483,8 @@ class ModernDataExtractorUI:
         Returns:
             解決された画像ファイルのパス
         """
-        if getattr(sys, 'frozen', False):
-            # exe化されている場合
-            # まず一時ディレクトリ（sys._MEIPASS）を確認（埋め込まれたファイル）
-            temp_dir = Path(sys._MEIPASS)
-            temp_file = temp_dir / image_filename
-            if temp_file.exists():
-                return str(temp_file)
-            
-            # 次にexeと同じ階層を確認
-            exe_dir = Path(sys.executable).parent
-            exe_file = exe_dir / image_filename
-            if exe_file.exists():
-                return str(exe_file)
-            
-            # 見つからない場合は元のパスを返す
-            return image_filename
-        else:
-            # 通常のPython実行の場合：スクリプトの場所を基準にする
-            script_dir = Path(__file__).parent.parent.parent
-            image_path = script_dir / image_filename
-            if image_path.exists():
-                return str(image_path)
-            return image_filename
+        script_dir = Path(__file__).parent.parent.parent
+        return resolve_resource_path(image_filename, base_dir=script_dir)
     
     def create_title_section(self, parent):
         """タイトルセクションの作成"""
@@ -597,8 +582,12 @@ class ModernDataExtractorUI:
         product_code_frame = ctk.CTkFrame(fields_frame, fg_color="transparent")
         product_code_frame.pack(side="left", fill="x", expand=True, padx=(0, 8))
         
+        # 予測検索用のコンテナフレーム（相対位置指定のため）
+        self.product_code_container = ctk.CTkFrame(product_code_frame, fg_color="transparent")
+        self.product_code_container.pack(fill="x")
+        
         product_code_label = ctk.CTkLabel(
-            product_code_frame,
+            self.product_code_container,
             text="品番（製品マスタと完全一致）",
             font=ctk.CTkFont(family="Yu Gothic", size=16, weight="bold"),
             text_color="#374151"
@@ -606,8 +595,8 @@ class ModernDataExtractorUI:
         product_code_label.pack(anchor="w", pady=(0, 4))
         
         self.product_code_entry = ctk.CTkEntry(
-            product_code_frame,
-            placeholder_text="品番を入力",
+            self.product_code_container,
+            placeholder_text="品番を入力（2文字以上で検索）",
             font=ctk.CTkFont(family="Yu Gothic", size=14),
             height=40,
             border_width=1,
@@ -615,6 +604,17 @@ class ModernDataExtractorUI:
             text_color="#374151"
         )
         self.product_code_entry.pack(fill="x")
+        
+        # 予測検索のイベントバインディング
+        self.product_code_entry.bind("<KeyRelease>", self.on_product_code_key_release)
+        self.product_code_entry.bind("<FocusIn>", self.on_product_code_focus_in)
+        self.product_code_entry.bind("<FocusOut>", self.on_product_code_focus_out)
+        
+        # 予測検索ドロップダウンフレーム（初期状態は非表示）
+        self.autocomplete_dropdown = None
+        
+        # 品番リストの初期化（バックグラウンドで読み込み）
+        self.initialize_product_code_list()
         
         # 検査可能ロット数／日入力セクション
         lots_frame = ctk.CTkFrame(fields_frame, fg_color="transparent")
@@ -640,9 +640,8 @@ class ModernDataExtractorUI:
         self.inspectable_lots_entry.pack(fill="x")
         
         # 入力フィールドの変更を監視してボタンの表示/非表示を制御
-        self.product_code_entry.bind("<KeyRelease>", self.check_input_fields)
+        # 品番入力フィールドのイベントはon_product_code_key_releaseで処理（予測検索も含む）
         self.inspectable_lots_entry.bind("<KeyRelease>", self.check_input_fields)
-        self.product_code_entry.bind("<FocusOut>", self.check_input_fields)
         self.inspectable_lots_entry.bind("<FocusOut>", self.check_input_fields)
         
         # 登録確定ボタン（初期状態は非表示）
@@ -2416,9 +2415,8 @@ class ModernDataExtractorUI:
         connection = None
         success = False  # 成功フラグを追加
         try:
-            # データ抽出実行ごとに新しいログファイルを作成
-            execution_id = f"{start_date}_{end_date}".replace("-", "").replace(" ", "_").replace(":", "")
-            self.setup_logging(execution_id=execution_id)
+            # 既存のログファイルに追記（起動時のログファイルに統合）
+            self.setup_logging(use_existing_file=True)
             
             self.log_message(f"データ抽出を開始します")
             self.log_message(f"抽出期間: {start_date} ～ {end_date}")
@@ -3854,31 +3852,16 @@ class ModernDataExtractorUI:
                 assignment_df = assignment_df.sort_values(['_出荷予定日_ソート用', '品番'], na_position='last').reset_index(drop=True)
                 assignment_df = assignment_df.drop(columns=['_出荷予定日_ソート用'])
             
-            # 不足数を再計算
-            current_product = None
-            current_shortage = 0
+            # 不足数を再計算（ベクトル化処理で高速化）
+            # 品番ごとにグループ化して累積計算
+            def calculate_cumulative(group):
+                """同一品番グループ内で不足数を累積計算"""
+                result = group['不足数'].copy()
+                for i in range(1, len(group)):
+                    result.iloc[i] = result.iloc[i-1] + group['ロット数量'].iloc[i-1]
+                return result
             
-            # 列名から列インデックスへのマッピングを作成（高速化：itertuples()を使用）
-            product_col_idx = assignment_df.columns.get_loc('品番')
-            shortage_col_idx = assignment_df.columns.get_loc('不足数')
-            lot_qty_col_idx = assignment_df.columns.get_loc('ロット数量')
-            
-            for row_tuple in assignment_df.itertuples(index=True):
-                index = row_tuple[0]  # インデックス
-                product_number = row_tuple[product_col_idx + 1]  # itertuplesはインデックスを含むため+1
-                shortage_value = row_tuple[shortage_col_idx + 1] if shortage_col_idx < len(row_tuple) - 1 else 0
-                
-                if current_product != product_number:
-                    # 新しい品番の場合は初期不足数を設定
-                    current_shortage = shortage_value
-                    current_product = product_number
-                else:
-                    # 同一品番の場合は前のロット数量を加算して不足数を更新
-                    previous_lot_quantity = assignment_df.iloc[index-1]['ロット数量']
-                    current_shortage = current_shortage + previous_lot_quantity
-                    
-                    # 不足数列を更新
-                    assignment_df.at[index, '不足数'] = current_shortage
+            assignment_df['不足数'] = assignment_df.groupby('品番', group_keys=False).apply(calculate_cumulative).reset_index(drop=True)
             
             return assignment_df
             
@@ -4352,6 +4335,450 @@ class ModernDataExtractorUI:
         
         return df
     
+    def initialize_product_code_list(self):
+        """製品マスタから重複除去済み品番リストを初期化（バックグラウンド処理）"""
+        def load_in_background():
+            try:
+                product_master_df = self.load_product_master_cached()
+                if product_master_df is not None and '品番' in product_master_df.columns:
+                    # 重複を除去して一意の品番リストを作成
+                    unique_products = product_master_df['品番'].dropna().astype(str).unique().tolist()
+                    # 空文字列を除外
+                    unique_products = [p for p in unique_products if p.strip()]
+                    # ソート
+                    unique_products.sort()
+                    self.product_code_autocomplete_list = unique_products
+                else:
+                    logger.warning("製品マスタが読み込めないか、'品番'列が存在しません")
+                    self.product_code_autocomplete_list = []
+            except Exception as e:
+                logger.error(f"品番リストの初期化に失敗しました: {e}", exc_info=True)
+                self.product_code_autocomplete_list = []
+        
+        # バックグラウンドスレッドで実行（UIをブロックしない）
+        threading.Thread(target=load_in_background, daemon=True).start()
+    
+    def on_product_code_key_release(self, event):
+        """品番入力フィールドのキーリリースイベント"""
+        # 既存のcheck_input_fieldsも呼び出す
+        self.check_input_fields(event)
+        
+        # 予測検索の処理
+        try:
+            # product_code_entryが初期化されているか確認
+            if self.product_code_entry is None:
+                return
+            
+            current_text = self.product_code_entry.get().strip()
+            
+            # 既存の遅延実行ジョブをキャンセル
+            if self.autocomplete_search_job is not None:
+                self.root.after_cancel(self.autocomplete_search_job)
+                self.autocomplete_search_job = None
+            
+            # 最小文字数未満の場合はドロップダウンを非表示
+            if len(current_text) < self.min_search_length:
+                self.hide_autocomplete_dropdown()
+                return
+            
+            # 遅延実行で検索（300ms後）
+            self.autocomplete_search_job = self.root.after(300, lambda text=current_text: self.search_product_codes(text))
+        except Exception as e:
+            logger.error(f"品番入力イベント処理エラー: {e}", exc_info=True)
+    
+    def on_product_code_focus_in(self, event):
+        """品番入力フィールドにフォーカスが入った時"""
+        current_text = self.product_code_entry.get().strip()
+        if len(current_text) >= self.min_search_length:
+            # 既存の遅延実行ジョブをキャンセル
+            if self.autocomplete_search_job is not None:
+                self.root.after_cancel(self.autocomplete_search_job)
+                self.autocomplete_search_job = None
+            # 即座に検索
+            self.search_product_codes(current_text)
+    
+    def on_product_code_focus_out(self, event):
+        """品番入力フィールドからフォーカスが外れた時"""
+        # 既存のcheck_input_fieldsも呼び出す
+        self.check_input_fields(event)
+        
+        # マウスがドロップダウンフレーム内にある場合は非表示にしない
+        if self.autocomplete_mouse_inside:
+            return
+        
+        # 入力フィールドにフォーカスがある場合は非表示にしない
+        try:
+            if self.product_code_entry.focus_get() == self.product_code_entry:
+                return
+        except:
+            pass
+        
+        # 既存の非表示処理ジョブをキャンセル
+        if self.autocomplete_hide_job is not None:
+            self.root.after_cancel(self.autocomplete_hide_job)
+            self.autocomplete_hide_job = None
+        
+        # 少し遅延させてから非表示（ドロップダウンをクリックする時間を確保）
+        self.autocomplete_hide_job = self.root.after(300, self.hide_autocomplete_dropdown)
+    
+    def search_product_codes(self, search_text: str):
+        """品番を検索してドロップダウンを表示"""
+        try:
+            if not self.product_code_autocomplete_list:
+                # リストがまだ初期化されていない場合は再試行
+                self.initialize_product_code_list()
+                # 少し待ってから再検索
+                self.root.after(500, lambda text=search_text: self.search_product_codes(text))
+                return
+            
+            # 大文字小文字を区別しない部分一致検索
+            search_text_lower = search_text.lower()
+            matches = [
+                product for product in self.product_code_autocomplete_list
+                if search_text_lower in product.lower()
+            ]
+            
+            # 最大表示件数で制限
+            matches = matches[:self.max_display_items]
+            
+            if matches:
+                self.show_autocomplete_dropdown(matches, search_text)
+            else:
+                self.hide_autocomplete_dropdown()
+        except Exception as e:
+            logger.error(f"品番検索エラー: {e}", exc_info=True)
+    
+    def show_autocomplete_dropdown(self, matches: list, current_text: str):
+        """予測検索ドロップダウンを表示"""
+        # 既存のドロップダウンを強制的に削除（新しいドロップダウンを表示するため）
+        self.force_hide_autocomplete_dropdown()
+        
+        if not matches:
+            return
+        
+        try:
+            # コンテナフレームを取得
+            if not hasattr(self, 'product_code_container') or self.product_code_container is None:
+                logger.error("product_code_containerが初期化されていません")
+                return
+            container = self.product_code_container
+            
+            # ドロップダウンフレームを作成（コンテナフレームに配置）
+            self.autocomplete_dropdown = ctk.CTkFrame(
+                container,
+                fg_color="white",
+                corner_radius=8,
+                border_width=1,
+                border_color="#DBEAFE"
+            )
+            
+            # スクロール可能なフレームを作成
+            max_height = min(len(matches) * 35 + 10, 200)  # 最大200pxの高さ
+            scrollable_frame = ctk.CTkScrollableFrame(
+                self.autocomplete_dropdown,
+                fg_color="white",
+                height=max_height
+            )
+            scrollable_frame.pack(fill="both", expand=True, padx=2, pady=2)
+            
+            # マウスホイールイベントを処理する関数
+            def on_autocomplete_mousewheel(event):
+                """ドロップダウンリストのマウスホイールイベント処理"""
+                # CTkScrollableFrameの内部Canvasを直接操作
+                canvas = scrollable_frame._parent_canvas
+                if canvas:
+                    # WindowsとLinux/Macでイベントの形式が異なる
+                    if event.delta:
+                        # Windows（スクロール速度を20倍に）
+                        scroll_amount = int(-event.delta / 120) * 20
+                    else:
+                        # Linux/Mac（スクロール速度を20倍に）
+                        scroll_amount = -20 if event.num == 4 else 20
+                    canvas.yview_scroll(scroll_amount, "units")
+                return "break"
+            
+            # マウスホイールイベントをバインド
+            scrollable_frame.bind("<MouseWheel>", on_autocomplete_mousewheel)
+            self.autocomplete_dropdown.bind("<MouseWheel>", on_autocomplete_mousewheel)
+            
+            # ドロップダウンフレームとその子ウィジェットにマウスホイールイベントを再帰的にバインド
+            def bind_mousewheel_to_children(widget):
+                """再帰的に子ウィジェットにマウスホイールイベントをバインド"""
+                try:
+                    widget.bind("<MouseWheel>", on_autocomplete_mousewheel)
+                    for child in widget.winfo_children():
+                        bind_mousewheel_to_children(child)
+                except:
+                    pass
+            
+            # ドロップダウンフレームの子ウィジェットにバインド（初期状態のみ）
+            # ボタン作成後にも再度呼び出す必要があるため、ここでは呼ばない
+            
+            # ドロップダウンフレームに入ったときにフォーカスを維持
+            def on_enter_dropdown(event):
+                """ドロップダウンフレームに入ったとき"""
+                # マウスがドロップダウンフレーム内にあることを記録
+                self.autocomplete_mouse_inside = True
+                # 非表示処理をキャンセル
+                if self.autocomplete_hide_job is not None:
+                    self.root.after_cancel(self.autocomplete_hide_job)
+                    self.autocomplete_hide_job = None
+                # マウスホイールイベントが確実に動作するように、フォーカスを設定
+                try:
+                    scrollable_frame.focus_set()
+                except:
+                    pass
+            
+            def on_leave_dropdown(event):
+                """ドロップダウンフレームから出たとき"""
+                # イベントのwidgetを確認
+                try:
+                    widget = event.widget
+                    # マウスが実際にドロップダウンフレーム外に出たか確認
+                    # 子ウィジェット間の移動の場合は無視
+                    if widget == self.autocomplete_dropdown or widget == scrollable_frame:
+                        # ドロップダウンフレーム自体から出た場合のみ処理
+                        # 少し遅延させて、実際に外に出たか確認
+                        def check_leave():
+                            try:
+                                # マウスの現在位置を確認
+                                x, y = self.root.winfo_pointerxy()
+                                widget_x = self.autocomplete_dropdown.winfo_rootx()
+                                widget_y = self.autocomplete_dropdown.winfo_rooty()
+                                widget_width = self.autocomplete_dropdown.winfo_width()
+                                widget_height = self.autocomplete_dropdown.winfo_height()
+                                
+                                # マウスがドロップダウンフレーム内にあるか確認
+                                if (widget_x <= x <= widget_x + widget_width and 
+                                    widget_y <= y <= widget_y + widget_height):
+                                    # まだフレーム内にあるので非表示にしない
+                                    return
+                                
+                                # 入力フィールドに戻っているかチェック
+                                entry_x = self.product_code_entry.winfo_rootx()
+                                entry_y = self.product_code_entry.winfo_rooty()
+                                entry_width = self.product_code_entry.winfo_width()
+                                entry_height = self.product_code_entry.winfo_height()
+                                
+                                if (entry_x <= x <= entry_x + entry_width and 
+                                    entry_y <= y <= entry_y + entry_height):
+                                    # 入力フィールドに戻っているので非表示にしない
+                                    return
+                                
+                                # 実際に外に出た場合のみ非表示
+                                self.autocomplete_mouse_inside = False
+                                if self.autocomplete_hide_job is not None:
+                                    self.root.after_cancel(self.autocomplete_hide_job)
+                                self.autocomplete_hide_job = self.root.after(300, self.hide_autocomplete_dropdown)
+                            except:
+                                # エラーが発生した場合は安全のため非表示にしない
+                                pass
+                        
+                        # 少し遅延させて確認（子ウィジェット間の移動を除外）
+                        self.root.after(100, check_leave)
+                    else:
+                        # 子ウィジェットからのLeaveイベントは無視（親のLeaveイベントで処理）
+                        pass
+                except:
+                    # エラーが発生した場合は非表示にしない
+                    pass
+            
+            # 各候補をボタンとして表示
+            for product_code in matches:
+                # ボタン用のフレームを作成（ホバー効果を確実に表示するため）
+                button_frame = ctk.CTkFrame(
+                    scrollable_frame,
+                    fg_color="#F9FAFB",
+                    corner_radius=4,
+                    height=32
+                )
+                button_frame.pack(fill="x", padx=2, pady=1)
+                
+                # ラベルを作成（クリック可能な領域）
+                item_label = ctk.CTkLabel(
+                    button_frame,
+                    text=product_code,
+                    font=ctk.CTkFont(family="Yu Gothic", size=13),
+                    fg_color="transparent",
+                    text_color="#374151",
+                    anchor="w",
+                    height=32
+                )
+                item_label.pack(fill="x", padx=8, pady=0)
+                
+                # クリックイベントをバインド
+                def on_item_click(event, code=product_code):
+                    """品番を選択"""
+                    # イベントの伝播を止める
+                    event.widget.focus_set()
+                    # 少し遅延させてから選択処理を実行（イベント処理が完了してから）
+                    self.root.after(10, lambda: self.select_product_code(code))
+                    return "break"
+                
+                # Enter/Leaveイベントで背景色を変更
+                def on_frame_enter(event, frame=button_frame, label=item_label):
+                    """フレームにマウスが入ったとき"""
+                    try:
+                        frame.configure(fg_color="#3B82F6")
+                        label.configure(text_color="white")
+                    except:
+                        pass
+                    # ドロップダウンフレームのEnterイベントも呼び出す
+                    on_enter_dropdown(event)
+                
+                def on_frame_leave(event, frame=button_frame, label=item_label):
+                    """フレームからマウスが出たとき"""
+                    try:
+                        frame.configure(fg_color="#F9FAFB")
+                        label.configure(text_color="#374151")
+                    except:
+                        pass
+                    # ドロップダウンフレームのLeaveイベントは呼ばない（親のLeaveで処理）
+                
+                # フレームとラベルの両方にイベントをバインド（優先度を高く）
+                button_frame.bind("<Enter>", on_frame_enter, add="+")
+                button_frame.bind("<Leave>", on_frame_leave, add="+")
+                button_frame.bind("<Button-1>", on_item_click)
+                item_label.bind("<Enter>", on_frame_enter, add="+")
+                item_label.bind("<Leave>", on_frame_leave, add="+")
+                item_label.bind("<Button-1>", on_item_click)
+                
+                # マウスホイールイベントもバインド（フレームとラベルに）
+                button_frame.bind("<MouseWheel>", on_autocomplete_mousewheel)
+                item_label.bind("<MouseWheel>", on_autocomplete_mousewheel)
+            
+            # ドロップダウンをpackで配置（入力フィールドの直下）
+            self.autocomplete_dropdown.pack(fill="x", pady=(2, 0))
+            
+            # ボタン作成後にマウスホイールイベントを再帰的にバインド（作成されたボタンにもバインド）
+            bind_mousewheel_to_children(self.autocomplete_dropdown)
+            
+            # Enter/Leaveイベントをバインド（ボタン作成後に実行）
+            self.autocomplete_dropdown.bind("<Enter>", on_enter_dropdown)
+            self.autocomplete_dropdown.bind("<Leave>", on_leave_dropdown)
+            scrollable_frame.bind("<Enter>", on_enter_dropdown)
+            scrollable_frame.bind("<Leave>", on_leave_dropdown)
+            
+            # 各ボタンにもEnter/Leaveイベントをバインド（再帰的に、ボタン作成後に実行）
+            # ただし、フレームとラベルには既にバインド済みなので、スクロール可能フレームのみ
+            def bind_enter_leave_to_children(widget):
+                """再帰的に子ウィジェットにEnter/Leaveイベントをバインド"""
+                try:
+                    # フレームとラベルは既に個別にバインド済みなのでスキップ
+                    # スクロール可能フレームとその他のウィジェットのみバインド
+                    widget_type = type(widget).__name__
+                    # フレームとラベルでない場合、またはスクロール可能フレームの場合のみバインド
+                    if widget == scrollable_frame or widget_type not in ['CTkFrame', 'CTkLabel']:
+                        widget.bind("<Enter>", on_enter_dropdown, add="+")
+                        widget.bind("<Leave>", on_leave_dropdown, add="+")
+                    for child in widget.winfo_children():
+                        bind_enter_leave_to_children(child)
+                except:
+                    pass
+            
+            # ドロップダウンフレームの子ウィジェットにバインド（ボタン作成後に実行）
+            # フレームとラベルは既に個別にバインド済みなので、それ以外のみ
+            bind_enter_leave_to_children(self.autocomplete_dropdown)
+            
+        except Exception as e:
+            logger.error(f"ドロップダウンの表示に失敗しました: {e}", exc_info=True)
+    
+    def force_hide_autocomplete_dropdown(self):
+        """予測検索ドロップダウンを強制的に非表示（新しいドロップダウンを表示する前など）"""
+        if self.autocomplete_dropdown is not None:
+            try:
+                self.autocomplete_dropdown.destroy()
+            except:
+                pass
+            self.autocomplete_dropdown = None
+        # 非表示処理ジョブをクリア
+        if self.autocomplete_hide_job is not None:
+            self.root.after_cancel(self.autocomplete_hide_job)
+            self.autocomplete_hide_job = None
+        # マウス位置フラグをリセット
+        self.autocomplete_mouse_inside = False
+    
+    def hide_autocomplete_dropdown(self):
+        """予測検索ドロップダウンを非表示"""
+        # マウスがドロップダウンフレーム内にある場合は非表示にしない
+        if self.autocomplete_mouse_inside:
+            return
+        
+        # 入力フィールドにフォーカスがある場合は非表示にしない
+        try:
+            if self.product_code_entry and self.product_code_entry.focus_get() == self.product_code_entry:
+                return
+        except:
+            pass
+        
+        # 強制削除を呼び出す
+        self.force_hide_autocomplete_dropdown()
+    
+    def select_product_code(self, product_code: str):
+        """品番を選択して入力フィールドに設定"""
+        # マウス位置フラグを先にリセット（Enterイベントが発火しないように）
+        self.autocomplete_mouse_inside = False
+        
+        # 非表示処理ジョブをキャンセル
+        if self.autocomplete_hide_job is not None:
+            try:
+                self.root.after_cancel(self.autocomplete_hide_job)
+            except:
+                pass
+            self.autocomplete_hide_job = None
+        
+        # 検索処理ジョブもキャンセル
+        if self.autocomplete_search_job is not None:
+            try:
+                self.root.after_cancel(self.autocomplete_search_job)
+            except:
+                pass
+            self.autocomplete_search_job = None
+        
+        # ドロップダウンを確実に削除する関数
+        def hide_dropdown_immediately():
+            """ドロップダウンを即座に非表示にする"""
+            if self.autocomplete_dropdown is not None:
+                try:
+                    # まず、pack_forgetで非表示にする
+                    try:
+                        self.autocomplete_dropdown.pack_forget()
+                    except:
+                        pass
+                    
+                    # その後、destroyで削除
+                    try:
+                        self.autocomplete_dropdown.destroy()
+                    except:
+                        pass
+                except:
+                    pass
+                finally:
+                    self.autocomplete_dropdown = None
+                    self.autocomplete_mouse_inside = False
+            
+            # UIを更新して確実に非表示にする
+            try:
+                self.root.update_idletasks()
+            except:
+                pass
+        
+        # 即座にドロップダウンを非表示（選択確定時）
+        hide_dropdown_immediately()
+        
+        # 念のため、少し遅延させて再度確認（イベント処理が完了してから）
+        self.root.after(50, hide_dropdown_immediately)
+        
+        # 入力フィールドに品番を設定
+        self.product_code_entry.delete(0, "end")
+        self.product_code_entry.insert(0, product_code)
+        
+        # フォーカスを入力フィールドに戻す
+        self.product_code_entry.focus_set()
+        
+        # 入力フィールドのチェックも実行
+        self.check_input_fields(None)
+    
     def load_inspector_master_cached(self):
         """キャッシュ付き検査員マスタ読み込み（ファイル更新時刻チェック対応）"""
         cache_key = 'inspector_master'
@@ -4511,9 +4938,6 @@ class ModernDataExtractorUI:
             # usecolsやdtype指定はエラー処理のオーバーヘッドがあるため、シンプルに読み込む
             df = pd.read_excel(file_path, engine='openpyxl')
             
-            # 列名を確認
-            logger.debug(f"製品マスタの列: {df.columns.tolist()}")
-            
             # 必要な列が存在するかチェック
             required_columns = ['品番', '工程番号', '検査時間']
             missing_columns = [col for col in required_columns if col not in df.columns]
@@ -4531,12 +4955,10 @@ class ModernDataExtractorUI:
                 
                 if len(column_mapping) >= 2:  # 品番と検査時間は最低限必要
                     df = df.rename(columns=column_mapping)
-                    logger.debug(f"列名をマッピングしました: {column_mapping}")
                 else:
                     self.log_message(f"必要な列が見つかりません: {missing_columns}")
                     return None
             
-            self.log_message(f"製品マスタを読み込みました: {len(df)}件")
             return df
             
         except Exception as e:
@@ -7006,7 +7428,10 @@ class ModernDataExtractorUI:
     def open_assignment_rules_guide(self):
         """ガイド（HTML）を開く"""
         try:
-            guide_path = Path(__file__).resolve().parent.parent.parent / "inspector_assignment_rules_help.html"
+            # exe化対応のパス解決を使用
+            guide_path_str = resolve_resource_path("inspector_assignment_rules_help.html")
+            guide_path = Path(guide_path_str)
+            
             if guide_path.exists():
                 webbrowser.open(guide_path.as_uri())
                 self.log_message(f"ガイドを開きました: {guide_path}")
