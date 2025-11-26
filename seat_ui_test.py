@@ -391,8 +391,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       <section class="grid-area">
         <div class="grid-header">
           <div class="title-block">
-            <h1>座席表プレビュー</h1>
-            <p class="edit-instruction">クリック・ドラッグ・ダブルクリックで編集し、「JSONダウンロード」で保存。</p>
+            <h1 id="board-title">検査ロット振分け表</h1>
+            <p class="edit-instruction">ドラッグ&ドロップ・ダブルクリックで編集し、「JSONダウンロード」で保存。</p>
           </div>
           <div class="grid-actions">
             <button id="download-json" class="primary" type="button">JSONダウンロード</button>
@@ -461,6 +461,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       let currentSlotWidth = modeSizes.view.width;
       let currentSlotHeight = modeSizes.view.height;
       let currentSlotGap = modeSizes.view.gap;
+      const boardTitle = document.getElementById("board-title");
 
       if (hintPath) {
         hintPath.textContent = targetJsonPath;
@@ -678,6 +679,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         currentSlotWidth = width;
         currentSlotHeight = height;
         currentSlotGap = gap;
+        if (boardTitle) {
+          boardTitle.textContent = editingMode ? "座席表プレビュー" : "検査ロット振分け表";
+        }
         if (!enabled) {
           selectedSeatId = null;
           updateEditorPanel();
