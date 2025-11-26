@@ -623,27 +623,48 @@ def get_cleaning_lots(
                         if '指示日' in has_lot_id_df.columns and '指示日' in no_lot_id_df.columns:
                             check_cols.append('指示日')
                         
-                        # 通常の在庫ロットの組み合わせをセットとして取得（高速化：itertuples()を使用）
-                        has_lot_id_keys = set()
-                        # 列インデックスを事前に取得
+                        # 生産ロットIDあり側の重複判定は itertuples() で高速に走査
+                        def _norm_value(val):
+                            if pd.isna(val):
+                                return None
+                            s = str(val).strip()
+                            return s or None
+                        has_lot_id_keys = []
+                        # 速度向上のため、必要列のインデックスを先に取得
                         col_indices = [has_lot_id_df.columns.get_loc(col) for col in check_cols]
                         for row_tuple in has_lot_id_df.itertuples(index=False):
-                            key = tuple(row_tuple[i] for i in col_indices)
-                            has_lot_id_keys.add(key)
-                        
-                        # 洗浄指示ロットから重複を除外（高速化：itertuples()を使用）
+                            key = tuple(_norm_value(row_tuple[i]) for i in col_indices)
+                            has_lot_id_keys.append(key)
+
+                        # 生産ロットIDなし側も同様に itertuples() でチェック
                         if has_lot_id_keys:
                             before_no_lot_id_count = len(no_lot_id_df)
-                            # 列インデックスを事前に取得
+                            # 速度向上のため、こちらも列インデックスを先に計算
                             no_lot_id_col_indices = [no_lot_id_df.columns.get_loc(col) for col in check_cols]
+
+                            def _is_duplicate(row_tuple):
+                                target_key = tuple(_norm_value(row_tuple[i]) for i in no_lot_id_col_indices)
+                                t_prod, t_machine, *rest = target_key
+                                t_instr = rest[0] if rest else None
+                                for h_key in has_lot_id_keys:
+                                    h_prod, h_machine, *h_rest = h_key
+                                    h_instr = h_rest[0] if h_rest else None
+                                    if t_prod != h_prod:
+                                        continue
+                                    if h_machine is not None and t_machine not in (None, h_machine):
+                                        continue
+                                    if h_instr is not None and t_instr not in (None, h_instr):
+                                        continue
+                                    return True
+                                return False
+
                             mask = []
                             for row_tuple in no_lot_id_df.itertuples(index=False):
-                                key = tuple(row_tuple[i] for i in no_lot_id_col_indices)
-                                mask.append(key not in has_lot_id_keys)
+                                mask.append(not _is_duplicate(row_tuple))
                             no_lot_id_df = no_lot_id_df[mask].copy()
                             excluded_count = before_no_lot_id_count - len(no_lot_id_df)
                             if excluded_count > 0:
-                                log(f"通常の在庫ロットと重複する洗浄指示ロット {excluded_count}件を除外しました")
+                                log(f"通常の在庫ロットと重複する洗浄指示ロットを {excluded_count}件 除外しました")
                 
                 # 結合
                 if not has_lot_id_df.empty and not no_lot_id_df.empty:
@@ -680,4 +701,3 @@ def get_cleaning_lots(
         log(error_msg)
         logger.error(error_msg)
         return pd.DataFrame()
-

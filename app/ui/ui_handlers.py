@@ -2596,37 +2596,57 @@ class ModernDataExtractorUI:
             if not df.empty and '出荷予定日' in df.columns:
                 df['出荷予定日'] = pd.to_datetime(df['出荷予定日'], errors='coerce')
             
+            # 出荷予定日からデータが無い場合でも、先行検査品と洗浄品の処理を続行
             if df is None or df.empty:
-                self.log_message("指定された期間にデータが見つかりませんでした")
-                self.update_progress(1.0, "完了（データなし）")
-                success = True  # データなしも完了として扱う
-                return
-            
-            self.log_message(f"抽出完了: {len(df)}件のレコード")
+                self.log_message("指定された期間に出荷予定日からのデータが見つかりませんでした")
+                self.log_message("先行検査品と洗浄品の処理を続行します...")
+                # 空のDataFrameを作成（必要な列を含む）
+                df = pd.DataFrame(columns=['品番', '品名', '客先', '出荷予定日', '出荷数', '在庫数', '梱包・完了', '不足数'])
+            else:
+                self.log_message(f"抽出完了: {len(df)}件のレコード")
             
             # データを保存（エクスポート用）
             self.current_main_data = df
             
             # 不足数がマイナスの品番に対してロット割り当てを実行
+            # 出荷予定日からデータが無い場合でも、先行検査品と洗浄品の処理を実行
             self.update_progress(0.65, "ロット割り当て処理中...")
             self.process_lot_assignment(connection, df, start_progress=0.65)
             
             # 完了
             self.update_progress(1.0, "データ抽出が完了しました")
-            self.log_message(f"処理完了! {len(df)}件のデータを表示しました")
+            if df.empty:
+                self.log_message(f"処理完了! 出荷予定日からのデータはありませんでしたが、先行検査品と洗浄品の処理を実行しました")
+            else:
+                self.log_message(f"処理完了! {len(df)}件のデータを表示しました")
             
             # テーブルは選択式表示のため、自動表示しない
             # self.show_table("main")
             
             # 成功メッセージ
-            self.root.after(0, lambda: messagebox.showinfo(
-                "完了", 
-                f"データ抽出が完了しました!\n\n"
-                f"抽出件数: {len(df)}件\n"
-                f"ロット割り当て: {len(self.current_assignment_data) if self.current_assignment_data is not None else 0}件\n"
-                f"検査員割振り: {len(self.current_inspector_data) if self.current_inspector_data is not None else 0}件\n\n"
-                f"検査員割振り結果を自動表示しました"
-            ))
+            extraction_count = len(df) if not df.empty else 0
+            assignment_count = len(self.current_assignment_data) if self.current_assignment_data is not None else 0
+            inspector_count = len(self.current_inspector_data) if self.current_inspector_data is not None else 0
+            
+            if df.empty:
+                message = (
+                    f"処理が完了しました!\n\n"
+                    f"出荷予定日からのデータ: 0件\n"
+                    f"ロット割り当て: {assignment_count}件\n"
+                    f"検査員割振り: {inspector_count}件\n\n"
+                    f"先行検査品と洗浄品の処理を実行しました。\n"
+                    f"検査員割振り結果を自動表示しました"
+                )
+            else:
+                message = (
+                    f"データ抽出が完了しました!\n\n"
+                    f"抽出件数: {extraction_count}件\n"
+                    f"ロット割り当て: {assignment_count}件\n"
+                    f"検査員割振り: {inspector_count}件\n\n"
+                    f"検査員割振り結果を自動表示しました"
+                )
+            
+            self.root.after(0, lambda msg=message: messagebox.showinfo("完了", msg))
             
             success = True  # 成功フラグを設定
             
@@ -3414,22 +3434,637 @@ class ModernDataExtractorUI:
             self.log_message(f"ロット割り当て中にエラーが発生しました: {str(e)}")
             return pd.DataFrame()
     
+    def remove_duplicate_lot_ids(self, assignment_df: pd.DataFrame) -> pd.DataFrame:
+        """
+        ロットIDの重複を削除（出荷予定日の優先順位に基づいて残す方を決定）
+        
+        - 生産ロットIDがある場合: 生産ロットIDで重複チェック
+        - 生産ロットIDがない場合: 品番・号機・指示日の組み合わせで重複チェック
+        
+        Args:
+            assignment_df: ロット割り当て結果のDataFrame
+            
+        Returns:
+            重複を削除したDataFrame
+        """
+        try:
+            if assignment_df.empty:
+                return assignment_df
+            
+            # 現在日付を取得
+            current_date = pd.Timestamp.now().date()
+            
+            def get_next_business_day(date_val):
+                """翌営業日を取得（金曜日の場合は翌週の月曜日）"""
+                weekday = date_val.weekday()  # 0=月曜日, 4=金曜日
+                if weekday == 4:  # 金曜日
+                    return date_val + timedelta(days=3)  # 翌週の月曜日
+                else:
+                    return date_val + timedelta(days=1)  # 翌日
+            
+            next_business_day = get_next_business_day(current_date)
+            
+            def get_shipping_date_priority(shipping_date_val):
+                """
+                出荷予定日の優先度を取得（数値が小さいほど優先度が高い）
+                
+                Returns:
+                    (優先度, ソート用の値) のタプル
+                """
+                if pd.isna(shipping_date_val):
+                    return (5, None)  # 最後に
+                
+                val_str = str(shipping_date_val).strip()
+                
+                # 1. 当日の日付（優先度0）
+                try:
+                    date_val = pd.to_datetime(shipping_date_val, errors='coerce')
+                    if pd.notna(date_val):
+                        date_date = date_val.date()
+                        if date_date == current_date:
+                            return (0, date_val)
+                except:
+                    pass
+                
+                # 2. 当日洗浄上がり品（優先度1）
+                if (val_str == "当日洗浄上がり品" or
+                    val_str == "当日洗浄品" or
+                    "当日洗浄" in val_str):
+                    return (1, val_str)
+                
+                # 3. 先行検査品（優先度2）
+                if (val_str == "先行検査" or
+                    val_str == "当日先行検査"):
+                    return (2, val_str)
+                
+                # 4. 翌日または翌営業日（優先度3）
+                try:
+                    date_val = pd.to_datetime(shipping_date_val, errors='coerce')
+                    if pd.notna(date_val):
+                        date_date = date_val.date()
+                        if date_date == next_business_day:
+                            return (3, date_val)
+                except:
+                    pass
+                
+                # 5. それ以降の日付（優先度4）
+                try:
+                    date_val = pd.to_datetime(shipping_date_val, errors='coerce')
+                    if pd.notna(date_val):
+                        return (4, date_val)
+                except:
+                    pass
+                
+                return (5, val_str)  # その他文字列
+            
+            # 出荷予定日列が存在するか確認
+            has_shipping_date_col = '出荷予定日' in assignment_df.columns
+            
+            # 生産ロットIDがある行とない行を分離
+            has_lot_id_mask = pd.Series([False] * len(assignment_df), index=assignment_df.index)
+            if '生産ロットID' in assignment_df.columns:
+                has_lot_id_mask = assignment_df['生産ロットID'].notna() & (assignment_df['生産ロットID'] != '')
+            
+            has_lot_id_df = assignment_df[has_lot_id_mask].copy()
+            no_lot_id_df = assignment_df[~has_lot_id_mask].copy()
+            
+            result_dfs = []
+            total_removed = 0
+            
+            # 1. 生産ロットIDがある行の重複削除
+            if not has_lot_id_df.empty:
+                before_count = len(has_lot_id_df)
+                
+                # 重複を検出（ログ出力用）
+                if '生産ロットID' in has_lot_id_df.columns:
+                    duplicates = has_lot_id_df[has_lot_id_df.duplicated(subset=['生産ロットID'], keep=False)]
+                    if not duplicates.empty:
+                        duplicate_lot_ids = duplicates['生産ロットID'].unique()
+                        self.log_message(f"【重複検出】生産ロットIDで重複: {len(duplicate_lot_ids)}件のロットIDに重複があります")
+                
+                if has_shipping_date_col:
+                    # 優先度を計算してソートキーを追加
+                    priority_tuples = has_lot_id_df['出荷予定日'].apply(
+                        lambda x: get_shipping_date_priority(x)
+                    )
+                    # タプルの最初の要素（優先度）のみを抽出してソートキーとする
+                    has_lot_id_df['_priority'] = priority_tuples.apply(lambda x: x[0] if isinstance(x, tuple) else 5)
+                    
+                    # 優先度でソート（優先度が小さい順 = 優先度の高いものが先に来る）
+                    has_lot_id_df = has_lot_id_df.sort_values('_priority', na_position='last')
+                    
+                    # 生産ロットIDで重複を削除（優先度の高い方を残す = keep='first'）
+                    has_lot_id_df = has_lot_id_df.drop_duplicates(subset=['生産ロットID'], keep='first')
+                    
+                    # ソートキーを削除
+                    has_lot_id_df = has_lot_id_df.drop(columns=['_priority'], errors='ignore')
+                else:
+                    # 出荷予定日がない場合は、最初に見つかった行を残す
+                    has_lot_id_df = has_lot_id_df.drop_duplicates(subset=['生産ロットID'], keep='first')
+                
+                removed_count = before_count - len(has_lot_id_df)
+                total_removed += removed_count
+                if removed_count > 0:
+                    self.log_message(f"【重複削除】生産ロットID: {removed_count}件を削除しました（残り: {len(has_lot_id_df)}件）")
+                
+                result_dfs.append(has_lot_id_df)
+            
+            # 2. 生産ロットIDがない行の重複削除（品番・号機・指示日で重複チェック）
+            if not no_lot_id_df.empty:
+                # 品番・号機・指示日の列が存在するか確認
+                required_cols = ['品番', '号機', '指示日']
+                available_cols = [col for col in required_cols if col in no_lot_id_df.columns]
+                
+                if len(available_cols) >= 2:  # 最低2つの列があれば重複チェック可能
+                    before_count = len(no_lot_id_df)
+                    
+                    # 重複を検出（ログ出力用）
+                    duplicates = no_lot_id_df[no_lot_id_df.duplicated(subset=available_cols, keep=False)]
+                    if not duplicates.empty:
+                        duplicate_groups = no_lot_id_df.groupby(available_cols)
+                        duplicate_count = 0
+                        for key, group in duplicate_groups:
+                            if len(group) > 1:
+                                duplicate_count += 1
+                        self.log_message(f"【重複検出】生産ロットIDなし（{', '.join(available_cols)}）: {duplicate_count}件の組み合わせに重複があります")
+                    
+                    if has_shipping_date_col:
+                        # 優先度を計算してソートキーを追加
+                        priority_tuples = no_lot_id_df['出荷予定日'].apply(
+                            lambda x: get_shipping_date_priority(x)
+                        )
+                        # タプルの最初の要素（優先度）のみを抽出してソートキーとする
+                        no_lot_id_df['_priority'] = priority_tuples.apply(lambda x: x[0] if isinstance(x, tuple) else 5)
+                        
+                        # 優先度でソート（優先度が小さい順 = 優先度の高いものが先に来る）
+                        no_lot_id_df = no_lot_id_df.sort_values('_priority', na_position='last')
+                        
+                        # 品番・号機・指示日の組み合わせで重複を削除（優先度の高い方を残す = keep='first'）
+                        no_lot_id_df = no_lot_id_df.drop_duplicates(subset=available_cols, keep='first')
+                        
+                        # ソートキーを削除
+                        no_lot_id_df = no_lot_id_df.drop(columns=['_priority'], errors='ignore')
+                    else:
+                        # 出荷予定日がない場合は、最初に見つかった行を残す
+                        no_lot_id_df = no_lot_id_df.drop_duplicates(subset=available_cols, keep='first')
+                    
+                    removed_count = before_count - len(no_lot_id_df)
+                    total_removed += removed_count
+                    if removed_count > 0:
+                        self.log_message(f"【重複削除】生産ロットIDなし: {removed_count}件を削除しました（残り: {len(no_lot_id_df)}件）")
+                
+                result_dfs.append(no_lot_id_df)
+            
+            # 結果を結合
+            if result_dfs:
+                result_df = pd.concat(result_dfs, ignore_index=True)
+                
+                # 3. 品番・号機・指示日の組み合わせで当日洗浄品・先行検査品・通常品の重複を処理
+                # （同じ品番・号機・指示日で「当日洗浄品」と「先行検査品」、または「当日洗浄品」と「通常品」、または「先行検査品」と「通常品」の両方が存在する場合に重複削除）
+                # 注意: この処理は、生産ロットIDがない行に対してのみ適用される
+                # （生産ロットIDがある行は、すでに1段階目で重複削除されているため）
+                if not result_df.empty and '品番' in result_df.columns and has_shipping_date_col:
+                    # 生産ロットIDがない行を全て抽出（当日洗浄品・先行検査品・通常品を含む全ての行）
+                    no_lot_id_mask = pd.Series([True] * len(result_df), index=result_df.index)
+                    if '生産ロットID' in result_df.columns:
+                        no_lot_id_mask = result_df['生産ロットID'].isna() | (result_df['生産ロットID'] == '')
+                    
+                    target_df = result_df[no_lot_id_mask].copy()
+                    other_result_df = result_df[~no_lot_id_mask].copy()
+                    
+                    if not target_df.empty:
+                        before_special_count = len(target_df)
+                        self.log_message(f"【ステージ3】当日洗浄品・先行検査品・通常品の処理対象: {before_special_count}件")
+                        
+                        # 品番・号機・指示日の組み合わせで重複チェック用の列を準備
+                        check_cols = ['品番']
+                        if '号機' in target_df.columns:
+                            check_cols.append('号機')
+                        if '指示日' in target_df.columns:
+                            check_cols.append('指示日')
+                        
+                        # 最低1つの列（品番）があれば重複チェック可能（号機・指示日が欠損している場合でも品番でチェック）
+                        if len(check_cols) >= 1:
+                            def is_normal_date(shipping_date_val):
+                                """通常の日付（通常品）かどうかを判定"""
+                                if pd.isna(shipping_date_val):
+                                    return False
+                                val_str = str(shipping_date_val).strip()
+                                # 「当日洗浄」や「先行検査」を含まない文字列は通常品ではない
+                                if "当日洗浄" in val_str or "先行検査" in val_str:
+                                    return False
+                                # 日付型に変換可能な場合は通常品
+                                try:
+                                    date_val = pd.to_datetime(shipping_date_val, errors='coerce')
+                                    if pd.notna(date_val):
+                                        return True
+                                except:
+                                    pass
+                                return False
+                            
+                            # 重複を検出（ログ出力用）
+                            product_groups = target_df.groupby(check_cols)
+                            duplicate_count = 0
+                            detailed_logs = []
+                            
+                            for key, group in product_groups:
+                                if len(group) > 1:
+                                    # 出荷予定日を確認
+                                    shipping_dates = group['出荷予定日'].tolist()
+                                    has_cleaning = any("当日洗浄" in str(sd) for sd in shipping_dates)
+                                    has_pre_inspection = any("先行検査" in str(sd) for sd in shipping_dates)
+                                    has_normal_date = any(is_normal_date(sd) for sd in shipping_dates)
+                                    
+                                    # 重複として扱うケース：
+                                    # 1. 当日洗浄品と先行検査品の両方が存在する場合
+                                    # 2. 当日洗浄品と通常品の両方が存在する場合
+                                    # 3. 先行検査品と通常品の両方が存在する場合
+                                    is_duplicate_combination = False
+                                    duplicate_type = []
+                                    
+                                    if has_cleaning and has_pre_inspection:
+                                        is_duplicate_combination = True
+                                        duplicate_type.append("当日洗浄品+先行検査品")
+                                    if has_cleaning and has_normal_date:
+                                        is_duplicate_combination = True
+                                        duplicate_type.append("当日洗浄品+通常品")
+                                    if has_pre_inspection and has_normal_date:
+                                        is_duplicate_combination = True
+                                        duplicate_type.append("先行検査品+通常品")
+                                    
+                                    if is_duplicate_combination:
+                                        duplicate_count += 1
+                                        # 号機・指示日の情報も取得
+                                        machine_info = []
+                                        instruction_info = []
+                                        if '号機' in group.columns:
+                                            machine_info = group['号機'].dropna().unique().tolist()
+                                        if '指示日' in group.columns:
+                                            instruction_info = group['指示日'].dropna().unique().tolist()
+                                        
+                                        key_str = ", ".join([f"{col}='{val}'" for col, val in zip(check_cols, key)]) if isinstance(key, tuple) else f"品番='{key}'"
+                                        detailed_logs.append({
+                                            'key': key_str,
+                                            'count': len(group),
+                                            'shipping_dates': shipping_dates,
+                                            'machines': machine_info,
+                                            'instructions': instruction_info,
+                                            'type': duplicate_type
+                                        })
+                            
+                            if duplicate_count > 0:
+                                self.log_message(f"【重複検出】当日洗浄品・先行検査品・通常品（{', '.join(check_cols)}）: {duplicate_count}件の組み合わせに重複があります")
+                                # 詳細ログを出力（最初の10件）
+                            
+                            # 優先度を計算してソートキーを追加
+                            priority_tuples = target_df['出荷予定日'].apply(get_shipping_date_priority)
+                            target_df['_priority'] = priority_tuples.apply(
+                                lambda x: x[0] if isinstance(x, tuple) else 5
+                            )
+                            
+                            # 優先度でソート（優先度が小さい順 = 優先度の高いものが先に来る）
+                            target_df = target_df.sort_values('_priority', na_position='last')
+                            
+                            # 重複を削除: 品番（および号機・指示日）ごとにグループ化して、重複が存在する場合のみ削除
+                            def should_remove_duplicate(group):
+                                """
+                                重複として扱うケース：
+                                1. 当日洗浄品と先行検査品の両方が存在する場合
+                                2. 当日洗浄品と通常品の両方が存在する場合
+                                3. 先行検査品と通常品の両方が存在する場合
+                                """
+                                shipping_dates = group['出荷予定日'].tolist()
+                                has_cleaning = any("当日洗浄" in str(sd) for sd in shipping_dates)
+                                has_pre_inspection = any("先行検査" in str(sd) for sd in shipping_dates)
+                                has_normal_date = any(is_normal_date(sd) for sd in shipping_dates)
+                                
+                                # 当日洗浄品と先行検査品の両方が存在する場合、または
+                                # 当日洗浄品と通常品の両方が存在する場合、または
+                                # 先行検査品と通常品の両方が存在する場合
+                                return (has_cleaning and has_pre_inspection) or (has_cleaning and has_normal_date) or (has_pre_inspection and has_normal_date)
+                            
+                            # 品番（および号機・指示日）ごとにグループ化
+                            product_groups = target_df.groupby(check_cols)
+                            
+                            rows_to_keep = []
+                            removed_in_stage3 = 0
+                            
+                            for key, group in product_groups:
+                                if len(group) > 1 and should_remove_duplicate(group):
+                                    # 重複が存在する場合、優先度の高い方のみ残す
+                                    # 既に優先度順にソート済みなので、最初の1件のみ残す
+                                    rows_to_keep.append(group.iloc[0:1].drop(columns=['_priority'], errors='ignore'))
+                                    removed_in_stage3 += len(group) - 1
+                                else:
+                                    # 重複がない場合は全て残す
+                                    rows_to_keep.append(group.drop(columns=['_priority'], errors='ignore'))
+                            
+                            if rows_to_keep:
+                                target_df = pd.concat(rows_to_keep, ignore_index=True)
+                            
+                            removed_special_count = before_special_count - len(target_df)
+                            total_removed += removed_special_count
+                            if removed_special_count > 0:
+                                self.log_message(f"【重複削除】当日洗浄品・先行検査品・通常品: {removed_special_count}件を削除しました（残り: {len(target_df)}件）")
+                            elif removed_in_stage3 == 0:
+                                self.log_message(f"【ステージ3】当日洗浄品・先行検査品・通常品の重複は検出されませんでした")
+                        
+                        # 生産ロットIDがない行（処理済み）と生産ロットIDがある行を結合
+                        if not other_result_df.empty:
+                            result_df = pd.concat([other_result_df, target_df], ignore_index=True)
+                        else:
+                            result_df = target_df
+                
+                # 4. 全行（生産ロットIDの有無に関わらず）で当日洗浄品・先行検査品・通常品の重複を処理
+                # （生産ロットIDがある行でも、同じ品番で「当日洗浄品」と「先行検査品」などが混在する場合は重複として扱う）
+                if not result_df.empty and '品番' in result_df.columns and has_shipping_date_col:
+                    before_stage4_count = len(result_df)
+                    self.log_message(f"【ステージ4】全行での当日洗浄品・先行検査品・通常品の処理対象: {before_stage4_count}件")
+                    
+                    def is_normal_date(shipping_date_val):
+                        """通常の日付（通常品）かどうかを判定"""
+                        if pd.isna(shipping_date_val):
+                            return False
+                        val_str = str(shipping_date_val).strip()
+                        # 「当日洗浄」や「先行検査」を含まない文字列は通常品ではない
+                        if "当日洗浄" in val_str or "先行検査" in val_str:
+                            return False
+                        # 日付型に変換可能な場合は通常品
+                        try:
+                            date_val = pd.to_datetime(shipping_date_val, errors='coerce')
+                            if pd.notna(date_val):
+                                return True
+                        except:
+                            pass
+                        return False
+                    
+                    # Stage 4では「品番」のみでグループ化
+                    # （号機や指示日が異なる場合でも、同じ品番で「当日洗浄品」と「先行検査品」などが混在する場合は重複として扱う）
+                    check_cols = ['品番']
+                    
+                    if len(check_cols) >= 1:
+                        # 重複を検出（ログ出力用）
+                        product_groups = result_df.groupby(check_cols)
+                        duplicate_count = 0
+                        detailed_logs = []
+                        
+                        for key, group in product_groups:
+                            if len(group) > 1:
+                                # 出荷予定日を確認
+                                shipping_dates = group['出荷予定日'].tolist()
+                                has_cleaning = any("当日洗浄" in str(sd) for sd in shipping_dates)
+                                has_pre_inspection = any("先行検査" in str(sd) for sd in shipping_dates)
+                                has_normal_date = any(is_normal_date(sd) for sd in shipping_dates)
+                                
+                                # 重複として扱うケース：
+                                # 1. 当日洗浄品と先行検査品の両方が存在する場合
+                                # 2. 当日洗浄品と通常品の両方が存在する場合
+                                # 3. 先行検査品と通常品の両方が存在する場合
+                                is_duplicate_combination = False
+                                duplicate_type = []
+                                
+                                if has_cleaning and has_pre_inspection:
+                                    is_duplicate_combination = True
+                                    duplicate_type.append("当日洗浄品+先行検査品")
+                                if has_cleaning and has_normal_date:
+                                    is_duplicate_combination = True
+                                    duplicate_type.append("当日洗浄品+通常品")
+                                if has_pre_inspection and has_normal_date:
+                                    is_duplicate_combination = True
+                                    duplicate_type.append("先行検査品+通常品")
+                                
+                                if is_duplicate_combination:
+                                    duplicate_count += 1
+                                    # 号機・指示日の情報も取得
+                                    machine_info = []
+                                    instruction_info = []
+                                    lot_id_info = []
+                                    if '号機' in group.columns:
+                                        machine_info = group['号機'].dropna().unique().tolist()
+                                    if '指示日' in group.columns:
+                                        instruction_info = group['指示日'].dropna().unique().tolist()
+                                    if '生産ロットID' in group.columns:
+                                        lot_id_info = group['生産ロットID'].dropna().unique().tolist()
+                                    
+                                    key_str = ", ".join([f"{col}='{val}'" for col, val in zip(check_cols, key)]) if isinstance(key, tuple) else f"品番='{key}'"
+                                    detailed_logs.append({
+                                        'key': key_str,
+                                        'count': len(group),
+                                        'shipping_dates': shipping_dates,
+                                        'machines': machine_info,
+                                        'instructions': instruction_info,
+                                        'lot_ids': lot_id_info,
+                                        'type': duplicate_type
+                                    })
+                        
+                        if duplicate_count > 0:
+                            self.log_message(f"【重複検出】全行での当日洗浄品・先行検査品・通常品（品番のみでグループ化）: {duplicate_count}件の組み合わせに重複があります")
+                        
+                        # 優先度を計算してソートキーを追加
+                        priority_tuples = result_df['出荷予定日'].apply(get_shipping_date_priority)
+                        result_df['_priority'] = priority_tuples.apply(
+                            lambda x: x[0] if isinstance(x, tuple) else 5
+                        )
+                        
+                        # 優先度でソート（優先度が小さい順 = 優先度の高いものが先に来る）
+                        result_df = result_df.sort_values('_priority', na_position='last')
+                        
+                        # 重複を削除: 品番のみでグループ化して、重複が存在する場合のみ削除
+                        # （号機や指示日が異なる場合でも、同じ品番で「当日洗浄品」と「先行検査品」などが混在する場合は重複として扱う）
+                        def should_remove_duplicate(group):
+                            """
+                            重複として扱うケース：
+                            1. 当日洗浄品と先行検査品の両方が存在する場合
+                            2. 当日洗浄品と通常品の両方が存在する場合
+                            3. 先行検査品と通常品の両方が存在する場合
+                            
+                            ただし、以下の場合は重複として扱わない（区別要因がある）：
+                            - 有効な生産ロットIDが異なる場合
+                            - 号機が異なる場合（号機が存在し、かつ全ての行で有効な値がある場合）
+                            - 指示日が異なる場合（指示日が存在し、かつ全ての行で有効な値がある場合）
+                            
+                            注意: Stage 4では「品番」のみでグループ化しているため、
+                            同じ品番で出荷予定日の種類が混在する場合でも、区別要因があれば重複として扱わない
+                            """
+                            shipping_dates = group['出荷予定日'].tolist()
+                            has_cleaning = any("当日洗浄" in str(sd) for sd in shipping_dates)
+                            has_pre_inspection = any("先行検査" in str(sd) for sd in shipping_dates)
+                            has_normal_date = any(is_normal_date(sd) for sd in shipping_dates)
+                            
+                            # 当日洗浄品と先行検査品の両方が存在する場合、または
+                            # 当日洗浄品と通常品の両方が存在する場合、または
+                            # 先行検査品と通常品の両方が存在する場合
+                            has_duplicate_combination = (has_cleaning and has_pre_inspection) or (has_cleaning and has_normal_date) or (has_pre_inspection and has_normal_date)
+                            
+                            if not has_duplicate_combination:
+                                return False
+                            
+                            # 区別要因をチェック
+                            # 1. 生産ロットIDが異なる場合は重複として扱わない
+                            if '生産ロットID' in group.columns:
+                                # NaNと空文字列を除外して、有効な生産ロットIDのみを取得
+                                valid_lot_ids = group['生産ロットID'].apply(
+                                    lambda x: x if pd.notna(x) and str(x).strip() != '' else None
+                                ).dropna().unique()
+                                if len(valid_lot_ids) > 1:
+                                    # 有効な生産ロットIDが複数存在する場合は重複として扱わない
+                                    return False
+                            
+                            # 2. 号機が異なる場合は重複として扱わない（号機が存在し、かつ全ての行で有効な値がある場合）
+                            if '号機' in group.columns:
+                                # NaNと空文字列を除外して、有効な号機のみを取得
+                                valid_machines = group['号機'].apply(
+                                    lambda x: x if pd.notna(x) and str(x).strip() != '' else None
+                                ).dropna().unique()
+                                # 全ての行に有効な号機がある場合のみ、号機の違いを区別要因とする
+                                if len(valid_machines) > 1 and len(valid_machines) == len(group):
+                                    # 有効な号機が複数存在し、かつ全ての行に有効な号機がある場合は重複として扱わない
+                                    return False
+                            
+                            # 3. 指示日が異なる場合は重複として扱わない（指示日が存在し、かつ全ての行で有効な値がある場合）
+                            if '指示日' in group.columns:
+                                # NaNと空文字列を除外して、有効な指示日のみを取得
+                                valid_instructions = group['指示日'].apply(
+                                    lambda x: x if pd.notna(x) and str(x).strip() != '' else None
+                                ).dropna().unique()
+                                # 全ての行に有効な指示日がある場合のみ、指示日の違いを区別要因とする
+                                if len(valid_instructions) > 1 and len(valid_instructions) == len(group):
+                                    # 有効な指示日が複数存在し、かつ全ての行に有効な指示日がある場合は重複として扱わない
+                                    return False
+                            
+                            # 区別要因がない、または全て同じ場合は重複として扱う
+                            return True
+                        
+                        # 品番のみでグループ化（Stage 4では品番のみでグループ化）
+                        # ただし、重複削除は号機・指示日・生産ロットIDの組み合わせごとに行う
+                        product_groups = result_df.groupby(check_cols)
+                        
+                        rows_to_keep = []
+                        removed_in_stage4 = 0
+                        detailed_removal_logs = []
+                        
+                        for key, product_group in product_groups:
+                            if len(product_group) > 1:
+                                # 詳細ログ用の情報を取得
+                                shipping_dates_all = product_group['出荷予定日'].tolist()
+                                key_str = ", ".join([f"{col}='{val}'" for col, val in zip(check_cols, key)]) if isinstance(key, tuple) else f"品番='{key}'"
+                                
+                                # 品番グループ内で、号機・指示日・生産ロットIDの組み合わせでさらにグループ化
+                                # 各組み合わせ内で重複をチェック
+                                sub_group_cols = []
+                                if '号機' in product_group.columns:
+                                    sub_group_cols.append('号機')
+                                if '指示日' in product_group.columns:
+                                    sub_group_cols.append('指示日')
+                                if '生産ロットID' in product_group.columns:
+                                    sub_group_cols.append('生産ロットID')
+                                
+                                # サブグループがない場合は、品番グループ全体を1つのサブグループとして扱う
+                                if not sub_group_cols:
+                                    sub_groups = [(None, product_group)]
+                                else:
+                                    # サブグループを作成（有効な値のみを使用）
+                                    def get_sub_group_key(row):
+                                        """サブグループのキーを取得（有効な値のみを使用）"""
+                                        key_parts = []
+                                        for col in sub_group_cols:
+                                            val = row[col]
+                                            if pd.notna(val) and str(val).strip() != '':
+                                                key_parts.append(str(val).strip())
+                                            else:
+                                                key_parts.append('__EMPTY__')
+                                        return tuple(key_parts)
+                                    
+                                    product_group['_sub_key'] = product_group.apply(get_sub_group_key, axis=1)
+                                    sub_groups = list(product_group.groupby('_sub_key'))
+                                
+                                # 各サブグループで重複をチェック
+                                for sub_key, sub_group in sub_groups:
+                                    if len(sub_group) > 1:
+                                        # サブグループ内で重複をチェック
+                                        should_remove = should_remove_duplicate(sub_group)
+                                        
+                                        if should_remove:
+                                            # 重複が存在する場合、優先度の高い方のみ残す
+                                            # 既に優先度順にソート済みなので、最初の1件のみ残す
+                                            rows_to_keep.append(sub_group.iloc[0:1].drop(columns=['_priority', '_sub_key'], errors='ignore'))
+                                            removed_count = len(sub_group) - 1
+                                            removed_in_stage4 += removed_count
+                                            
+                                            # 削除された行の詳細を記録
+                                            sub_shipping_dates = sub_group['出荷予定日'].tolist()
+                                            sub_priorities = sub_group['_priority'].tolist()
+                                            sub_machines = sub_group['号機'].tolist() if '号機' in sub_group.columns else []
+                                            sub_instructions = sub_group['指示日'].tolist() if '指示日' in sub_group.columns else []
+                                            sub_lot_ids = sub_group['生産ロットID'].tolist() if '生産ロットID' in sub_group.columns else []
+                                            
+                                            detailed_removal_logs.append({
+                                                'key': key_str,
+                                                'total': len(sub_group),
+                                                'kept': 1,
+                                                'removed': removed_count,
+                                                'shipping_dates': sub_shipping_dates,
+                                                'priorities': sub_priorities,
+                                                'machines': sub_machines,
+                                                'instructions': sub_instructions,
+                                                'lot_ids': sub_lot_ids
+                                            })
+                                        else:
+                                            # 重複がない場合は全て残す
+                                            rows_to_keep.append(sub_group.drop(columns=['_priority', '_sub_key'], errors='ignore'))
+                                    else:
+                                        # 1件のみの場合はそのまま残す
+                                        rows_to_keep.append(sub_group.drop(columns=['_priority', '_sub_key'], errors='ignore'))
+                            else:
+                                # 1件のみの場合はそのまま残す
+                                rows_to_keep.append(product_group.drop(columns=['_priority', '_sub_key'], errors='ignore'))
+                        
+                        if rows_to_keep:
+                            result_df = pd.concat(rows_to_keep, ignore_index=True)
+                        
+                        
+                        removed_stage4_count = before_stage4_count - len(result_df)
+                        total_removed += removed_stage4_count
+                        if removed_stage4_count > 0:
+                            self.log_message(f"【重複削除】全行での当日洗浄品・先行検査品・通常品: {removed_stage4_count}件を削除しました（残り: {len(result_df)}件）")
+                        elif removed_in_stage4 == 0:
+                            self.log_message(f"【ステージ4】全行での当日洗浄品・先行検査品・通常品の重複は検出されませんでした")
+                
+                if total_removed > 0:
+                    self.log_message(f"ロットID重複削除: {total_removed}件の重複ロットを削除しました（残り: {len(result_df)}件）")
+                
+                return result_df
+            else:
+                return assignment_df
+            
+        except Exception as e:
+            self.log_message(f"ロットID重複削除中にエラーが発生しました: {str(e)}")
+            logger.error(f"ロットID重複削除エラー: {str(e)}", exc_info=True)
+            # エラーが発生した場合は元のDataFrameを返す
+            return assignment_df
+    
     def process_lot_assignment(self, connection, main_df, start_progress=0.65):
         """ロット割り当て処理のメイン処理"""
         try:
             # 不足数がマイナスのデータを抽出
             self.update_progress(start_progress + 0.05, "不足データを抽出中...")
-            shortage_df = main_df[main_df['不足数'] < 0].copy()
+            # main_dfが空の場合でも処理を続行できるようにする
+            if main_df.empty or '不足数' not in main_df.columns:
+                shortage_df = pd.DataFrame()
+                self.log_message("出荷予定日からのデータがありません。先行検査品と洗浄品の処理を続行します...")
+            else:
+                shortage_df = main_df[main_df['不足数'] < 0].copy()
             
             if shortage_df.empty:
-                self.log_message("不足数がマイナスのデータがありません")
-                return
-            
-            self.log_message(f"不足数がマイナスのデータ: {len(shortage_df)}件")
-            
-            # 通常の在庫ロットを取得
-            self.update_progress(start_progress + 0.10, "利用可能なロットを取得中...")
-            lots_df = self.get_available_lots_for_shortage(connection, shortage_df)
+                self.log_message("不足数がマイナスのデータがありません。先行検査品と洗浄品の処理を続行します...")
+                # 不足数がマイナスのデータが無い場合でも、先行検査品と洗浄品の処理を続行
+                lots_df = pd.DataFrame()
+            else:
+                self.log_message(f"不足数がマイナスのデータ: {len(shortage_df)}件")
+                
+                # 通常の在庫ロットを取得
+                self.update_progress(start_progress + 0.10, "利用可能なロットを取得中...")
+                lots_df = self.get_available_lots_for_shortage(connection, shortage_df)
             
             # 洗浄二次処理依頼からロットを取得（追加で取得）
             cleaning_lots_df = pd.DataFrame()
@@ -3556,13 +4191,15 @@ class ModernDataExtractorUI:
                         
                         self.log_message(f"洗浄二次処理依頼のロット {len(cleaning_lots_df)}件を統合しました（通常ロット: {normal_lots_count}件、合計: {len(lots_df)}件）")
             
-            if lots_df.empty:
-                self.log_message("利用可能なロットが見つかりませんでした")
-                return
-            
-            # ロット割り当てを実行
-            self.update_progress(start_progress + 0.15, "ロットを割り当て中...")
-            assignment_df = self.assign_lots_to_shortage(shortage_df, lots_df)
+            # ロット割り当てを実行（不足数がマイナスのデータがある場合のみ）
+            assignment_df = pd.DataFrame()
+            if not shortage_df.empty and not lots_df.empty:
+                self.update_progress(start_progress + 0.15, "ロットを割り当て中...")
+                assignment_df = self.assign_lots_to_shortage(shortage_df, lots_df)
+            elif lots_df.empty and shortage_df.empty:
+                # 出荷予定日からのデータが無い場合、assignment_dfを空のDataFrameで初期化
+                assignment_df = pd.DataFrame()
+                self.log_message("出荷予定日からのデータが無いため、先行検査品と洗浄品の処理を続行します...")
             
             # 登録済み品番のロットを割り当て（追加）
             if self.registered_products:
@@ -3571,8 +4208,8 @@ class ModernDataExtractorUI:
             
             # 洗浄二次処理依頼のロットを追加（不足数がマイナスの品番と一致するものも含む）
             if not cleaning_lots_df.empty:
-                # 不足数がマイナスの品番リストを取得
-                shortage_product_numbers = set(shortage_df['品番'].unique())
+                # 不足数がマイナスの品番リストを取得（shortage_dfが空の場合は空のセット）
+                shortage_product_numbers = set(shortage_df['品番'].unique()) if not shortage_df.empty else set()
                 
                 # 洗浄二次処理依頼のロットで、不足数がマイナスの品番と一致しないものを抽出
                 cleaning_lots_not_in_shortage = cleaning_lots_df[
@@ -3623,8 +4260,10 @@ class ModernDataExtractorUI:
                         lot_row_idx = row_tuple[0]  # インデックス
                         lot_row = all_additional_cleaning_lots.loc[lot_row_idx]  # Seriesとして扱うために元の行を取得
                         
-                        # 品番がmain_dfに存在するか確認
-                        product_in_main = main_df[main_df['品番'] == lot_row['品番']]
+                        # 品番がmain_dfに存在するか確認（main_dfが空の場合でもエラーが発生しないようにする）
+                        product_in_main = pd.DataFrame()
+                        if not main_df.empty and '品番' in main_df.columns:
+                            product_in_main = main_df[main_df['品番'] == lot_row['品番']]
                         if not product_in_main.empty:
                             # main_dfから該当品番の最初の行を取得
                             main_row = product_in_main.iloc[0]
@@ -3678,6 +4317,9 @@ class ModernDataExtractorUI:
                         self.log_message(f"洗浄二次処理依頼のロット {len(additional_df)}件を追加しました（不足数マイナス以外: {not_in_shortage_count}件、不足数マイナスで未割当: {in_shortage_not_assigned_count}件）")
             
             if not assignment_df.empty:
+                # ロットIDの重複を削除（出荷予定日の優先順位に基づいて）
+                assignment_df = self.remove_duplicate_lot_ids(assignment_df)
+                
                 # ロット割り当て結果は選択式表示のため、ここでは表示しない
                 # self.display_lot_assignment_table(assignment_df)
                 
@@ -4126,7 +4768,11 @@ class ModernDataExtractorUI:
                     completed_files = 0
                     # 進捗範囲は引数で受け取る（デフォルト: 0.1から0.9まで）
                     
-                    for key, future in as_completed(futures):
+                    # futureからkeyを逆引きするためのマッピングを作成
+                    future_to_key = {future: key for key, future in futures.items()}
+                    
+                    for future in as_completed(futures.values()):
+                        key = future_to_key[future]
                         try:
                             result = future.result(timeout=60)  # タイムアウトを設定
                             results[key] = result
