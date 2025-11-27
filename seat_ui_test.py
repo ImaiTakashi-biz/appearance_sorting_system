@@ -187,9 +187,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       body:not(.editing) .editor-panel {
         display: none;
       }
-      body:not(.editing) #download-json {
-        display: none;
-      }
       body:not(.editing) .download-hint {
         display: none;
       }
@@ -233,19 +230,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         display: flex;
         gap: 0.5rem;
         align-items: center;
-      }
-      .download-hint {
-        font-size: 0.85rem;
-        color: #666;
-        display: flex;
-        align-items: center;
-        gap: 0.35rem;
-      }
-      .download-hint code {
-        background: #f0f0f0;
-        padding: 0.15rem 0.4rem;
-        border-radius: 0.45rem;
-        font-size: 0.85rem;
       }
       #seat-grid {
         min-height: 500px;
@@ -395,13 +379,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             <p class="edit-instruction">ドラッグ&ドロップ・ダブルクリックで編集し、「JSONダウンロード」で保存。</p>
           </div>
           <div class="grid-actions">
-            <button id="download-json" class="primary" type="button">JSONダウンロード</button>
+            <button id="save-json" class="primary mode-toggle" type="button">変更を保存</button>
             <button id="toggle-edit" class="secondary mode-toggle" type="button">座席編集モード</button>
           </div>
-        </div>
-        <div class="download-hint">
-          <span>保存先:</span>
-          <code id="hint-path">SEATING_PATH_PLACEHOLDER</code>
         </div>
         <div id="seat-grid" aria-live="polite"></div>
         <div id="inspector-dropdown" class="inspector-dropdown">
@@ -435,7 +415,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <script>
       const seatingData = SEATING_DATA_PLACEHOLDER;
       const INSPECTOR_CANDIDATES = INSPECTOR_CANDIDATES_PLACEHOLDER;
-      const targetJsonPath = "SEATING_PATH_PLACEHOLDER";
       const seats = Array.isArray(seatingData.seats) ? seatingData.seats : [];
       let selectedSeatId = null;
       let draggingSeatId = null;
@@ -448,12 +427,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       const seatColInput = document.getElementById("seat-col");
       const applyButton = document.getElementById("apply-seat");
       const clearButton = document.getElementById("clear-seat");
-      const downloadButton = document.getElementById("download-json");
+      const saveButton = document.getElementById("save-json");
       const toggleEditButton = document.getElementById("toggle-edit");
       const inspectorDropdown = document.getElementById("inspector-dropdown");
       const inspectorList = document.getElementById("inspector-list");
       const inspectorDatalist = document.getElementById("inspector-names");
-      const hintPath = document.getElementById("hint-path");
       const modeSizes = {
         view: { width: 180, height: 120, gap: 5 },
         editing: { width: 140, height: 100, gap: 5 },
@@ -463,9 +441,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       let currentSlotGap = modeSizes.view.gap;
       const boardTitle = document.getElementById("board-title");
 
-      if (hintPath) {
-        hintPath.textContent = targetJsonPath;
-      }
 
       const uniqueInspectorNames = () =>
         Array.from(new Set(INSPECTOR_CANDIDATES.filter((value) => value && value.trim())));
@@ -726,24 +701,41 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
       toggleEditButton.addEventListener("click", () => setEditingMode(!editingMode));
 
-      downloadButton.addEventListener("click", () => {
+      const fileSystemAvailable = () => typeof window.showSaveFilePicker === "function";
+      const craftJsonPayload = () => ({ seats });
+      const saveJsonFileSystem = async () => {
         if (!editingMode) {
           return;
         }
-        const payload = { seats };
-        const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
-        const url = URL.createObjectURL(blob);
-        const anchor = document.createElement("a");
-        anchor.href = url;
-        anchor.download = "seating_chart.json";
-        document.body.appendChild(anchor);
-        anchor.click();
-        anchor.remove();
-        URL.revokeObjectURL(url);
-        if (hintPath) {
-          hintPath.textContent = targetJsonPath;
+        if (!fileSystemAvailable()) {
+          alert("FileSystem Access API をサポートしていないか、セキュアコンテキストではありません。");
+          return;
         }
-      });
+        try {
+          const payload = craftJsonPayload();
+          const handle = await window.showSaveFilePicker({
+            suggestedName: "seating_chart.json",
+            types: [
+              {
+                description: "JSON Files",
+                accept: { "application/json": [".json"] },
+              },
+            ],
+            excludeAcceptAllOption: true,
+          });
+          const writable = await handle.createWritable();
+          await writable.write(JSON.stringify(payload, null, 2));
+          await writable.close();
+        } catch (error) {
+          if (error?.name !== "AbortError") {
+            console.error("FileSystem Access API エラー", error);
+          }
+        }
+      };
+
+      if (saveButton) {
+        saveButton.addEventListener("click", saveJsonFileSystem);
+      }
 
       document.addEventListener("click", (event) => {
         if (!editingMode) {
@@ -754,10 +746,19 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         }
       });
 
+      const setInstructionContent = () => {
+        const instruction = document.querySelector(".edit-instruction");
+        if (instruction) {
+          instruction.innerHTML =
+            "ドラッグ＆ドロップ・ダブルクリックで編集し、「変更を保存」ボタンを押して<br />\\\\192.168.1.200\\\\共有\\\\dev_tools\\\\外観検査振分支援システム\\\\seating_chart\\\\seating_chart.json へ上書き保存してください。";
+        }
+      };
+
       document.addEventListener("DOMContentLoaded", () => {
         fillDatalist();
         setEditingMode(false);
         renderSeats();
+        setInstructionContent();
       });
     </script>
   </body>
