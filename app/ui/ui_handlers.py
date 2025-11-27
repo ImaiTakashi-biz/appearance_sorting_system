@@ -30,6 +30,7 @@ from datetime import datetime, date, timedelta
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
+import re
 from loguru import logger
 from app.config import DatabaseConfig
 import calendar
@@ -102,6 +103,7 @@ class ModernDataExtractorUI:
         
         # 当日検査品入力用の変数
         self.product_code_entry = None  # 品番入力フィールド
+        self.process_name_entry = None  # 工程名入力
         self.inspectable_lots_entry = None  # 検査可能ロット数／日入力フィールド
         self.register_button = None  # 登録確定ボタン
         self.registered_products = []  # 登録された品番のリスト [{品番, ロット数}, ...]
@@ -617,6 +619,29 @@ class ModernDataExtractorUI:
         self.initialize_product_code_list()
         
         # 検査可能ロット数／日入力セクション
+        # 工程名入力
+        process_frame = ctk.CTkFrame(fields_frame, fg_color="transparent")
+        process_frame.pack(side="left", fill="x", expand=True, padx=(0, 8))
+
+        process_label = ctk.CTkLabel(
+            process_frame,
+            text="工程名　※未記載の場合は仕掛の現在工程に設定される",
+            font=ctk.CTkFont(family="Yu Gothic", size=16, weight="bold"),
+            text_color="#374151"
+        )
+        process_label.pack(anchor="w", pady=(0, 4))
+
+        self.process_name_entry = ctk.CTkEntry(
+            process_frame,
+            placeholder_text="例: 外観、顕微鏡、PG",
+            font=ctk.CTkFont(family="Yu Gothic", size=14),
+            height=40,
+            border_width=1,
+            fg_color="white",
+            text_color="#374151"
+        )
+        self.process_name_entry.pack(fill="x")
+
         lots_frame = ctk.CTkFrame(fields_frame, fg_color="transparent")
         lots_frame.pack(side="left", fill="x", expand=True, padx=(8, 0))
         
@@ -707,26 +732,29 @@ class ModernDataExtractorUI:
     def register_product(self):
         """品番を登録リストに追加"""
         product_code = self.product_code_entry.get().strip()
+        process_name = self.process_name_entry.get().strip()
         lots = self.inspectable_lots_entry.get().strip()
         
         # 入力チェック
         if not product_code or not lots:
             return
         
-        # 既に登録されているかチェック
+        # 登録済みか確認（工程名が異なれば別項目）
         for item in self.registered_products:
-            if item['品番'] == product_code:
-                # 既に登録されている場合は更新
+            existing_code = item.get('品番') or item.get('�i��', '')
+            existing_process = item.get('工程名', '').strip()
+            if existing_code == product_code and existing_process == process_name:
+                item['品番'] = product_code
+                item['���b�g��'] = lots
                 item['ロット数'] = lots
-                # 検査員情報がない場合は初期化
-                if '固定検査員' not in item:
-                    item['固定検査員'] = []
+                item['工程名'] = process_name
+                if '�Œ茟����' not in item:
+                    item['�Œ茟����'] = []
                 self.update_registered_list()
-                # ファイルに保存
                 self.save_registered_products()
-                # 入力フィールドをクリア
                 self.product_code_entry.delete(0, "end")
                 self.inspectable_lots_entry.delete(0, "end")
+                self.process_name_entry.delete(0, "end")
                 self.check_input_fields()
                 return
         
@@ -734,20 +762,18 @@ class ModernDataExtractorUI:
         self.registered_products.append({
             '品番': product_code,
             'ロット数': lots,
-            '固定検査員': []  # 検査員固定情報を追加
+            '工程名': process_name,
+            '�Œ茟����': []
         })
         
-        # リストを更新
+        # リストとファイル更新
         self.update_registered_list()
-        
-        # ファイルに保存
         self.save_registered_products()
-        
-        # 入力フィールドをクリア
         self.product_code_entry.delete(0, "end")
         self.inspectable_lots_entry.delete(0, "end")
+        self.process_name_entry.delete(0, "end")
         self.check_input_fields()
-    
+
     def update_registered_list(self):
         """登録リストを更新して表示"""
         # 既存のウィジェットを削除
@@ -819,6 +845,25 @@ class ModernDataExtractorUI:
                 anchor="w"
             )
             lots_value.pack(side="left")
+            # 工程名
+            process_label = ctk.CTkLabel(
+                single_row,
+                text="工程名",
+                font=ctk.CTkFont(family="Yu Gothic", size=14, weight="bold"),
+                text_color="#374151",
+                anchor="w"
+            )
+            process_label.pack(side="left", padx=(20, 5))
+
+            process_value = ctk.CTkLabel(
+                single_row,
+                text=item.get('工程名', '') or "未指定",
+                font=ctk.CTkFont(family="Yu Gothic", size=14, weight="bold"),
+                text_color="#374151",
+                anchor="w"
+            )
+            process_value.pack(side="left")
+
             
             # 固定検査員の表示
             fixed_inspectors_label = ctk.CTkLabel(
@@ -1297,6 +1342,15 @@ class ModernDataExtractorUI:
                 for item in self.registered_products:
                     if '固定検査員' not in item:
                         item['固定検査員'] = []
+                    if '�i��' in item and '品番' not in item:
+                        item['品番'] = item['�i��']
+                    if '品番' in item and '�i��' not in item:
+                        item['�i��'] = item['品番']
+                    if '���b�g��' in item and 'ロット数' not in item:
+                        item['ロット数'] = item['���b�g��']
+                    if 'ロット数' in item and '���b�g��' not in item:
+                        item['���b�g��'] = item['ロット数']
+                    item.setdefault('工程名', '')
                 # UIが構築されている場合はリストを更新
                 if self.registered_list_container is not None:
                     self.update_registered_list()
@@ -3254,8 +3308,8 @@ class ModernDataExtractorUI:
             additional_assignments = []
             
             for registered_item in self.registered_products:
-                product_number = registered_item['品番']
-                max_lots_per_day = int(registered_item['ロット数'])
+                product_number = registered_item.get('品番', '')
+                max_lots_per_day = int(registered_item.get('ロット数', 0))
                 
                 # 該当品番のロットを取得
                 product_lots = registered_lots_df[registered_lots_df['品番'] == product_number].copy()
@@ -3264,6 +3318,46 @@ class ModernDataExtractorUI:
                     continue
                 
                 # 指示日順でソート（生産日の古い順）
+                process_filter = registered_item.get('工程名', '').strip()
+                if process_filter:
+                    process_keywords = [
+                        keyword.strip()
+                        for keyword in re.split(r'[／/]', process_filter)
+                        if keyword.strip()
+                    ]
+                    if not process_keywords:
+                        process_keywords = [process_filter]
+                    process_columns = [col for col in ['現在工程名', '工程名'] if col in product_lots.columns]
+                    if process_columns:
+                        has_process_data = any(
+                            product_lots[col].astype(str).str.strip().ne('').any()
+                            for col in process_columns
+                        )
+                        if has_process_data:
+                            mask = pd.Series(False, index=product_lots.index, dtype=bool)
+                            for col in process_columns:
+                                column_data = product_lots[col].astype(str)
+                                column_mask = pd.Series(False, index=product_lots.index, dtype=bool)
+                                for keyword in process_keywords:
+                                    column_mask |= column_data.str.contains(keyword, na=False, regex=False)
+                                mask |= column_mask
+                            if not mask.any():
+                                self.log_message(
+                                    f"工程名「{process_filter}」に一致するロットが見つかりません: {product_number}"
+                                )
+                                continue
+                            product_lots = product_lots[mask].copy()
+                        else:
+                            self.log_message(
+                                f"工程名「{process_filter}」に該当する現在工程名が未記載のためフィルターを省略します: {product_number}"
+                            )
+                    else:
+                        self.log_message(
+                            f"工程名「{process_filter}」を指定しましたが、照合可能な工程名列がありません: {product_number}"
+                        )
+                if product_lots.empty:
+                    continue
+
                 if '指示日' in product_lots.columns:
                     product_lots = product_lots.copy()
                     product_lots['_指示日_ソート用'] = product_lots['指示日'].apply(

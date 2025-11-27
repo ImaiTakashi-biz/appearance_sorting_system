@@ -981,7 +981,17 @@ class InspectorAssignmentManager:
                 )
                 
                 # 当日洗浄品の場合は、工程番号が空でなくても工程マスタから取得（既存の工程番号を上書き）
-                if is_same_day_cleaning and process_master_df is not None and inspection_target_keywords:
+                needs_inference = (
+                    current_process_number is None
+                    or pd.isna(current_process_number)
+                    or str(current_process_number).strip() == ''
+                )
+                if (
+                    is_same_day_cleaning
+                    and process_master_df is not None
+                    and inspection_target_keywords
+                    and needs_inference
+                ):
                     # 工程マスタから工程番号を推定（既存の工程番号を上書き）
                     inferred_process = self.infer_process_number_from_process_master(
                         product_number,
