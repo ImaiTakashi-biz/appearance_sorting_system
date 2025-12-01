@@ -6013,22 +6013,22 @@ class ModernDataExtractorUI:
             self.graph_toggle_button.pack(side="right", padx=(0, 25))
 
             seating_buttons_frame = ctk.CTkFrame(button_frame, fg_color="transparent")
-            seating_buttons_frame.pack(side="right", padx=(0, 12))
+            seating_buttons_frame.pack(side="right", padx=(0, 25))
 
             self.seating_reflect_button = ctk.CTkButton(
                 seating_buttons_frame,
-                text="座席結果反映",
+                text="ロット投分変更反映",
                 command=self.apply_seating_chart_results,
-                width=140,
+                width=160,
                 height=30,
                 font=ctk.CTkFont(family="Yu Gothic", size=12, weight="bold"),
-                fg_color="#10B981",
-                hover_color="#059669",
+                fg_color="#F97316",
+                hover_color="#EA580C",
                 corner_radius=10,
                 border_width=0,
                 text_color="white"
             )
-            self.seating_reflect_button.pack(side="right")
+            self.seating_reflect_button.pack(side="right", padx=(12, 0))
 
             self.seating_view_button = ctk.CTkButton(
                 seating_buttons_frame,
@@ -6043,7 +6043,7 @@ class ModernDataExtractorUI:
                 border_width=0,
                 text_color="white"
             )
-            self.seating_view_button.pack(side="right", padx=(25, 0))
+            self.seating_view_button.pack(side="right", padx=(0, 25))
             
             # テーブルフレーム
             table_frame = tk.Frame(inspector_frame)
