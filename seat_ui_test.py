@@ -5,7 +5,10 @@ import json
 import os
 from typing import Dict, List, Optional
 
-# Local or NAS paths (adjust as needed)
+# 本番統合時の指針:
+# - load_seating_chart / save_seating_chart / build_initial_seating_chart は共通ライブラリに移行する想定。
+# - attach_dummy_lots は実システムではDB/APIアクセスで置き換えられる設計にしています。
+
 SEATING_JSON_PATH = r"\\192.168.1.200\共有\dev_tools\外観検査振分支援システム\seating_chart\seating_chart.json"
 SEATING_HTML_PATH = r"\\192.168.1.200\共有\dev_tools\外観検査振分支援システム\seating_chart\seat_ui_test.html"
 CONFIG_ENV_PATH = "config.env"
@@ -26,9 +29,7 @@ def _parse_config_env() -> Dict[str, str]:
     with open(CONFIG_ENV_PATH, encoding="utf-8", errors="ignore") as handle:
         for raw_line in handle:
             line = raw_line.strip()
-            if not line or line.startswith("#"):
-                continue
-            if "=" not in line:
+            if not line or line.startswith("#") or "=" not in line:
                 continue
             key, value = line.split("=", 1)
             parsed[key.strip()] = value.strip()
@@ -42,9 +43,7 @@ def _load_inspectors_from_csv(path: str) -> List[str]:
                 reader = csv.reader(handle)
                 names: List[str] = []
                 for idx, row in enumerate(reader, start=1):
-                    if idx < 3:
-                        continue
-                    if len(row) < 2:
+                    if idx < 3 or len(row) < 2:
                         continue
                     name = row[1].strip()
                     if name:
@@ -67,58 +66,83 @@ def _detect_inspector_csv() -> Optional[str]:
 def _ensure_seat_names() -> List[str]:
     path = _detect_inspector_csv()
     if not path:
-        raise FileNotFoundError("Inspector CSV path not found in config.env (INSPECTOR_MASTER_PATH).")
+        raise FileNotFoundError("Inspector CSV path not found in config.env.")
     inspectors = _load_inspectors_from_csv(path)
     if not inspectors:
         raise ValueError(f"Could not load inspectors from CSV: {path}")
     return inspectors
 
 
-def _build_seating_chart() -> Dict[str, List[Dict[str, object]]]:
-    names = _ensure_seat_names()
+def attach_dummy_lots(chart: Dict[str, List[Dict[str, object]]]) -> Dict[str, List[Dict[str, object]]]:
+    """ダミーロットを付与（本番では実データに差し替える）。"""
+    products = ["A-001", "B-145", "C-210", "D-330", "E-512", "F-021"]
+    processes = ["外観検査", "組立検査", "仕上げ検査", "再検査"]
+    qty_options = [32, 48, 60, 90, 120, 180]
+    sec_options = [2.5, 3.4, 4.8, 5.2, 6.1]
+    counter = 1
+    for seat_idx, seat in enumerate(chart.get("seats", []), start=1):
+        lots: List[Dict[str, object]] = []
+        lot_count = 2 + (seat_idx % 2)
+        for slot in range(lot_count):
+            lot_id = f"L{seat_idx:02d}-{counter:03d}"
+            product = products[(seat_idx + slot) % len(products)]
+            process = processes[(seat_idx + slot) % len(processes)]
+            lots.append(
+                {
+                    "lot_id": lot_id,
+                    "product_name": f"品番{product}",
+                    "process_name": process,
+                    "quantity": qty_options[(seat_idx + slot) % len(qty_options)],
+                    "sec_per_piece": sec_options[(seat_idx + slot) % len(sec_options)],
+                }
+            )
+            counter += 1
+        seat["lots"] = lots
+    return chart
+
+
+def build_initial_seating_chart(inspector_names: List[str]) -> Dict[str, List[Dict[str, object]]]:
     entries: List[Dict[str, object]] = []
     idx = 0
     while len(entries) < len(GRID_POSITIONS):
         row, col = GRID_POSITIONS[len(entries)]
-        name = names[idx % len(names)]
-        entries.append({"id": f"s{len(entries) + 1}", "name": name, "row": row, "col": col})
+        name = inspector_names[idx % len(inspector_names)] if inspector_names else ""
+        entries.append({"id": f"s{len(entries) + 1}", "name": name, "row": row, "col": col, "lots": []})
         idx += 1
-    return {"seats": entries}
+    chart = {"seats": entries}
+    return attach_dummy_lots(chart)
 
 
-def ensure_seating_json_exists() -> Dict[str, List[Dict[str, object]]]:
-    if not os.path.exists(SEATING_JSON_PATH):
-        chart = _build_seating_chart()
-        _write_chart(chart)
-        return chart
-    try:
-        with open(SEATING_JSON_PATH, "r", encoding="utf-8") as handle:
-            chart = json.load(handle)
-            if len(chart.get("seats", [])) < len(GRID_POSITIONS):
-                raise ValueError("incomplete chart")
-            return chart
-    except (json.JSONDecodeError, OSError, ValueError):
-        chart = _build_seating_chart()
-        _write_chart(chart)
-        return chart
+def load_seating_chart(path: str) -> Dict[str, List[Dict[str, object]]]:
+    with open(path, "r", encoding="utf-8") as handle:
+        chart = json.load(handle)
+    for seat in chart.get("seats", []):
+        if not isinstance(seat.get("lots"), list):
+            seat["lots"] = []
+    return chart
 
 
-def _write_chart(chart: Dict[str, List[Dict[str, object]]]) -> None:
-    _ensure_dir()
-    with open(SEATING_JSON_PATH, "w", encoding="utf-8") as handle:
-        json.dump(chart, handle, ensure_ascii=False, indent=2)
-
-
-def _ensure_dir() -> None:
-    directory = os.path.dirname(SEATING_JSON_PATH)
-    if directory:
-        os.makedirs(directory, exist_ok=True)
-
-
-def _ensure_dir_for(path: str) -> None:
+def save_seating_chart(path: str, chart: Dict[str, List[Dict[str, object]]]) -> None:
     directory = os.path.dirname(path)
     if directory:
         os.makedirs(directory, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(chart, handle, ensure_ascii=False, indent=2)
+
+
+def ensure_seating_json_exists() -> Dict[str, List[Dict[str, object]]]:
+    if os.path.exists(SEATING_JSON_PATH):
+        try:
+            chart = load_seating_chart(SEATING_JSON_PATH)
+            if len(chart.get("seats", [])) < len(GRID_POSITIONS):
+                raise ValueError("incomplete chart")
+            return chart
+        except (json.JSONDecodeError, OSError, ValueError):
+            pass
+    inspectors = _ensure_seat_names()
+    chart = build_initial_seating_chart(inspectors)
+    save_seating_chart(SEATING_JSON_PATH, chart)
+    return chart
 
 
 DEFAULT_NAMES = _ensure_seat_names()
@@ -128,11 +152,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>\u5916\u89b3\u691c\u67fb\u5e2d\u30d7\u30ec\u30d3\u30e5\u30fc</title>
+    <title>検査ロット振分けレイアウト（ロット移動）</title>
     <style>
-      * {
-        box-sizing: border-box;
-      }
+      * { box-sizing: border-box; }
       body {
         margin: 0;
         min-height: 100vh;
@@ -141,14 +163,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         font-family: "Noto Sans JP", "Segoe UI", system-ui, sans-serif;
       }
       body.editing main {
-        grid-template-columns: minmax(0, 1fr) 320px;
+        grid-template-columns: minmax(0, 1fr) 340px;
       }
-      body:not(.editing) .edit-instruction {
-        display: none;
-      }
-      body:not(.editing) .editor-panel {
-        display: none;
-      }
+      body:not(.editing) .edit-instruction,
+      body:not(.editing) .editor-panel,
       body:not(.editing) .download-hint {
         display: none;
       }
@@ -196,33 +214,85 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       #seat-grid {
         min-height: 500px;
         position: relative;
+        margin-bottom: 2rem;
       }
       .seat-card {
         position: absolute;
-        width: 150px;
-        height: 120px;
+        width: 180px;
+        min-height: 140px;
         border-radius: 1rem;
         border: 1px solid #d6d6d6;
         background: #fff;
         box-shadow: 0 8px 20px rgba(0, 0, 0, 0.1);
         display: flex;
-        align-items: center;
-        justify-content: center;
+        flex-direction: column;
+        align-items: stretch;
+        gap: 0.4rem;
+        padding: 0.75rem;
         font-weight: 600;
-        font-size: 1rem;
+        font-size: 0.95rem;
         transition: border-color 0.2s ease, transform 0.2s ease;
         cursor: pointer;
+        overflow: hidden;
       }
       .seat-card.selected {
         border-color: #1f7aef;
         box-shadow: 0 0 0 3px rgba(31, 122, 239, 0.25);
       }
-      .seat-card.dragging {
-        opacity: 0.65;
-        transform: scale(1.05);
-      }
       .seat-card.drop-target {
         box-shadow: 0 0 0 3px rgba(31, 122, 239, 0.35);
+      }
+      .seat-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.4rem;
+      }
+      .seat-name {
+        font-size: 0.92rem;
+        font-weight: 700;
+      }
+      .total-time {
+        font-size: 0.78rem;
+        color: #555;
+      }
+      .lot-list {
+        display: flex;
+        flex-direction: column;
+        gap: 0.25rem;
+        width: 100%;
+        flex: 1;
+        height: calc(5 * 20px + 0.25rem * 4);
+        max-height: calc(5 * 20px + 0.25rem * 4);
+        overflow-y: auto;
+      }
+      .lot-card {
+        background: #f5f5f5;
+        border-radius: 0.55rem;
+        padding: 0.15rem 0.35rem;
+        border: 1px solid #e2e2e2;
+        cursor: grab;
+        text-align: left;
+        font-size: 0.7rem;
+        line-height: 1.1;
+        min-height: 18px;
+      }
+      .lot-card:active {
+        cursor: grabbing;
+      }
+      .lot-card.dragging-lot {
+        opacity: 0.9;
+        border-color: #1f7aef;
+        background: #e4f0ff;
+        box-shadow: 0 0 0 2px rgba(31, 122, 239, 0.35);
+      }
+      .lot-line {
+        font-size: 0.72rem;
+        color: #444;
+        margin: 0;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
       }
       .editor-panel {
         background: #fff;
@@ -337,40 +407,28 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       <section class="grid-area">
         <div class="grid-header">
           <div class="title-block">
-            <h1 id="board-title">\u5916\u89b3\u691c\u67fb\u5e2d\u30ec\u30a4\u30a2\u30a6\u30c8</h1>
-            <p class="edit-instruction">\u5e2d\u3092\u30c9\u30e9\u30c3\u30b0&\u30c9\u30ed\u30c3\u30d7\u3067\u5165\u308c\u66ff\u3048\u3001\u30c0\u30d6\u30eb\u30af\u30ea\u30c3\u30af\u3067\u62c5\u5f53\u8005\u3092\u5909\u66f4\u3067\u304d\u307e\u3059\u3002</p>
+            <h1 id="board-title">検査ロット振分けレイアウト（ロット移動）</h1>
+            <p class="edit-instruction">座席編集モード: 座席位置の入れ替えのみ。ロット編集モード: ロットカードをドラッグで別席に移動できます。</p>
           </div>
           <div class="grid-actions">
-            <button id="save-json" class="primary mode-toggle" type="button">\u5909\u66f4\u3092\u4fdd\u5b58</button>
-            <button id="toggle-edit" class="secondary mode-toggle" type="button">\u7de8\u96c6\u30e2\u30fc\u30c9</button>
+            <button id="save-json" class="primary mode-toggle" type="button">変更を保存</button>
+            <button id="toggle-edit" class="secondary mode-toggle" type="button">座席編集モード</button>
           </div>
         </div>
         <div id="seat-grid" aria-live="polite"></div>
         <div id="inspector-dropdown" class="inspector-dropdown">
-          <div class="dropdown-title">\u691c\u67fb\u54e1\u3092\u9078\u629e</div>
+          <div class="dropdown-title">検査員を選択</div>
           <div id="inspector-list"></div>
         </div>
       </section>
       <aside class="editor-panel">
-        <h2>\u5ea7\u5e2d\u7de8\u96c6\u30d1\u30cd\u30eb</h2>
-        <label>
-          \u5ea7\u5e2dID
-          <input type="text" id="seat-id" readonly />
-        </label>
-        <label>
-          \u5ea7\u5e2d\u62c5\u5f53
-          <input type="text" id="seat-name" list="inspector-names" />
-        </label>
-        <label>
-          \u884c(row)
-          <input type="number" id="seat-row" min="1" step="0.5" />
-        </label>
-        <label>
-          \u5217(col)
-          <input type="number" id="seat-col" min="1" step="0.5" />
-        </label>
-        <button id="apply-seat" class="primary" type="button">\u9069\u7528</button>
-        <button id="clear-seat" class="secondary" type="button">\u7a7a\u5e2d\u306b\u3059\u308b</button>
+        <h2>座席編集パネル</h2>
+        <label>座席ID <input type="text" id="seat-id" readonly /></label>
+        <label>座席担当 <input type="text" id="seat-name" list="inspector-names" /></label>
+        <label>行(row) <input type="number" id="seat-row" min="1" step="0.5" /></label>
+        <label>列(col) <input type="number" id="seat-col" min="1" step="0.5" /></label>
+        <button id="apply-seat" class="primary" type="button">適用</button>
+        <button id="clear-seat" class="secondary" type="button">空席にする</button>
       </aside>
     </main>
     <datalist id="inspector-names"></datalist>
@@ -380,6 +438,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       const seats = Array.isArray(seatingData.seats) ? seatingData.seats : [];
       let selectedSeatId = null;
       let draggingSeatId = null;
+      let draggingLot = null;
       let editingMode = false;
 
       const grid = document.getElementById("seat-grid");
@@ -395,13 +454,20 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       const inspectorList = document.getElementById("inspector-list");
       const inspectorDatalist = document.getElementById("inspector-names");
       const modeSizes = {
-        view: { width: 180, height: 120, gap: 5 },
-        editing: { width: 140, height: 100, gap: 5 },
+        view: { width: 180, height: 150, gap: 8 },
+        editing: { width: 135, height: 100, gap: 8 },
       };
       let currentSlotWidth = modeSizes.view.width;
       let currentSlotHeight = modeSizes.view.height;
       let currentSlotGap = modeSizes.view.gap;
       const boardTitle = document.getElementById("board-title");
+
+      const applyModeSizes = () => {
+        const { width, height, gap } = editingMode ? modeSizes.editing : modeSizes.view;
+        currentSlotWidth = width;
+        currentSlotHeight = height;
+        currentSlotGap = gap;
+      };
 
       const uniqueInspectorNames = () =>
         Array.from(new Set(INSPECTOR_CANDIDATES.filter((value) => value && value.trim())));
@@ -468,14 +534,14 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             if (!target) {
               return;
             }
-            target.name = name === "\u7a7a\u5e2d" ? "" : name;
+            target.name = name === "空席" ? "" : name;
             renderSeats();
             updateEditorPanel();
             closeInspectorDropdown();
           });
           inspectorList.appendChild(button);
         };
-        addOption("\u7a7a\u5e2d");
+        addOption("空席");
         uniqueInspectorNames().forEach((name) => addOption(name));
       };
 
@@ -534,6 +600,72 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         grid.style.width = `${maxCol * (currentSlotWidth + currentSlotGap)}px`;
       };
 
+      const calculateTotalSecondsForSeat = (seat) => {
+        const lots = Array.isArray(seat.lots) ? seat.lots : [];
+        return lots.reduce((acc, lot) => {
+          const quantity = Number(lot.quantity) || 0;
+          const secPerPiece = Number(lot.sec_per_piece) || 0;
+          return acc + quantity * secPerPiece;
+        }, 0);
+      };
+
+      const formatSecondsToHoursString = (seconds) => {
+        const hours = seconds / 3600;
+        return `${hours.toFixed(1)}H`;
+      };
+
+      const moveLot = (fromSeatId, toSeatId, lotId) => {
+        if (!fromSeatId || !toSeatId || !lotId || fromSeatId === toSeatId) {
+          return;
+        }
+        const fromSeat = seats.find((seat) => seat.id === fromSeatId);
+        const toSeat = seats.find((seat) => seat.id === toSeatId);
+        if (!fromSeat || !toSeat || !Array.isArray(fromSeat.lots) || !Array.isArray(toSeat.lots)) {
+          return;
+        }
+        const index = fromSeat.lots.findIndex((lot) => lot.lot_id === lotId);
+        if (index === -1) {
+          return;
+        }
+        const [lot] = fromSeat.lots.splice(index, 1);
+        toSeat.lots.push(lot);
+      };
+
+      const createLotCard = (seatId, lot) => {
+        const lotCard = document.createElement("div");
+        lotCard.className = "lot-card";
+        lotCard.draggable = true;
+        lotCard.dataset.seatId = seatId;
+        lotCard.dataset.lotId = lot.lot_id;
+
+        const product = (lot.product_name || lot.lot_id || "未設定").replace(/^品番/, "").trim();
+        const process = (lot.process_name || "工程未設定").replace(/^工程名?/, "").trim();
+        const line = document.createElement("div");
+        line.className = "lot-line";
+        line.textContent = `${product} ｜ ${process}`;
+
+        lotCard.appendChild(line);
+
+        lotCard.addEventListener("dragstart", (event) => {
+          if (editingMode) {
+            event.preventDefault();
+            return;
+          }
+          event.stopPropagation();
+          draggingLot = { seatId, lotId: lot.lot_id };
+          lotCard.classList.add("dragging-lot");
+          event.dataTransfer?.setData("text/plain", lot.lot_id);
+        });
+
+        lotCard.addEventListener("dragend", () => {
+          draggingLot = null;
+          lotCard.classList.remove("dragging-lot");
+          clearDropStyles();
+        });
+
+        return lotCard;
+      };
+
       const createSeatCard = (seat) => {
         const card = document.createElement("button");
         card.type = "button";
@@ -543,13 +675,38 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         const top = (seat.row - 1) * (currentSlotHeight + currentSlotGap);
         card.style.left = `${left}px`;
         card.style.top = `${top}px`;
-        card.draggable = true;
+        card.draggable = editingMode;
         card.style.width = `${currentSlotWidth}px`;
         card.style.height = `${currentSlotHeight}px`;
 
-        const label = document.createElement("span");
-        label.textContent = seat.name;
-        card.appendChild(label);
+        if (!seat.name) {
+          return card;
+        }
+
+        const header = document.createElement("div");
+        header.className = "seat-header";
+
+        const nameLabel = document.createElement("span");
+        nameLabel.className = "seat-name";
+        nameLabel.textContent = seat.name;
+        header.appendChild(nameLabel);
+
+        if (!editingMode) {
+          const totalLabel = document.createElement("span");
+          totalLabel.className = "total-time";
+          totalLabel.textContent = formatSecondsToHoursString(calculateTotalSecondsForSeat(seat));
+          header.appendChild(totalLabel);
+        }
+
+        card.appendChild(header);
+
+        if (!editingMode) {
+          const lotList = document.createElement("div");
+          lotList.className = "lot-list";
+          const lots = Array.isArray(seat.lots) ? seat.lots : [];
+          lots.forEach((lot) => lotList.appendChild(createLotCard(seat.id, lot)));
+          card.appendChild(lotList);
+        }
 
         if (seat.id === selectedSeatId) {
           card.classList.add("selected");
@@ -558,7 +715,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         card.addEventListener("click", () => setSelectedSeat(seat.id));
         card.addEventListener("dblclick", () => openInspectorDropdown(seat.id, card));
         card.addEventListener("dragstart", (event) => {
-          if (!editingMode) {
+          if (!editingMode || draggingLot) {
             event.preventDefault();
             return;
           }
@@ -572,20 +729,24 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           clearDropStyles();
         });
         card.addEventListener("dragover", (event) => {
-          if (!editingMode) {
-            return;
+          if ((editingMode && draggingSeatId) || (!editingMode && draggingLot)) {
+            event.preventDefault();
+            card.classList.add("drop-target");
           }
-          event.preventDefault();
-          card.classList.add("drop-target");
         });
         card.addEventListener("dragleave", () => card.classList.remove("drop-target"));
         card.addEventListener("drop", (event) => {
-          if (!editingMode) {
-            return;
-          }
           event.preventDefault();
           const targetId = event.currentTarget.dataset.seatId;
-          if (draggingSeatId && targetId && draggingSeatId !== targetId) {
+          if (!targetId) return;
+          if (!editingMode && draggingLot) {
+            moveLot(draggingLot.seatId, targetId, draggingLot.lotId);
+            draggingLot = null;
+            renderSeats();
+            clearDropStyles();
+            return;
+          }
+          if (editingMode && draggingSeatId && draggingSeatId !== targetId) {
             swapSeats(draggingSeatId, targetId);
             renderSeats();
             updateEditorPanel();
@@ -597,26 +758,22 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       };
 
       const renderSeats = () => {
+        applyModeSizes();
         grid.innerHTML = "";
         seats
           .slice()
           .sort((a, b) => (a.row === b.row ? a.col - b.col : a.row - b.row))
-          .forEach((seat) => {
-            grid.appendChild(createSeatCard(seat));
-          });
+          .forEach((seat) => grid.appendChild(createSeatCard(seat)));
         updateGridDimensions();
       };
 
       const setEditingMode = (enabled) => {
         editingMode = enabled;
+        applyModeSizes();
         document.body.classList.toggle("editing", enabled);
-        toggleEditButton.textContent = enabled ? "\u95b2\u89a7\u30e2\u30fc\u30c9" : "\u7de8\u96c6\u30e2\u30fc\u30c9";
-        const { width, height, gap } = editingMode ? modeSizes.editing : modeSizes.view;
-        currentSlotWidth = width;
-        currentSlotHeight = height;
-        currentSlotGap = gap;
+        toggleEditButton.textContent = enabled ? "ロット編集モード" : "座席編集モード";
         if (boardTitle) {
-          boardTitle.textContent = editingMode ? "\u5ea7\u5e2d\u30d7\u30ec\u30d3\u30e5\u30fc" : "\u5916\u89b3\u691c\u67fb\u5e2d\u30ec\u30a4\u30a2\u30a6\u30c8";
+          boardTitle.textContent = editingMode ? "座席プレビュー（位置調整）" : "検査ロット振分けレイアウト（ロット移動）";
         }
         if (!enabled) {
           selectedSeatId = null;
@@ -655,6 +812,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           return;
         }
         target.name = "";
+        target.lots = [];
         seatNameInput.value = "";
         renderSeats();
         updateEditorPanel();
@@ -669,7 +827,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           return;
         }
         if (!fileSystemAvailable()) {
-          alert("FileSystem Access API \u3092\u30b5\u30dd\u30fc\u30c8\u3057\u3066\u3044\u306a\u3044\u305f\u3081\u3001\u3053\u306e\u30bb\u30ad\u30e5\u30ea\u30c6\u30a3\u30b3\u30f3\u30c6\u30ad\u30b9\u30c8\u3067\u306f\u4fdd\u5b58\u3067\u304d\u307e\u305b\u3093\u3002");
+          alert("FileSystem Access API をサポートしていないため、このセキュリティコンテキストでは保存できません。");
           return;
         }
         try {
@@ -711,8 +869,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         const instruction = document.querySelector(".edit-instruction");
         if (instruction) {
           instruction.innerHTML =
-            "\u30c9\u30e9\u30c3\u30b0&\u30c9\u30ed\u30c3\u30d7\u3067\u5e2d\u3092\u5165\u308c\u66ff\u3048\u3001\u30c0\u30d6\u30eb\u30af\u30ea\u30c3\u30af\u3067\u62c5\u5f53\u8005\u3092\u9078\u629e\u3057\u3066\u304f\u3060\u3055\u3044\u3002<br />" +
-            "\\\\192.168.1.200\\shared\\dev_tools\\appearance_inspection\\seating_chart\\seating_chart.json \u306b\u4fdd\u5b58\u3057\u3066\u304f\u3060\u3055\u3044\u3002";
+            "座席編集モードでは座席の位置入れ替えのみ。ロット編集モードではロットカードをドラッグして別席に移動できます。<br />" +
+            "\\\\192.168.1.200\\shared\\dev_tools\\appearance_inspection\\seating_chart\\seating_chart.json に保存してください。";
         }
       };
 
@@ -731,10 +889,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 def generate_html_from_template(chart: Dict[str, List[Dict[str, object]]]) -> None:
     sorted_names = sorted({name for name in DEFAULT_NAMES if name and name.strip()})
     inspector_json = json.dumps(sorted_names, ensure_ascii=False)
-    html = HTML_TEMPLATE.replace("SEATING_DATA_PLACEHOLDER", json.dumps(chart, ensure_ascii=False)).replace(
-        "INSPECTOR_CANDIDATES_PLACEHOLDER", inspector_json
+    html = (
+        HTML_TEMPLATE.replace("SEATING_DATA_PLACEHOLDER", json.dumps(chart, ensure_ascii=False))
+        .replace("INSPECTOR_CANDIDATES_PLACEHOLDER", inspector_json)
     )
-    _ensure_dir_for(SEATING_HTML_PATH)
+    directory = os.path.dirname(SEATING_HTML_PATH)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
     with open(SEATING_HTML_PATH, "w", encoding="utf-8") as handle:
         handle.write(html)
 
@@ -742,8 +903,8 @@ def generate_html_from_template(chart: Dict[str, List[Dict[str, object]]]) -> No
 def main() -> None:
     chart = ensure_seating_json_exists()
     generate_html_from_template(chart)
-    print(f"HTML\u3092\u751f\u6210\u3057\u307e\u3057\u305f: {SEATING_HTML_PATH}")
-    print(f"JSON\u3092\u751f\u6210\u307e\u305f\u306f\u66f4\u65b0\u3057\u307e\u3057\u305f: {SEATING_JSON_PATH}")
+    print(f"HTMLを生成しました: {SEATING_HTML_PATH}")
+    print(f"JSONを生成または更新しました: {SEATING_JSON_PATH}")
 
 
 if __name__ == "__main__":
