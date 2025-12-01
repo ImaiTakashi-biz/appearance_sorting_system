@@ -219,7 +219,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       .seat-card {
         position: absolute;
         width: 180px;
-        min-height: 140px;
         border-radius: 1rem;
         border: 1px solid #d6d6d6;
         background: #fff;
@@ -679,28 +678,27 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         card.style.width = `${currentSlotWidth}px`;
         card.style.height = `${currentSlotHeight}px`;
 
-        if (!seat.name) {
-          return card;
+        const hasName = !!seat.name;
+        if (hasName) {
+          const header = document.createElement("div");
+          header.className = "seat-header";
+
+          const nameLabel = document.createElement("span");
+          nameLabel.className = "seat-name";
+          nameLabel.textContent = seat.name;
+          header.appendChild(nameLabel);
+
+          if (!editingMode) {
+            const totalLabel = document.createElement("span");
+            totalLabel.className = "total-time";
+            totalLabel.textContent = formatSecondsToHoursString(calculateTotalSecondsForSeat(seat));
+            header.appendChild(totalLabel);
+          }
+
+          card.appendChild(header);
         }
 
-        const header = document.createElement("div");
-        header.className = "seat-header";
-
-        const nameLabel = document.createElement("span");
-        nameLabel.className = "seat-name";
-        nameLabel.textContent = seat.name;
-        header.appendChild(nameLabel);
-
-        if (!editingMode) {
-          const totalLabel = document.createElement("span");
-          totalLabel.className = "total-time";
-          totalLabel.textContent = formatSecondsToHoursString(calculateTotalSecondsForSeat(seat));
-          header.appendChild(totalLabel);
-        }
-
-        card.appendChild(header);
-
-        if (!editingMode) {
+        if (!editingMode && hasName) {
           const lotList = document.createElement("div");
           lotList.className = "lot-list";
           const lots = Array.isArray(seat.lots) ? seat.lots : [];
