@@ -1,53 +1,14 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import csv
 import json
 import os
 from typing import Dict, List, Optional
 
-# ローカルまたはNAS上のパス（環境に合わせて書き換えてください）
-SEATING_JSON_PATH = r"C:\Users\SEIZOU-20\Desktop\seating_chart.json"
-SEATING_HTML_PATH = r"C:\Users\SEIZOU-20\Desktop\seat_ui_test.html"
+# Local or NAS paths (adjust as needed)
+SEATING_JSON_PATH = r"\\192.168.1.200\共有\dev_tools\外観検査振分支援システム\seating_chart\seating_chart.json"
+SEATING_HTML_PATH = r"\\192.168.1.200\共有\dev_tools\外観検査振分支援システム\seating_chart\seat_ui_test.html"
 CONFIG_ENV_PATH = "config.env"
-
-FALLBACK_NAMES = [
-    "鈴木悦代",
-    "新井登志子",
-    "前森美加",
-    "谷藤奈津代",
-    "宮谷博美",
-    "豊田彩矢香",
-    "大上明日香",
-    "笠原文美代",
-    "金井恵美",
-    "鈴木里奈子",
-    "氏家美奈",
-    "加藤メリー",
-    "勅使河原陽子",
-    "金室裕子",
-    "中野優美",
-    "山中美佳",
-    "南千鶴子",
-    "横田美幸",
-    "髙野香菜子",
-    "島嵜聖人",
-    "落合美里",
-    "岩田美早季",
-    "柴﨑楓華",
-    "松本尚美",
-    "伊藤喜代子",
-    "田端政子",
-    "大嶋渚",
-    "坂本美由紀",
-    "豊田奈津美",
-    "門田義裕",
-    "鋤崎楓華",
-    "南千鶴子",
-    "鈴木里奈子",
-    "豊田彩矢香",
-    "金井恵美",
-    "松本尚美",
-]
 
 GRID_POSITIONS = (
     [(1, col) for col in range(1, 9)]
@@ -105,11 +66,12 @@ def _detect_inspector_csv() -> Optional[str]:
 
 def _ensure_seat_names() -> List[str]:
     path = _detect_inspector_csv()
-    if path:
-        inspectors = _load_inspectors_from_csv(path)
-        if inspectors:
-            return inspectors
-    return FALLBACK_NAMES
+    if not path:
+        raise FileNotFoundError("Inspector CSV path not found in config.env (INSPECTOR_MASTER_PATH).")
+    inspectors = _load_inspectors_from_csv(path)
+    if not inspectors:
+        raise ValueError(f"Could not load inspectors from CSV: {path}")
+    return inspectors
 
 
 def _build_seating_chart() -> Dict[str, List[Dict[str, object]]]:
@@ -162,11 +124,11 @@ def _ensure_dir_for(path: str) -> None:
 DEFAULT_NAMES = _ensure_seat_names()
 
 HTML_TEMPLATE = """<!DOCTYPE html>
-<html lang=\"ja\">
+<html lang="ja">
   <head>
-    <meta charset=\"utf-8\" />
-    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
-    <title>座席表プレビュー</title>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>\u5916\u89b3\u691c\u67fb\u5e2d\u30d7\u30ec\u30d3\u30e5\u30fc</title>
     <style>
       * {
         box-sizing: border-box;
@@ -176,7 +138,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         min-height: 100vh;
         background: #f3f3f3;
         color: #111;
-        font-family: \"Noto Sans JP\", \"Segoe UI\", system-ui, sans-serif;
+        font-family: "Noto Sans JP", "Segoe UI", system-ui, sans-serif;
       }
       body.editing main {
         grid-template-columns: minmax(0, 1fr) 320px;
@@ -375,40 +337,40 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       <section class="grid-area">
         <div class="grid-header">
           <div class="title-block">
-            <h1 id="board-title">検査ロット振分け表</h1>
-            <p class="edit-instruction">ドラッグ&ドロップ・ダブルクリックで編集し、「JSONダウンロード」で保存。</p>
+            <h1 id="board-title">\u5916\u89b3\u691c\u67fb\u5e2d\u30ec\u30a4\u30a2\u30a6\u30c8</h1>
+            <p class="edit-instruction">\u5e2d\u3092\u30c9\u30e9\u30c3\u30b0&\u30c9\u30ed\u30c3\u30d7\u3067\u5165\u308c\u66ff\u3048\u3001\u30c0\u30d6\u30eb\u30af\u30ea\u30c3\u30af\u3067\u62c5\u5f53\u8005\u3092\u5909\u66f4\u3067\u304d\u307e\u3059\u3002</p>
           </div>
           <div class="grid-actions">
-            <button id="save-json" class="primary mode-toggle" type="button">変更を保存</button>
-            <button id="toggle-edit" class="secondary mode-toggle" type="button">座席編集モード</button>
+            <button id="save-json" class="primary mode-toggle" type="button">\u5909\u66f4\u3092\u4fdd\u5b58</button>
+            <button id="toggle-edit" class="secondary mode-toggle" type="button">\u7de8\u96c6\u30e2\u30fc\u30c9</button>
           </div>
         </div>
         <div id="seat-grid" aria-live="polite"></div>
         <div id="inspector-dropdown" class="inspector-dropdown">
-          <div class="dropdown-title">検査員を選択</div>
+          <div class="dropdown-title">\u691c\u67fb\u54e1\u3092\u9078\u629e</div>
           <div id="inspector-list"></div>
         </div>
       </section>
       <aside class="editor-panel">
-        <h2>座席編集パネル</h2>
+        <h2>\u5ea7\u5e2d\u7de8\u96c6\u30d1\u30cd\u30eb</h2>
         <label>
-          座席ID
+          \u5ea7\u5e2dID
           <input type="text" id="seat-id" readonly />
         </label>
         <label>
-          検査員名
+          \u5ea7\u5e2d\u62c5\u5f53
           <input type="text" id="seat-name" list="inspector-names" />
         </label>
         <label>
-          行（row）
+          \u884c(row)
           <input type="number" id="seat-row" min="1" step="0.5" />
         </label>
         <label>
-          列（col）
+          \u5217(col)
           <input type="number" id="seat-col" min="1" step="0.5" />
         </label>
-        <button id="apply-seat" class="primary" type="button">適用</button>
-        <button id="clear-seat" class="secondary" type="button">空席にする</button>
+        <button id="apply-seat" class="primary" type="button">\u9069\u7528</button>
+        <button id="clear-seat" class="secondary" type="button">\u7a7a\u5e2d\u306b\u3059\u308b</button>
       </aside>
     </main>
     <datalist id="inspector-names"></datalist>
@@ -440,7 +402,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       let currentSlotHeight = modeSizes.view.height;
       let currentSlotGap = modeSizes.view.gap;
       const boardTitle = document.getElementById("board-title");
-
 
       const uniqueInspectorNames = () =>
         Array.from(new Set(INSPECTOR_CANDIDATES.filter((value) => value && value.trim())));
@@ -507,14 +468,14 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             if (!target) {
               return;
             }
-            target.name = name === "空席" ? "" : name;
+            target.name = name === "\u7a7a\u5e2d" ? "" : name;
             renderSeats();
             updateEditorPanel();
             closeInspectorDropdown();
           });
           inspectorList.appendChild(button);
         };
-        addOption("空席");
+        addOption("\u7a7a\u5e2d");
         uniqueInspectorNames().forEach((name) => addOption(name));
       };
 
@@ -649,13 +610,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       const setEditingMode = (enabled) => {
         editingMode = enabled;
         document.body.classList.toggle("editing", enabled);
-        toggleEditButton.textContent = enabled ? "通常表示" : "座席編集モード";
+        toggleEditButton.textContent = enabled ? "\u95b2\u89a7\u30e2\u30fc\u30c9" : "\u7de8\u96c6\u30e2\u30fc\u30c9";
         const { width, height, gap } = editingMode ? modeSizes.editing : modeSizes.view;
         currentSlotWidth = width;
         currentSlotHeight = height;
         currentSlotGap = gap;
         if (boardTitle) {
-          boardTitle.textContent = editingMode ? "座席表プレビュー" : "検査ロット振分け表";
+          boardTitle.textContent = editingMode ? "\u5ea7\u5e2d\u30d7\u30ec\u30d3\u30e5\u30fc" : "\u5916\u89b3\u691c\u67fb\u5e2d\u30ec\u30a4\u30a2\u30a6\u30c8";
         }
         if (!enabled) {
           selectedSeatId = null;
@@ -708,7 +669,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           return;
         }
         if (!fileSystemAvailable()) {
-          alert("FileSystem Access API をサポートしていないか、セキュアコンテキストではありません。");
+          alert("FileSystem Access API \u3092\u30b5\u30dd\u30fc\u30c8\u3057\u3066\u3044\u306a\u3044\u305f\u3081\u3001\u3053\u306e\u30bb\u30ad\u30e5\u30ea\u30c6\u30a3\u30b3\u30f3\u30c6\u30ad\u30b9\u30c8\u3067\u306f\u4fdd\u5b58\u3067\u304d\u307e\u305b\u3093\u3002");
           return;
         }
         try {
@@ -728,7 +689,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           await writable.close();
         } catch (error) {
           if (error?.name !== "AbortError") {
-            console.error("FileSystem Access API エラー", error);
+            console.error("FileSystem Access API error", error);
           }
         }
       };
@@ -750,7 +711,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         const instruction = document.querySelector(".edit-instruction");
         if (instruction) {
           instruction.innerHTML =
-            "ドラッグ＆ドロップ・ダブルクリックで編集し、「変更を保存」ボタンを押して<br />\\\\192.168.1.200\\\\共有\\\\dev_tools\\\\外観検査振分支援システム\\\\seating_chart\\\\seating_chart.json へ上書き保存してください。";
+            "\u30c9\u30e9\u30c3\u30b0&\u30c9\u30ed\u30c3\u30d7\u3067\u5e2d\u3092\u5165\u308c\u66ff\u3048\u3001\u30c0\u30d6\u30eb\u30af\u30ea\u30c3\u30af\u3067\u62c5\u5f53\u8005\u3092\u9078\u629e\u3057\u3066\u304f\u3060\u3055\u3044\u3002<br />" +
+            "\\\\192.168.1.200\\shared\\dev_tools\\appearance_inspection\\seating_chart\\seating_chart.json \u306b\u4fdd\u5b58\u3057\u3066\u304f\u3060\u3055\u3044\u3002";
         }
       };
 
@@ -769,10 +731,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 def generate_html_from_template(chart: Dict[str, List[Dict[str, object]]]) -> None:
     sorted_names = sorted({name for name in DEFAULT_NAMES if name and name.strip()})
     inspector_json = json.dumps(sorted_names, ensure_ascii=False)
-    html = (
-        HTML_TEMPLATE.replace("SEATING_DATA_PLACEHOLDER", json.dumps(chart, ensure_ascii=False))
-        .replace("INSPECTOR_CANDIDATES_PLACEHOLDER", inspector_json)
-        .replace("SEATING_PATH_PLACEHOLDER", SEATING_JSON_PATH)
+    html = HTML_TEMPLATE.replace("SEATING_DATA_PLACEHOLDER", json.dumps(chart, ensure_ascii=False)).replace(
+        "INSPECTOR_CANDIDATES_PLACEHOLDER", inspector_json
     )
     _ensure_dir_for(SEATING_HTML_PATH)
     with open(SEATING_HTML_PATH, "w", encoding="utf-8") as handle:
@@ -782,8 +742,8 @@ def generate_html_from_template(chart: Dict[str, List[Dict[str, object]]]) -> No
 def main() -> None:
     chart = ensure_seating_json_exists()
     generate_html_from_template(chart)
-    print(f"HTML を生成しました: {SEATING_HTML_PATH}")
-    print(f"JSON を生成または更新しました: {SEATING_JSON_PATH}")
+    print(f"HTML\u3092\u751f\u6210\u3057\u307e\u3057\u305f: {SEATING_HTML_PATH}")
+    print(f"JSON\u3092\u751f\u6210\u307e\u305f\u306f\u66f4\u65b0\u3057\u307e\u3057\u305f: {SEATING_JSON_PATH}")
 
 
 if __name__ == "__main__":
