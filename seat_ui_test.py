@@ -13,6 +13,8 @@ SEATING_JSON_PATH = r"\\192.168.1.200\共有\dev_tools\外観検査振分支援�
 SEATING_HTML_PATH = r"\\192.168.1.200\共有\dev_tools\外観検査振分支援システム\seating_chart\seat_ui_test.html"
 CONFIG_ENV_PATH = "config.env"
 
+SEATING_JSON_FILE_NAME = os.path.basename(SEATING_JSON_PATH) or "seating_chart.json"
+
 GRID_POSITIONS = (
     [(1, col) for col in range(1, 9)]
     + [(2, col) for col in range(1, 9)]
@@ -73,6 +75,14 @@ def _ensure_seat_names() -> List[str]:
     return inspectors
 
 
+def _load_default_inspector_names() -> List[str]:
+    """config.env がない開発環境でも安全にインスペクタ名リストを取得するための補助関数。"""
+    try:
+        return _ensure_seat_names()
+    except (FileNotFoundError, ValueError):
+        return []
+
+
 def attach_dummy_lots(chart: Dict[str, List[Dict[str, object]]]) -> Dict[str, List[Dict[str, object]]]:
     """ダミーロットを付与（本番では実データに差し替える）。"""
     products = ["A-001", "B-145", "C-210", "D-330", "E-512", "F-021"]
@@ -102,6 +112,26 @@ def attach_dummy_lots(chart: Dict[str, List[Dict[str, object]]]) -> Dict[str, Li
 
 
 def build_initial_seating_chart(inspector_names: List[str]) -> Dict[str, List[Dict[str, object]]]:
+    """
+    座席の初期配置を作成し、検査員名と位置のみを含む辞書を返す。
+
+    1 つの seat エントリの例:
+    {
+        "id": "s1",
+        "name": "検査員名",
+        "row": 1,
+        "col": 1,
+        "lots": [
+            {
+                "lot_id": "L001",
+                "product_name": "品番XYZ",
+                "quantity": 100,
+                "sec_per_piece": 2.5
+            },
+            ...
+        ]
+    }
+    """
     entries: List[Dict[str, object]] = []
     idx = 0
     while len(entries) < len(GRID_POSITIONS):
@@ -110,19 +140,45 @@ def build_initial_seating_chart(inspector_names: List[str]) -> Dict[str, List[Di
         entries.append({"id": f"s{len(entries) + 1}", "name": name, "row": row, "col": col, "lots": []})
         idx += 1
     chart = {"seats": entries}
-    return attach_dummy_lots(chart)
+    return chart
+
+
+def attach_lots_to_chart(
+    chart: Dict[str, List[Dict[str, object]]],
+    lots_by_inspector: Dict[str, List[Dict[str, object]]],
+) -> Dict[str, List[Dict[str, object]]]:
+    """
+    既存の座席配置に lot 情報を紐づける。
+    lots_by_inspector のキーには検査員名または座席 ID を受け入れ、見つかった最初のリストを seat["lots"] にセットする。
+    """
+    seats = chart.setdefault("seats", [])
+    for seat in seats:
+        seat_name = (seat.get("name") or "").strip()
+        seat_id = seat.get("id")
+        resolved_lots: List[Dict[str, object]] = []
+        for key in (seat_name, seat.get("name"), seat_id):
+            if not key:
+                continue
+            candidate = lots_by_inspector.get(key)
+            if candidate:
+                resolved_lots = candidate
+                break
+        seat["lots"] = list(resolved_lots) if resolved_lots else []
+    return chart
 
 
 def load_seating_chart(path: str) -> Dict[str, List[Dict[str, object]]]:
+    """指定パスから seating_chart.json を読み込み、seat["lots"] を list で初期化します。"""
     with open(path, "r", encoding="utf-8") as handle:
         chart = json.load(handle)
-    for seat in chart.get("seats", []):
-        if not isinstance(seat.get("lots"), list):
-            seat["lots"] = []
+        for seat in chart.get("seats", []):
+            if not isinstance(seat.get("lots"), list):
+                seat["lots"] = []
     return chart
 
 
 def save_seating_chart(path: str, chart: Dict[str, List[Dict[str, object]]]) -> None:
+    """座席チャートを指定パスに保存し、必要ならディレクトリを作成します。"""
     directory = os.path.dirname(path)
     if directory:
         os.makedirs(directory, exist_ok=True)
@@ -141,11 +197,12 @@ def ensure_seating_json_exists() -> Dict[str, List[Dict[str, object]]]:
             pass
     inspectors = _ensure_seat_names()
     chart = build_initial_seating_chart(inspectors)
+    chart = attach_dummy_lots(chart)
     save_seating_chart(SEATING_JSON_PATH, chart)
     return chart
 
 
-DEFAULT_NAMES = _ensure_seat_names()
+DEFAULT_INSPECTOR_NAMES = _load_default_inspector_names()
 
 HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="ja">
@@ -205,6 +262,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         margin: 0;
         font-size: 0.95rem;
         color: #555;
+      }
+      .download-hint {
+        margin: 0;
+        font-size: 0.85rem;
+        color: #1f7aef;
       }
       .grid-actions {
         display: flex;
@@ -333,6 +395,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         background: #e0e0e0;
         color: #222;
       }
+      .lot-time {
+        font-size: 0.65rem;
+        color: #555;
+        margin: 0;
+        text-align: right;
+      }
       .inspector-dropdown {
         position: absolute;
         background: #fff;
@@ -409,11 +477,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             <h1 id="board-title">検査ロット振分けレイアウト（ロット移動）</h1>
             <p class="edit-instruction">座席編集モード: 座席位置の入れ替えのみ。ロット編集モード: ロットカードをドラッグで別席に移動できます。</p>
           </div>
-          <div class="grid-actions">
+        <div class="grid-actions">
             <button id="save-json" class="primary mode-toggle" type="button">変更を保存</button>
             <button id="toggle-edit" class="secondary mode-toggle" type="button">座席編集モード</button>
           </div>
         </div>
+        <p class="download-hint" id="json-hint"></p>
         <div id="seat-grid" aria-live="polite"></div>
         <div id="inspector-dropdown" class="inspector-dropdown">
           <div class="dropdown-title">検査員を選択</div>
@@ -431,9 +500,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       </aside>
     </main>
     <datalist id="inspector-names"></datalist>
-    <script>
-      const seatingData = SEATING_DATA_PLACEHOLDER;
-      const INSPECTOR_CANDIDATES = INSPECTOR_CANDIDATES_PLACEHOLDER;
+      <script>
+        const seatingData = SEATING_DATA_PLACEHOLDER;
+        const INSPECTOR_CANDIDATES = INSPECTOR_CANDIDATES_PLACEHOLDER;
+        const SEATING_JSON_PATH = SEATING_JSON_PATH_PLACEHOLDER;
+        const SEATING_JSON_FILE_NAME = SEATING_JSON_FILE_NAME_PLACEHOLDER;
       const seats = Array.isArray(seatingData.seats) ? seatingData.seats : [];
       let selectedSeatId = null;
       let draggingSeatId = null;
@@ -602,6 +673,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       const calculateTotalSecondsForSeat = (seat) => {
         const lots = Array.isArray(seat.lots) ? seat.lots : [];
         return lots.reduce((acc, lot) => {
+          const inspectionTimeHours = Number(lot.inspection_time);
+          if (!Number.isNaN(inspectionTimeHours) && inspectionTimeHours > 0) {
+            return acc + inspectionTimeHours * 3600;
+          }
           const quantity = Number(lot.quantity) || 0;
           const secPerPiece = Number(lot.sec_per_piece) || 0;
           return acc + quantity * secPerPiece;
@@ -644,6 +719,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         line.textContent = `${product} ｜ ${process}`;
 
         lotCard.appendChild(line);
+        const inspectionTime = Number(lot.inspection_time) || 0;
 
         lotCard.addEventListener("dragstart", (event) => {
           if (editingMode) {
@@ -825,36 +901,38 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           return;
         }
         if (!fileSystemAvailable()) {
-          alert("FileSystem Access API をサポートしていないため、このセキュリティコンテキストでは保存できません。");
+          alert("FileSystem Access API をサポートしていない環境では保存できません。");
           return;
         }
         try {
           const payload = craftJsonPayload();
-          const handle = await window.showSaveFilePicker({
-            suggestedName: "seating_chart.json",
-            types: [
-              {
-                description: "JSON Files",
-                accept: { "application/json": [".json"] },
-              },
-            ],
-            excludeAcceptAllOption: true,
-          });
-          const writable = await handle.createWritable();
-          await writable.write(JSON.stringify(payload, null, 2));
-          await writable.close();
-        } catch (error) {
-          if (error?.name !== "AbortError") {
-            console.error("FileSystem Access API error", error);
-          }
+        const handle = await window.showSaveFilePicker({
+          suggestedName: SEATING_JSON_FILE_NAME,
+          types: [
+            {
+              description: "JSON Files",
+              accept: { "application/json": [".json"] },
+            },
+          ],
+          excludeAcceptAllOption: true,
+        });
+        const writable = await handle.createWritable();
+        await writable.write(JSON.stringify(payload, null, 2));
+        await writable.close();
+        alert(`${SEATING_JSON_FILE_NAME} を保存しました。${SEATING_JSON_PATH} に上書きしてください。`);
+      } catch (error) {
+        if (error?.name !== "AbortError") {
+          console.error("FileSystem Access API error", error);
         }
-      };
-
-      if (saveButton) {
-        saveButton.addEventListener("click", saveJsonFileSystem);
       }
+    };
 
-      document.addEventListener("click", (event) => {
+
+    if (saveButton) {
+      saveButton.addEventListener("click", saveJsonFileSystem);
+    }
+
+    document.addEventListener("click", (event) => {
         if (!editingMode) {
           return;
         }
@@ -865,10 +943,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
       const setInstructionContent = () => {
         const instruction = document.querySelector(".edit-instruction");
+        const downloadHint = document.getElementById("json-hint");
         if (instruction) {
-          instruction.innerHTML =
-            "座席編集モードでは座席の位置入れ替えのみ。ロット編集モードではロットカードをドラッグして別席に移動できます。<br />" +
-            "\\\\192.168.1.200\\shared\\dev_tools\\appearance_inspection\\seating_chart\\seating_chart.json に保存してください。";
+          instruction.innerHTML = `Seat edit mode allows drag-and-drop adjustments. Save ${SEATING_JSON_FILE_NAME} and overwrite ${SEATING_JSON_PATH}.`;
+        }
+        if (downloadHint) {
+          downloadHint.textContent = `Save path: ${SEATING_JSON_PATH}`;
         }
       };
 
@@ -884,23 +964,37 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 """
 
 
-def generate_html_from_template(chart: Dict[str, List[Dict[str, object]]]) -> None:
-    sorted_names = sorted({name for name in DEFAULT_NAMES if name and name.strip()})
+def generate_html(
+    chart: Dict[str, List[Dict[str, object]]],
+    output_path: str,
+    inspector_candidates: Optional[List[str]] = None,
+) -> None:
+    """
+    HTML_TEMPLATE にシートを埋め込み、座席UIを生成する共通関数。
+    inspector_candidates を指定すれば autocomplete 候補を制御できます。
+    """
+    candidates = inspector_candidates or DEFAULT_INSPECTOR_NAMES
+    sorted_names = sorted({name for name in candidates if name and name.strip()})
     inspector_json = json.dumps(sorted_names, ensure_ascii=False)
     html = (
         HTML_TEMPLATE.replace("SEATING_DATA_PLACEHOLDER", json.dumps(chart, ensure_ascii=False))
         .replace("INSPECTOR_CANDIDATES_PLACEHOLDER", inspector_json)
+        .replace("SEATING_JSON_PATH_PLACEHOLDER", json.dumps(SEATING_JSON_PATH, ensure_ascii=False))
+        .replace(
+            "SEATING_JSON_FILE_NAME_PLACEHOLDER",
+            json.dumps(SEATING_JSON_FILE_NAME, ensure_ascii=False),
+        )
     )
-    directory = os.path.dirname(SEATING_HTML_PATH)
+    directory = os.path.dirname(output_path)
     if directory:
         os.makedirs(directory, exist_ok=True)
-    with open(SEATING_HTML_PATH, "w", encoding="utf-8") as handle:
+    with open(output_path, "w", encoding="utf-8") as handle:
         handle.write(html)
 
 
 def main() -> None:
     chart = ensure_seating_json_exists()
-    generate_html_from_template(chart)
+    generate_html(chart, SEATING_HTML_PATH)
     print(f"HTMLを生成しました: {SEATING_HTML_PATH}")
     print(f"JSONを生成または更新しました: {SEATING_JSON_PATH}")
 

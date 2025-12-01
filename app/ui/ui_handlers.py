@@ -6,8 +6,10 @@
 import os
 import sys
 from pathlib import Path
+from collections import defaultdict
 import warnings  # 警告抑制のため
 import webbrowser
+from typing import List
 
 # pandasのUserWarningを抑制（SQLAlchemy接続の推奨警告）
 warnings.filterwarnings('ignore', category=UserWarning, message='.*pandas only supports SQLAlchemy.*')
@@ -41,6 +43,16 @@ from app.assignment.inspector_assignment_service import InspectorAssignmentManag
 from app.services.cleaning_request_service import get_cleaning_lots
 from app.config_manager import AppConfigManager
 from app.utils.path_resolver import resolve_resource_path
+
+from seat_ui_test import (
+    SEATING_JSON_PATH,
+    SEATING_HTML_PATH,
+    build_initial_seating_chart,
+    attach_lots_to_chart,
+    load_seating_chart,
+    save_seating_chart,
+    generate_html,
+)
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import matplotlib.font_manager as fm
@@ -5995,10 +6007,43 @@ class ModernDataExtractorUI:
                 width=100,
                 height=30,
                 font=ctk.CTkFont(family="Yu Gothic", size=12, weight="bold"),
-                fg_color="#10B981",
-                hover_color="#059669"
+                fg_color="#6B7280",
+                hover_color="#4B5563"
             )
             self.graph_toggle_button.pack(side="right", padx=(0, 25))
+
+            seating_buttons_frame = ctk.CTkFrame(button_frame, fg_color="transparent")
+            seating_buttons_frame.pack(side="right", padx=(0, 12))
+
+            self.seating_reflect_button = ctk.CTkButton(
+                seating_buttons_frame,
+                text="座席結果反映",
+                command=self.apply_seating_chart_results,
+                width=140,
+                height=30,
+                font=ctk.CTkFont(family="Yu Gothic", size=12, weight="bold"),
+                fg_color="#10B981",
+                hover_color="#059669",
+                corner_radius=10,
+                border_width=0,
+                text_color="white"
+            )
+            self.seating_reflect_button.pack(side="right")
+
+            self.seating_view_button = ctk.CTkButton(
+                seating_buttons_frame,
+                text="座席表",
+                command=self.open_seating_chart,
+                width=110,
+                height=30,
+                font=ctk.CTkFont(family="Yu Gothic", size=12, weight="bold"),
+                fg_color="#1F7AEF",
+                hover_color="#2563EB",
+                corner_radius=10,
+                border_width=0,
+                text_color="white"
+            )
+            self.seating_view_button.pack(side="right", padx=(25, 0))
             
             # テーブルフレーム
             table_frame = tk.Frame(inspector_frame)
@@ -6315,6 +6360,225 @@ class ModernDataExtractorUI:
         except:
             pass
     
+    def open_seating_chart(self):
+        """Export current lot assignments to the seating UI."""
+        if self.current_inspector_data is None or self.current_inspector_data.empty:
+            messagebox.showwarning("Seat chart", "Inspector assignment data is not available.")
+            return
+        lots_by_inspector = self._serialize_inspector_lots_for_seating()
+        logger.info(
+            "serialize_inspector_lots_for_seating result: {} entries",
+            {k: len(v) for k, v in lots_by_inspector.items()},
+        )
+        if not lots_by_inspector:
+            messagebox.showinfo("Seat chart", "No lot data is available for seating layout export.")
+            return
+        inspector_names = self._resolve_inspector_names_for_seating()
+        if not inspector_names:
+            inspector_names = list(lots_by_inspector.keys())
+        chart = None
+        if os.path.exists(SEATING_JSON_PATH):
+            try:
+                chart = load_seating_chart(SEATING_JSON_PATH)
+                if not chart.get("seats"):
+                    chart = None
+            except Exception:
+                chart = None
+        if chart is None:
+            chart = build_initial_seating_chart(inspector_names)
+        chart = attach_lots_to_chart(chart, lots_by_inspector)
+        try:
+            save_seating_chart(SEATING_JSON_PATH, chart)
+            generate_html(chart, SEATING_HTML_PATH, inspector_candidates=inspector_names)
+            webbrowser.open(SEATING_HTML_PATH)
+            self.log_message(f"Seat chart generated: {SEATING_HTML_PATH}")
+        except Exception as exc:
+            messagebox.showerror("Seat chart", f"Failed to generate seat chart: {exc}")
+            logger.error("Seat chart export failed", exc_info=True)
+
+    def apply_seating_chart_results(self):
+        """Update the assignment table from the seating_chart.json file."""
+        if self.current_inspector_data is None or self.current_inspector_data.empty:
+            messagebox.showwarning("Seat chart sync", "Inspector assignment table is empty.")
+            return
+        if not os.path.exists(SEATING_JSON_PATH):
+            messagebox.showwarning("Seat chart sync", f"JSON file not found: {SEATING_JSON_PATH}")
+            return
+        try:
+            chart = load_seating_chart(SEATING_JSON_PATH)
+        except Exception as exc:
+            messagebox.showerror("Seat chart sync", f"Failed to load seating JSON: {exc}")
+            logger.error("Seat chart load failed", exc_info=True)
+            return
+        lot_col_mapping = {}
+        rowcol_to_inspector = {}
+        for seat in chart.get("seats", []):
+            inspector_name = (seat.get("name") or "").strip()
+            if not inspector_name:
+                continue
+            for lot in seat.get("lots", []):
+                lot_id = lot.get("lot_id")
+                source_row = lot.get("source_row_index")
+                source_col = lot.get("source_inspector_col")
+                if lot_id and source_col:
+                    lot_col_mapping[(lot_id, source_col)] = inspector_name
+                if source_row is not None and source_col:
+                    rowcol_to_inspector[(str(source_row), source_col)] = inspector_name
+        if not lot_col_mapping and not rowcol_to_inspector:
+            messagebox.showinfo("Seat chart sync", "Seating chart has no lot assignments.")
+            return
+        df = self.current_inspector_data.copy()
+        inspector_cols = [col for col in df.columns if col.startswith("検査員")]
+        lot_id_candidates = ["生産ロットID", "ロットID", "LotID"]
+        updated = 0
+        for row_index, row in df.iterrows():
+            lot_id_value = None
+            for candidate in lot_id_candidates:
+                if candidate in df.columns:
+                    value = row.get(candidate)
+                    if pd.notna(value) and str(value).strip():
+                        lot_id_value = str(value).strip()
+                        break
+            if not lot_id_value:
+                lot_id_value = None
+            row_modified = False
+            for inspector_col in inspector_cols:
+                assigned = rowcol_to_inspector.get((str(row_index), inspector_col))
+                if assigned:
+                    if df.at[row_index, inspector_col] != assigned:
+                        df.at[row_index, inspector_col] = assigned
+                        updated += 1
+                        row_modified = True
+                    continue
+                if lot_id_value:
+                    new_inspector = lot_col_mapping.get((lot_id_value, inspector_col))
+                    if new_inspector:
+                        if df.at[row_index, inspector_col] != new_inspector:
+                            df.at[row_index, inspector_col] = new_inspector
+                            updated += 1
+                            row_modified = True
+            if row_modified:
+                self._recalculate_inspector_count_and_divided_time(df, row_index)
+        if updated == 0:
+            messagebox.showinfo("Seat chart sync", "No matching lots were updated.")
+            return
+        self.current_inspector_data = df
+        self.display_inspector_assignment_table(df, preserve_scroll_position=True)
+        self.update_detail_popup_if_open()
+        self.log_message(f"Applied seating results to {updated} lots.")
+
+    def _serialize_inspector_lots_for_seating(self):
+        """Collect lots keyed by the inspector who owns the first assignment column."""
+        df = self.current_inspector_data
+        if df is None or df.empty:
+            return {}
+        logger.info("serialize_inspector_lots_for_seating columns={}", df.columns.tolist())
+        if not df.empty:
+            logger.info("sample row: {}", df.iloc[0].to_dict())
+        inspector_cols = [
+            col for col in df.columns
+            if col.startswith("検査員") and col[len("検査員"):].isdigit()
+        ]
+        lot_id_candidates = ["生産ロットID", "ロットID", "LotID"]
+        product_column_candidates = ["品番", "製品番号", "製品名", "品名"]
+        lots = defaultdict(list)
+        for row_index, row in df.iterrows():
+            lot_id = ""
+            for candidate in lot_id_candidates:
+                if candidate in df.columns:
+                    value = row.get(candidate)
+                    if pd.notna(value):
+                        candidate_id = str(value).strip()
+                        if candidate_id:
+                            lot_id = candidate_id
+                            break
+            if not lot_id:
+                lot_id = self._derive_lot_key(row, product_column_candidates)
+            if not lot_id:
+                lot_id = f"lot-{row_index}"
+            product_name = ""
+            for candidate in product_column_candidates:
+                if candidate in df.columns:
+                    value = row.get(candidate)
+                    if pd.notna(value):
+                        cleaned = str(value).strip()
+                        if cleaned:
+                            product_name = cleaned
+                            break
+            process_name = ""
+            if "現在工程名" in df.columns:
+                value = row.get("現在工程名")
+                if pd.notna(value):
+                    process_name = str(value).strip()
+            inspection_time = 0.0
+            value = None
+            if "分割検査時間" in df.columns:
+                value = row.get("分割検査時間")
+            elif "検査時間" in df.columns:
+                value = row.get("検査時間")
+            if pd.notna(value):
+                try:
+                    inspection_time = float(value)
+                except (TypeError, ValueError):
+                    inspection_time = 0.0
+            sec_per_piece = inspection_time * 3600.0
+            for inspector_col in inspector_cols:
+                name_value = row.get(inspector_col)
+                if not (pd.notna(name_value) and str(name_value).strip()):
+                    continue
+                inspector_name = str(name_value).strip()
+                lots[inspector_name].append({
+                    "lot_id": lot_id,
+                    "product_name": product_name,
+                    "sec_per_piece": sec_per_piece,
+                    "inspection_time": inspection_time,
+                    "source_row_index": str(row_index),
+                    "source_inspector_col": inspector_col,
+                    "process_name": process_name,
+                })
+        return dict(lots)
+
+    def _derive_lot_key(self, row, product_column_candidates):
+        """品番・ロット数量・指示日から代替の lot_id を構築"""
+        parts: List[str] = []
+        for candidate in product_column_candidates:
+            value = row.get(candidate)
+            if pd.notna(value):
+                clean = str(value).strip()
+                if clean:
+                    parts.append(clean)
+                    break
+        if "ロット数量" in row.index:
+            value = row.get("ロット数量")
+            if pd.notna(value):
+                parts.append(str(value).strip())
+        if "指示日" in row.index:
+            value = row.get("指示日")
+            if pd.notna(value):
+                parts.append(str(value).strip())
+        return "_".join(parts) if parts else ""
+    def _resolve_inspector_names_for_seating(self):
+        """Return inspector names derived from the master or current table."""
+        names = []
+        if self.inspector_master_data is not None and "#氏名" in self.inspector_master_data.columns:
+            seen = set()
+            for raw in self.inspector_master_data["#氏名"].dropna().astype(str):
+                candidate = raw.strip()
+                if candidate and candidate not in seen:
+                    seen.add(candidate)
+                    names.append(candidate)
+            return names
+        if self.current_inspector_data is not None:
+            inspector_cols = [col for col in self.current_inspector_data.columns if col.startswith("検査員")]
+            seen = set()
+            for col in inspector_cols:
+                for raw in self.current_inspector_data[col].dropna().astype(str):
+                    candidate = raw.strip()
+                    if candidate and candidate not in seen:
+                        seen.add(candidate)
+                        names.append(candidate)
+        return names
+
     def change_inspector_dialog(self, row_index_in_tree, col_name, col_index, current_inspector, inspector_df):
         """検査員を変更するダイアログを表示"""
         try:
