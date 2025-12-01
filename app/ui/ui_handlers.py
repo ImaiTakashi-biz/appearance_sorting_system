@@ -44,7 +44,7 @@ from app.services.cleaning_request_service import get_cleaning_lots
 from app.config_manager import AppConfigManager
 from app.utils.path_resolver import resolve_resource_path
 
-from seat_ui_test import (
+from app.seat_ui import (
     SEATING_JSON_PATH,
     SEATING_HTML_PATH,
     build_initial_seating_chart,

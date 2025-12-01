@@ -9,11 +9,10 @@ from typing import Dict, List, Optional
 # - load_seating_chart / save_seating_chart / build_initial_seating_chart は共通ライブラリに移行する想定。
 # - attach_dummy_lots は実システムではDB/APIアクセスで置き換えられる設計にしています。
 
-SEATING_JSON_PATH = r"\\192.168.1.200\共有\dev_tools\外観検査振分支援システム\seating_chart\seating_chart.json"
-SEATING_HTML_PATH = r"\\192.168.1.200\共有\dev_tools\外観検査振分支援システム\seating_chart\seat_ui_test.html"
 CONFIG_ENV_PATH = "config.env"
+DEFAULT_SEATING_JSON_PATH = r"\\192.168.1.200\共有\dev_tools\外観検査振分支援システム\seating_chart\seating_chart.json"
+DEFAULT_SEATING_HTML_PATH = r"\\192.168.1.200\共有\dev_tools\外観検査振分支援システム\seating_chart\seat_ui.html"
 
-SEATING_JSON_FILE_NAME = os.path.basename(SEATING_JSON_PATH) or "seating_chart.json"
 
 GRID_POSITIONS = (
     [(1, col) for col in range(1, 9)]
@@ -36,6 +35,12 @@ def _parse_config_env() -> Dict[str, str]:
             key, value = line.split("=", 1)
             parsed[key.strip()] = value.strip()
     return parsed
+
+
+_ENV_CONFIG = _parse_config_env()
+SEATING_JSON_PATH = _ENV_CONFIG.get("SEATING_JSON_PATH", DEFAULT_SEATING_JSON_PATH)
+SEATING_HTML_PATH = _ENV_CONFIG.get("SEATING_HTML_PATH", DEFAULT_SEATING_HTML_PATH)
+SEATING_JSON_FILE_NAME = os.path.basename(SEATING_JSON_PATH) or "seating_chart.json"
 
 
 def _load_inspectors_from_csv(path: str) -> List[str]:
@@ -222,9 +227,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       body.editing main {
         grid-template-columns: minmax(0, 1fr) 340px;
       }
-      body:not(.editing) .edit-instruction,
-      body:not(.editing) .editor-panel,
-      body:not(.editing) .download-hint {
+      body:not(.editing) .editor-panel {
         display: none;
       }
       main {
@@ -531,6 +534,40 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       let currentSlotHeight = modeSizes.view.height;
       let currentSlotGap = modeSizes.view.gap;
       const boardTitle = document.getElementById("board-title");
+      const buildFileUrl = (path) => {
+        if (!path) {
+          return null;
+        }
+        const normalized = path.trim().replace(/\\\\+/g, "/");
+        if (normalized.startsWith("//")) {
+          return encodeURI(`file:${normalized}`);
+        }
+        if (/^[A-Za-z]:/.test(normalized)) {
+          return encodeURI(`file:///${normalized}`);
+        }
+        return encodeURI(normalized);
+      };
+      const loadLatestSeatingData = async () => {
+        const url = buildFileUrl(SEATING_JSON_PATH);
+        if (!url) {
+          return;
+        }
+        try {
+          const response = await fetch(url, { cache: "no-store" });
+          if (!response.ok) {
+            return;
+          }
+          const latest = await response.json();
+          if (!latest || !Array.isArray(latest.seats)) {
+            return;
+          }
+          seats.length = 0;
+          latest.seats.forEach((seat) => seats.push(seat));
+          renderSeats();
+        } catch (error) {
+          console.warn("Failed to load latest seating JSON:", error);
+        }
+      };
 
       const applyModeSizes = () => {
         const { width, height, gap } = editingMode ? modeSizes.editing : modeSizes.view;
@@ -897,9 +934,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       const fileSystemAvailable = () => typeof window.showSaveFilePicker === "function";
       const craftJsonPayload = () => ({ seats });
       const saveJsonFileSystem = async () => {
-        if (!editingMode) {
-          return;
-        }
         if (!fileSystemAvailable()) {
           alert("FileSystem Access API をサポートしていない環境では保存できません。");
           return;
@@ -945,7 +979,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         const instruction = document.querySelector(".edit-instruction");
         const downloadHint = document.getElementById("json-hint");
         if (instruction) {
-          instruction.innerHTML = `Seat edit mode allows drag-and-drop adjustments. Save ${SEATING_JSON_FILE_NAME} and overwrite ${SEATING_JSON_PATH}.`;
+          instruction.textContent = "";
         }
         if (downloadHint) {
           downloadHint.textContent = `Save path: ${SEATING_JSON_PATH}`;
@@ -957,6 +991,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         setEditingMode(false);
         renderSeats();
         setInstructionContent();
+        loadLatestSeatingData();
       });
     </script>
   </body>
