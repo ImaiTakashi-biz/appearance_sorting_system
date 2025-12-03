@@ -3521,11 +3521,6 @@ class ModernDataExtractorUI:
                     # ロットを順番に割り当て（itertuples()で高速化）
                     # 列名のインデックスマップを作成
                     lot_cols = {col: idx for idx, col in enumerate(product_lots.columns)}
-                    cleaning_indicators = [
-                        '処理',
-                        '現在工程名',
-                        '現在工程二次処理'
-                    ]
 
                     for lot in product_lots.itertuples(index=False):
                         if current_shortage >= 0:  # 不足数が0以上になったら終了
@@ -3541,14 +3536,14 @@ class ModernDataExtractorUI:
                             # ロットに設定がない場合は、不足データの出荷予定日を使用
                             shipping_date = product_shortage['出荷予定日'].iloc[0]
 
-                        # 出荷予定日が洗浄関連であれば"当日洗浄上がり品"として扱う
-                        is_cleaning_text = any(
-                            pd.notna(lot[lot_cols[indicator]]) and '洗浄' in str(lot[lot_cols[indicator]])
-                            for indicator in cleaning_indicators if indicator in lot_cols
-                        )
-                        is_cleaning_sheet_row = '__from_cleaning_sheet' in lot_cols and bool(lot[lot_cols['__from_cleaning_sheet']])
-                        if is_cleaning_text or is_cleaning_sheet_row:
-                            shipping_date = "当日洗浄上がり品"
+                        # 出荷予定日を洗浄依頼由来ロットに限定して「当日洗浄上がり品」に固定（実日付がある場合は保持）
+                        is_cleaning_sheet_row = ('__from_cleaning_sheet' in lot_cols and bool(lot[lot_cols['__from_cleaning_sheet']]))
+                        if is_cleaning_sheet_row:
+                            parsed_date = pd.to_datetime(shipping_date, errors='coerce')
+                            shipping_date_str = str(shipping_date).strip()
+                            textual_markers = {"当日洗浄上がり品", "当日洗浄品", "先行検査", "当日先行検査", ""}
+                            if pd.isna(parsed_date) or shipping_date_str in textual_markers:
+                                shipping_date = "当日洗浄上がり品"
 
                         # 割り当て結果を記録
                         assignment_result = {

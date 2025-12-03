@@ -255,7 +255,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       .rule-block {
         display: flex;
         flex-direction: column;
-        gap: 0.5rem;
+        gap: 0.75rem;
         align-items: flex-start;
         margin-left: 0.5rem;
       }
@@ -263,42 +263,49 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         display: none;
       }
       .legend-panel {
-        border: 1px solid #ff5c5c;
-        border-radius: 0.8rem;
-        padding: 0.35rem 0.8rem;
-        display: flex;
-        flex-direction: row;
-        flex-wrap: wrap;
-        gap: 0.75rem;
+        border-radius: 0.9rem;
+        padding: 0.4rem 1rem;
+        display: inline-flex;
+        align-items: center;
+        gap: 0.5rem;
         background: #fff;
         font-size: 0.85rem;
         color: #333;
+        font-weight: 600;
+        border: 1px solid transparent;
+        background-image:
+          linear-gradient(#fff, #fff),
+          linear-gradient(135deg, #ff4c4c, #f2a200);
+        background-origin: border-box;
+        background-clip: padding-box, border-box;
+        box-shadow: 0 0 0 2px rgba(255, 76, 76, 0.35);
+      }
+      .legend-text {
+        display: flex;
+        gap: 0.6rem;
         align-items: center;
       }
-      .legend-heading {
-        font-weight: 700;
-        font-size: 0.85rem;
-        margin: 0;
-      }
-      .legend-item {
-        display: flex;
+      .legend-label {
+        display: inline-flex;
         align-items: center;
         gap: 0.35rem;
-        color: #333;
-        font-size: 0.85rem;
       }
       .legend-swatch {
-        width: 14px;
-        height: 14px;
+        width: 12px;
+        height: 12px;
         border-radius: 3px;
         border: 1px solid rgba(0, 0, 0, 0.1);
-        display: inline-block;
+        display: inline-flex;
       }
       .legend-swatch--red {
         background: #ff4c4c;
       }
       .legend-swatch--yellow {
         background: #f4a200;
+      }
+      .legend-panel::after {
+        content: " "; 
+        display: block;
       }
       .unassigned-area {
         border: 1px solid #d9d9d9;
@@ -375,7 +382,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         font-size: 0.95rem;
         transition: border-color 0.2s ease, transform 0.2s ease;
         cursor: pointer;
-        overflow: hidden;
+        overflow: visible;
       }
       .seat-card.selected {
         border-color: #1f7aef;
@@ -420,17 +427,28 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         height: calc(5 * 20px + 0.25rem * 4);
         max-height: calc(5 * 20px + 0.25rem * 4);
         overflow-y: auto;
+        overflow-x: auto;
+        scrollbar-width: thin;
+        -ms-overflow-style: auto;
       }
       .lot-card {
         background: #f5f5f5;
         border-radius: 0.55rem;
         padding: 0.15rem 0.35rem;
         border: 1px solid #e2e2e2;
+        position: relative;
         cursor: grab;
         text-align: left;
         font-size: 0.7rem;
         line-height: 1.1;
         min-height: 18px;
+        display: inline-flex;
+        align-items: center;
+        gap: 0.25rem;
+        width: max-content;
+        min-width: 120px;
+        white-space: nowrap;
+        box-sizing: border-box;
       }
       .lot-card--today {
         background: #ffe5e5;
@@ -450,6 +468,76 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         border-color: #1f7aef;
         background: #e4f0ff;
         box-shadow: 0 0 0 2px rgba(31, 122, 239, 0.35);
+      }
+      .lot-context-menu {
+        position: absolute;
+        top: 0;
+        left: 0;
+        transform: translate(-9999px, -9999px);
+        background: #fff;
+        border-radius: 0.8rem;
+        padding: 0.8rem;
+        box-shadow: 0 12px 30px rgba(0, 0, 0, 0.25);
+        display: flex;
+        flex-direction: column;
+        gap: 0.4rem;
+        font-size: 0.85rem;
+        min-width: 220px;
+        z-index: 60;
+      }
+      .lot-context-menu.hidden {
+        opacity: 0;
+        pointer-events: none;
+      }
+      .lot-context-menu.visible {
+        opacity: 1;
+        pointer-events: auto;
+      }
+      .lot-context-menu label {
+        font-size: 0.75rem;
+        color: #555;
+      }
+      .lot-context-menu input {
+        width: 100%;
+        border-radius: 0.5rem;
+        border: 1px solid #d3d3d3;
+        padding: 0.45rem;
+        font-size: 0.8rem;
+      }
+      .lot-context-menu button {
+        width: 100%;
+        padding: 0.4rem 0.55rem;
+        font-size: 0.85rem;
+        border-radius: 0.6rem;
+        border: none;
+        cursor: pointer;
+      }
+      .lot-context-menu button.primary {
+        background: #1f7aef;
+        color: #fff;
+      }
+      .lot-context-menu button.secondary {
+        background: #f0f0f0;
+        color: #222;
+      }
+      .floating-tooltip {
+        position: fixed;
+        left: 0;
+        top: 0;
+        transform: translate(-50%, -110%);
+        background: rgba(0, 0, 0, 0.85);
+        color: #fff;
+        padding: 0.35rem 0.65rem;
+        border-radius: 0.65rem;
+        font-size: 0.75rem;
+        white-space: nowrap;
+        pointer-events: none;
+        opacity: 0;
+        transition: opacity 0.2s ease, transform 0.2s ease;
+        z-index: 120;
+      }
+      .floating-tooltip.visible {
+        opacity: 1;
       }
       .lot-line {
         font-size: 0.72rem;
@@ -583,9 +671,15 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           </div>
           <div class="rule-block">
             <div class="legend-panel">
-              <div class="legend-heading">表示ルール</div>
-              <label class="legend-item"><span class="legend-swatch legend-swatch--red"></span>当日出荷品</label>
-              <label class="legend-item"><span class="legend-swatch legend-swatch--yellow"></span>当日洗浄品</label>
+              <span class="legend-text">
+                表示ルール：
+                <span class="legend-label">
+                  <span class="legend-swatch legend-swatch--red"></span>当日出荷
+                </span>
+                <span class="legend-label">
+                  <span class="legend-swatch legend-swatch--yellow"></span>当日洗浄
+                </span>
+              </span>
             </div>
             <div class="unassigned-area" id="unassigned-area">
               <div class="unassigned-title">未割当ロット</div>
@@ -599,10 +693,17 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         </div>
         <p class="download-hint" id="json-hint"></p>
         <div id="seat-grid" aria-live="polite"></div>
+        <div id="lot-split-menu" class="lot-context-menu hidden" aria-hidden="true">
+          <label for="lot-split-count">何分割しますか？</label>
+          <input id="lot-split-count" type="number" min="2" value="2" />
+          <button id="lot-split-apply" class="primary" type="button">分割を適用</button>
+          <button id="lot-split-cancel" class="secondary" type="button">キャンセル</button>
+        </div>
         <div id="inspector-dropdown" class="inspector-dropdown">
           <div class="dropdown-title">検査員を選択</div>
           <div id="inspector-list"></div>
         </div>
+        <div id="floating-tooltip" class="floating-tooltip" aria-hidden="true"></div>
       </section>
       <aside class="editor-panel">
         <h2>座席編集パネル</h2>
@@ -640,6 +741,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       const inspectorList = document.getElementById("inspector-list");
       const inspectorDatalist = document.getElementById("inspector-names");
       const unassignedContainer = document.getElementById("unassigned-lots");
+      const lotSplitMenu = document.getElementById("lot-split-menu");
+      const lotSplitCountInput = document.getElementById("lot-split-count");
+      const lotSplitApplyButton = document.getElementById("lot-split-apply");
+      const lotSplitCancelButton = document.getElementById("lot-split-cancel");
       const modeSizes = {
         view: { width: 180, height: 150, gap: 8 },
         editing: { width: 135, height: 100, gap: 8 },
@@ -648,6 +753,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       let currentSlotHeight = modeSizes.view.height;
       let currentSlotGap = modeSizes.view.gap;
       const boardTitle = document.getElementById("board-title");
+      const gridArea = document.querySelector(".grid-area");
+      let activeSplitTarget = null;
       if (unassignedContainer) {
         unassignedContainer.addEventListener("dragover", (event) => {
           if (!editingMode && draggingLot) {
@@ -966,6 +1073,215 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         renderSeats();
       };
 
+      const distributeIntegerValue = (value, segments) => {
+        if (!Number.isFinite(value) || segments <= 0) {
+          return Array(segments).fill(0);
+        }
+        const base = Math.floor(value / segments);
+        let remainder = value - base * segments;
+        const values = [];
+        for (let index = 0; index < segments; index += 1) {
+          const extra = remainder > 0 ? 1 : 0;
+          values.push(base + extra);
+          if (extra) {
+            remainder -= 1;
+          }
+        }
+        return values;
+      };
+
+      const distributeFloatValue = (value, segments, decimals = 4) => {
+        if (!Number.isFinite(value) || segments <= 0) {
+          return Array(segments).fill(0);
+        }
+        const base = value / segments;
+        let remainder = value - base * segments;
+        remainder = Math.abs(remainder) < 1e-8 ? 0 : remainder;
+        const values = [];
+        for (let index = 0; index < segments; index += 1) {
+          let entry = base;
+          if (index === segments - 1 && remainder) {
+            entry += remainder;
+          }
+          if (typeof decimals === "number") {
+            entry = Number(entry.toFixed(decimals));
+          }
+          values.push(entry);
+        }
+        return values;
+      };
+
+      const createSplitLotsForLot = (lot, countValue) => {
+        const normalizedCount = Number.isFinite(countValue)
+          ? Math.max(2, Math.floor(countValue))
+          : 2;
+        const splitGroupLabel =
+          lot.split_group || lot.lot_id || `split-${Date.now().toString(36)}`;
+        const uniqueSuffix = Date.now().toString(36);
+        const sanitizedIdBase = `${splitGroupLabel}-${uniqueSuffix}`.replace(/[^A-Za-z0-9_-]/g, "-");
+        const inspectionHours = Number(lot.inspection_time) || 0;
+        const inspectionValues =
+          inspectionHours > 0
+            ? distributeFloatValue(inspectionHours, normalizedCount, 4)
+            : Array(normalizedCount).fill(0);
+        const quantityValue = Number(lot.quantity);
+        let quantityValues = Array(normalizedCount).fill(0);
+        if (Number.isFinite(quantityValue) && quantityValue > 0) {
+          quantityValues = Number.isInteger(quantityValue)
+            ? distributeIntegerValue(quantityValue, normalizedCount)
+            : distributeFloatValue(quantityValue, normalizedCount, 3);
+        }
+        const clones = [];
+        for (let index = 0; index < normalizedCount; index += 1) {
+          const clone = { ...lot };
+          const sequence = index + 1;
+          clone.split_group = splitGroupLabel;
+          clone.split_index = sequence;
+          clone.split_total = normalizedCount;
+          clone.lot_id = `${sanitizedIdBase}-S${sequence}`;
+          if (inspectionHours > 0) {
+            clone.inspection_time = inspectionValues[index];
+          }
+          if ("quantity" in lot || quantityValues[index]) {
+            clone.quantity = quantityValues[index];
+          }
+          clones.push(clone);
+        }
+        return clones;
+      };
+
+      const hideLotSplitMenu = () => {
+        if (!lotSplitMenu) {
+          activeSplitTarget = null;
+          return;
+        }
+        lotSplitMenu.classList.remove("visible");
+        lotSplitMenu.classList.add("hidden");
+        lotSplitMenu.setAttribute("aria-hidden", "true");
+        lotSplitMenu.style.transform = "translate(-9999px, -9999px)";
+        activeSplitTarget = null;
+      };
+
+      const openLotSplitMenu = (seatId, lotId, event) => {
+        if (!lotSplitMenu || !lotId) {
+          return;
+        }
+        activeSplitTarget = { seatId, lotId };
+        lotSplitMenu.classList.remove("hidden");
+        lotSplitMenu.classList.add("visible");
+        lotSplitMenu.setAttribute("aria-hidden", "false");
+        lotSplitMenu.style.transform = "translate(0, 0)";
+        if (lotSplitCountInput) {
+          lotSplitCountInput.value = "2";
+        }
+        const areaRect = gridArea?.getBoundingClientRect();
+        const menuWidth = lotSplitMenu.offsetWidth || 220;
+        const menuHeight = lotSplitMenu.offsetHeight || 140;
+        let left = event.clientX;
+        let top = event.clientY;
+        if (areaRect) {
+          left -= areaRect.left;
+          top -= areaRect.top;
+          const maxLeft = Math.max(8, areaRect.width - menuWidth - 8);
+          const maxTop = Math.max(8, areaRect.height - menuHeight - 8);
+          left = Math.min(Math.max(8, left), maxLeft);
+          top = Math.min(Math.max(8, top), maxTop);
+        }
+        lotSplitMenu.style.left = `${left}px`;
+        lotSplitMenu.style.top = `${top}px`;
+        lotSplitCountInput?.focus();
+      };
+
+      const applySplitForActiveLot = () => {
+        if (!activeSplitTarget) {
+          return;
+        }
+        const { seatId, lotId } = activeSplitTarget;
+        const rawCount = Number(lotSplitCountInput?.value);
+        const splitCount = Number.isFinite(rawCount) ? Math.max(2, Math.floor(rawCount)) : 2;
+        let targetLots = null;
+        if (seatId === "unassigned") {
+          targetLots = unassignedLots;
+        } else {
+          const seat = seats.find((candidate) => candidate.id === seatId);
+          if (!seat || !Array.isArray(seat.lots)) {
+            hideLotSplitMenu();
+            return;
+          }
+          targetLots = seat.lots;
+        }
+        const index = targetLots.findIndex((lot) => lot.lot_id === lotId);
+        if (index === -1) {
+          hideLotSplitMenu();
+          return;
+        }
+        const lot = targetLots[index];
+        const splitted = createSplitLotsForLot(lot, splitCount);
+        targetLots.splice(index, 1, ...splitted);
+        hideLotSplitMenu();
+        renderSeats();
+      };
+
+      const normalizeInspectorList = (value) => {
+        if (!value) {
+          return [];
+        }
+        if (Array.isArray(value)) {
+          return value.filter((item) => !!item).map((item) => item.trim()).filter(Boolean);
+        }
+        return String(value)
+          .split(/[、,;/]+/)
+          .map((item) => item.trim())
+          .filter(Boolean);
+      };
+
+      const floatingTooltip = document.getElementById("floating-tooltip");
+
+      const updateFloatingTooltipPosition = (rect) => {
+        if (!floatingTooltip || !rect) {
+          return;
+        }
+        const viewportWidth = window.innerWidth || document.documentElement.clientWidth;
+        const viewportHeight = window.innerHeight || document.documentElement.clientHeight;
+        let left = rect.left + rect.width / 2;
+        let top = rect.top;
+        const safeMargin = 24;
+        left = Math.min(Math.max(left, safeMargin), viewportWidth - safeMargin);
+        top = Math.min(Math.max(top, safeMargin), viewportHeight - safeMargin);
+        floatingTooltip.style.left = `${left}px`;
+        floatingTooltip.style.top = `${top}px`;
+      };
+
+      const showFloatingTooltip = (event, lot) => {
+        if (!floatingTooltip) {
+          return;
+        }
+        floatingTooltip.innerHTML = generateLotTooltipContent(lot);
+        floatingTooltip.classList.add("visible");
+        updateFloatingTooltipPosition(event.currentTarget.getBoundingClientRect());
+      };
+
+      const hideFloatingTooltip = () => {
+        if (!floatingTooltip) {
+          return;
+        }
+        floatingTooltip.classList.remove("visible");
+      };
+
+      const generateLotTooltipContent = (lot) => {
+        const shippingDate = normalizeShippingDateValue(lot.shipping_date) || "未設定";
+        const productName = (lot.product_name || lot.lot_id || "未設定").replace(/^品番/, "").trim();
+        const processName = (lot.process_name || "").replace(/^工程名?/, "").trim();
+        const inspectionHours = Number(lot.inspection_time) || 0;
+        const inspectionText = inspectionHours > 0 ? `${inspectionHours.toFixed(2)}h` : "未設定";
+        const lines = [
+          `出荷予定日：${shippingDate}`,
+          processName ? `工程：${processName}` : `品番：${productName}`,
+          `検査時間：${inspectionText}`,
+        ];
+        return lines.join("<br />");
+      };
+
       const createLotCard = (seatId, lot) => {
         const lotCard = document.createElement("div");
         lotCard.className = "lot-card";
@@ -987,7 +1303,28 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         line.className = "lot-line";
         line.textContent = `${product} ｜ ${process}`;
         lotCard.appendChild(line);
-        const inspectionTime = Number(lot.inspection_time) || 0;
+        lotCard.addEventListener("contextmenu", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          if (editingMode) {
+            return;
+          }
+          openLotSplitMenu(seatId, lot.lot_id, event);
+        });
+
+        lotCard.addEventListener("mouseenter", function (event) {
+          if (editingMode) {
+            return;
+          }
+          showFloatingTooltip(event, lot);
+        });
+        lotCard.addEventListener("mousemove", function (event) {
+          if (!floatingTooltip || !floatingTooltip.classList.contains("visible")) {
+            return;
+          }
+          updateFloatingTooltipPosition(event.currentTarget.getBoundingClientRect());
+        });
+        lotCard.addEventListener("mouseleave", () => hideFloatingTooltip());
 
         lotCard.addEventListener("dragstart", (event) => {
           if (editingMode) {
@@ -1113,6 +1450,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       };
 
       const renderSeats = () => {
+        hideLotSplitMenu();
+        hideFloatingTooltip();
         applyModeSizes();
         grid.innerHTML = "";
         seats
@@ -1174,17 +1513,96 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         updateEditorPanel();
       });
 
+      lotSplitApplyButton?.addEventListener("click", applySplitForActiveLot);
+      lotSplitCancelButton?.addEventListener("click", hideLotSplitMenu);
+      lotSplitCountInput?.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          applySplitForActiveLot();
+        }
+      });
+
       toggleEditButton.addEventListener("click", () => setEditingMode(!editingMode));
 
       const fileSystemAvailable = () => typeof window.showSaveFilePicker === "function";
       const craftJsonPayload = () => ({ seats });
-      const saveJsonFileSystem = async () => {
+      const HANDLE_DB_NAME = "AppearanceSortingFileHandles";
+      const HANDLE_STORE_NAME = "handles";
+      const HANDLE_KEY = "seating-chart-json";
+      let savedFileHandle = null;
+
+      const openHandleDatabase = () =>
+        new Promise((resolve, reject) => {
+          const request = window.indexedDB.open(HANDLE_DB_NAME, 1);
+          request.onupgradeneeded = () => {
+            const db = request.result;
+            if (!db.objectStoreNames.contains(HANDLE_STORE_NAME)) {
+              db.createObjectStore(HANDLE_STORE_NAME);
+            }
+          };
+          request.onsuccess = () => resolve(request.result);
+          request.onerror = () => reject(request.error);
+        });
+
+      const getPersistedHandle = async () => {
+        try {
+          const db = await openHandleDatabase();
+          const tx = db.transaction(HANDLE_STORE_NAME, "readonly");
+          const store = tx.objectStore(HANDLE_STORE_NAME);
+          return await new Promise((resolve) => {
+            const request = store.get(HANDLE_KEY);
+            request.onsuccess = () => resolve(request.result || null);
+            request.onerror = () => resolve(null);
+          });
+        } catch (error) {
+          console.warn("IndexedDB handle read failed", error);
+          return null;
+        }
+      };
+
+      const persistHandle = async (handle) => {
+        try {
+          const db = await openHandleDatabase();
+          return await new Promise((resolve) => {
+            const tx = db.transaction(HANDLE_STORE_NAME, "readwrite");
+            const store = tx.objectStore(HANDLE_STORE_NAME);
+            if (handle) {
+              store.put(handle, HANDLE_KEY);
+            } else {
+              store.delete(HANDLE_KEY);
+            }
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => resolve();
+          });
+        } catch (error) {
+          console.warn("IndexedDB handle write failed", error);
+        }
+      };
+
+      const loadPersistedFileHandle = async () => {
         if (!fileSystemAvailable()) {
-          alert("FileSystem Access API をサポートしていない環境では保存できません。");
           return;
         }
-        try {
-          const payload = craftJsonPayload();
+        const handle = await getPersistedHandle();
+        if (!handle) {
+          return;
+        }
+        const permission =
+          (await handle.queryPermission?.({ mode: "readwrite" })) ||
+          (await handle.requestPermission?.({ mode: "readwrite" }));
+        if (permission === "denied") {
+          return;
+        }
+        savedFileHandle = handle;
+      };
+
+      const requestFileHandle = async () => {
+        if (!fileSystemAvailable()) {
+          return null;
+        }
+        if (savedFileHandle) {
+          return savedFileHandle;
+        }
         const handle = await window.showSaveFilePicker({
           suggestedName: SEATING_JSON_FILE_NAME,
           types: [
@@ -1195,28 +1613,60 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           ],
           excludeAcceptAllOption: true,
         });
-        const writable = await handle.createWritable();
-        await writable.write(JSON.stringify(payload, null, 2));
-        await writable.close();
-        alert(`${SEATING_JSON_FILE_NAME} を保存しました。${SEATING_JSON_PATH} に上書きしてください。`);
-      } catch (error) {
-        if (error?.name !== "AbortError") {
+        savedFileHandle = handle;
+        await persistHandle(handle);
+        return handle;
+      };
+
+      const saveJsonFileSystem = async () => {
+        if (!fileSystemAvailable()) {
+          alert("FileSystem Access API をサポートしていない環境では保存できません。");
+          return;
+        }
+        try {
+          const handle = await requestFileHandle();
+          if (!handle) {
+            return;
+          }
+          const payload = craftJsonPayload();
+          const writable = await handle.createWritable();
+          await writable.write(JSON.stringify(payload, null, 2));
+          await writable.close();
+          alert(`${SEATING_JSON_FILE_NAME} を保存しました。${SEATING_JSON_PATH} に上書きしてください。`);
+        } catch (error) {
+          if (error?.name === "AbortError") {
+            return;
+          }
+          savedFileHandle = null;
+          await persistHandle(null);
           console.error("FileSystem Access API error", error);
         }
-      }
-    };
+      };
+
 
 
     if (saveButton) {
       saveButton.addEventListener("click", saveJsonFileSystem);
     }
+    loadPersistedFileHandle();
 
     document.addEventListener("click", (event) => {
+        hideFloatingTooltip();
+        const clickInsideLot = event.target.closest(".lot-card");
+        if (lotSplitMenu && !lotSplitMenu.contains(event.target) && !clickInsideLot) {
+          hideLotSplitMenu();
+        }
         if (!editingMode) {
           return;
         }
         if (!inspectorDropdown.contains(event.target) && !event.target.closest(".seat-card")) {
           closeInspectorDropdown();
+        }
+      });
+
+      document.addEventListener("keydown", (event) => {
+        if (event.key === "Escape") {
+          hideLotSplitMenu();
         }
       });
 

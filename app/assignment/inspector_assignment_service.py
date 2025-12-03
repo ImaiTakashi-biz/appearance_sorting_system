@@ -213,6 +213,20 @@ class InspectorAssignmentManager:
             return False
         self.same_day_same_name_relaxation_attempts[key] = attempts + 1
         return True
+
+    def _should_relax_hours_for_lot(self, product_number: str, shipping_date_str: str) -> bool:
+        """
+        特定ロットに対して勤務時間ルールや必要人数の緩和を適用すべきか
+        """
+        keywords = {"当日洗浄上がり品", "当日洗浄品", "当日先行検査", "先行検査"}
+        relax_products = {"MHK1017Z-0", "SPD20-0209"}
+        if any(product_number.startswith(prefix) for prefix in ("3D025-",)):
+            return True
+        if product_number in relax_products:
+            return True
+        if shipping_date_str in keywords or "当日洗浄" in shipping_date_str:
+            return True
+        return False
     
     def enable_log_batching(self, batch_size: int = 10) -> None:
         """
@@ -6545,12 +6559,16 @@ class InspectorAssignmentManager:
                     unassigned_process_number = unassigned_row.get('現在工程番号', '')
                     unassigned_product_name = unassigned_row.get('品名', '')
                     unassigned_product_name_str = str(unassigned_product_name).strip() if pd.notna(unassigned_product_name) else ''
-                    
+                    shipping_date_raw = unassigned_row.get('出荷予定日', '')
+                    shipping_date_str = str(shipping_date_raw).strip() if pd.notna(shipping_date_raw) else ''
+                    relax_hours = self._should_relax_hours_for_lot(unassigned_product_number, shipping_date_str)
+
                     # 必要な検査員数を計算
-                    if unassigned_inspection_time <= self.required_inspectors_threshold:
+                    threshold_for_calc = 2.5 if relax_hours else self.required_inspectors_threshold
+                    if unassigned_inspection_time <= threshold_for_calc:
                         required_inspectors = 1
                     else:
-                        required_inspectors = max(2, int(unassigned_inspection_time / self.required_inspectors_threshold) + 1)
+                        required_inspectors = max(2, int(unassigned_inspection_time / threshold_for_calc) + 1)
                         required_inspectors = min(5, required_inspectors)
                     
                     # 優先度の低いロットから検査員を取得
@@ -6613,6 +6631,8 @@ class InspectorAssignmentManager:
                                     daily_hours = self.inspector_daily_assignments.get(inspector_code, {}).get(current_date, 0.0)
                                     max_daily_hours = self.get_inspector_max_hours(inspector_code, inspector_master_df)
                                     allowed_max_hours = self._apply_work_hours_overrun(max_daily_hours)
+                                    if relax_hours:
+                                        allowed_max_hours = self._apply_same_day_work_hours_overrun(allowed_max_hours)
                                     if daily_hours + divided_time > allowed_max_hours:  # 100%まで許容
                                         continue
                                     
