@@ -71,6 +71,9 @@ class ModernDataExtractorUI:
     MIN_WINDOW_WIDTH = 1000
     MIN_WINDOW_HEIGHT = 700
     
+    # シート出力用の未割当ロットキー
+    UNASSIGNED_LOTS_KEY = "__UNASSIGNED_LOTS__"
+    
     # クラス変数としてテーブル構造をキャッシュ（高速化）
     _table_structure_cache = None
     _table_structure_cache_timestamp = None
@@ -775,6 +778,7 @@ class ModernDataExtractorUI:
             '品番': product_code,
             'ロット数': lots,
             '工程名': process_name,
+            'same_day_priority': False,
             '�Œ茟����': []
         })
         
@@ -805,13 +809,43 @@ class ModernDataExtractorUI:
             # 検査員情報がない場合は初期化
             if '固定検査員' not in item:
                 item['固定検査員'] = []
+            item.setdefault('same_day_priority', False)
             
-            item_frame = ctk.CTkFrame(self.registered_list_container, fg_color="#F3F4F6", corner_radius=6)
+            default_row_color = "#F3F4F6"
+            highlight_row_color = "#FEE2E2"
+            item_frame = ctk.CTkFrame(self.registered_list_container, fg_color=default_row_color, corner_radius=6)
             item_frame.pack(fill="x", pady=(0, 4), padx=5)
             
+            row_container = ctk.CTkFrame(item_frame, fg_color="transparent")
+            row_container.pack(side="left", fill="x", expand=True, padx=0, pady=6)
+            
+            checkbox_var = tk.BooleanVar(value=bool(item.get('same_day_priority', False)))
+            
+            def refresh_row_background(frame, var):
+                new_color = highlight_row_color if var.get() else default_row_color
+                frame.configure(fg_color=new_color)
+
+            def on_priority_toggle(var, entry):
+                entry['same_day_priority'] = var.get()
+                self.save_registered_products()
+                state_label = "ON" if var.get() else "OFF"
+                self.log_message(f"登録済み品番 '{entry['品番']}' の当日優先を{state_label}に設定しました")
+            checkbox_var.trace_add('write', lambda *args, frame=item_frame, var=checkbox_var: refresh_row_background(frame, var))
+            
+            checkbox = ctk.CTkCheckBox(
+                row_container,
+                text="当日",
+                variable=checkbox_var,
+                command=lambda var=checkbox_var, entry=item: on_priority_toggle(var, entry),
+                font=ctk.CTkFont(family="Yu Gothic", size=12, weight="bold"),
+                text_color="#111827"
+            )
+            checkbox.pack(side="left", padx=(10, 8), pady=0)
+            refresh_row_background(item_frame, checkbox_var)
+            
             # 情報表示フレーム（一行で表示）
-            info_frame = ctk.CTkFrame(item_frame, fg_color="transparent")
-            info_frame.pack(side="left", fill="x", expand=True, padx=10, pady=6)
+            info_frame = ctk.CTkFrame(row_container, fg_color="transparent")
+            info_frame.pack(side="left", fill="x", expand=True, padx=(0, 10), pady=0)
             
             # 一行で表示するフレーム
             single_row = ctk.CTkFrame(info_frame, fg_color="transparent")
@@ -1363,6 +1397,7 @@ class ModernDataExtractorUI:
                     if 'ロット数' in item and '���b�g��' not in item:
                         item['���b�g��'] = item['ロット数']
                     item.setdefault('工程名', '')
+                    item.setdefault('same_day_priority', False)
                 # UIが構築されている場合はリストを更新
                 if self.registered_list_container is not None:
                     self.update_registered_list()
@@ -3425,7 +3460,8 @@ class ModernDataExtractorUI:
                         '現在工程番号': lot[lot_cols.get('現在工程番号', -1)] if '現在工程番号' in lot_cols and pd.notna(lot[lot_cols['現在工程番号']]) else '',
                         '現在工程名': lot[lot_cols.get('現在工程名', -1)] if '現在工程名' in lot_cols and pd.notna(lot[lot_cols['現在工程名']]) else '',
                         '現在工程二次処理': lot[lot_cols.get('現在工程二次処理', -1)] if '現在工程二次処理' in lot_cols and pd.notna(lot[lot_cols['現在工程二次処理']]) else '',
-                        '生産ロットID': lot[lot_cols.get('生産ロットID', -1)] if '生産ロットID' in lot_cols and pd.notna(lot[lot_cols['生産ロットID']]) else ''
+                        '生産ロットID': lot[lot_cols.get('生産ロットID', -1)] if '生産ロットID' in lot_cols and pd.notna(lot[lot_cols['生産ロットID']]) else '',
+                        '_force_same_day_priority': bool(registered_item.get('same_day_priority', False))
                     }
                     
                     additional_assignments.append(assignment_result)
@@ -3485,13 +3521,18 @@ class ModernDataExtractorUI:
                     # ロットを順番に割り当て（itertuples()で高速化）
                     # 列名のインデックスマップを作成
                     lot_cols = {col: idx for idx, col in enumerate(product_lots.columns)}
-                    
+                    cleaning_indicators = [
+                        '処理',
+                        '現在工程名',
+                        '現在工程二次処理'
+                    ]
+
                     for lot in product_lots.itertuples(index=False):
                         if current_shortage >= 0:  # 不足数が0以上になったら終了
                             break
-                        
+
                         lot_quantity = int(lot[lot_cols['数量']]) if pd.notna(lot[lot_cols['数量']]) else 0
-                        
+
                         # 出荷予定日の決定：ロットに設定されている場合はそれを使用（洗浄二次処理依頼のロット用）
                         # ロットに「出荷予定日」列があり、値が設定されている場合はそれを使用
                         if '出荷予定日' in lot_cols and pd.notna(lot[lot_cols['出荷予定日']]):
@@ -3499,7 +3540,16 @@ class ModernDataExtractorUI:
                         else:
                             # ロットに設定がない場合は、不足データの出荷予定日を使用
                             shipping_date = product_shortage['出荷予定日'].iloc[0]
-                        
+
+                        # 出荷予定日が洗浄関連であれば"当日洗浄上がり品"として扱う
+                        is_cleaning_text = any(
+                            pd.notna(lot[lot_cols[indicator]]) and '洗浄' in str(lot[lot_cols[indicator]])
+                            for indicator in cleaning_indicators if indicator in lot_cols
+                        )
+                        is_cleaning_sheet_row = '__from_cleaning_sheet' in lot_cols and bool(lot[lot_cols['__from_cleaning_sheet']])
+                        if is_cleaning_text or is_cleaning_sheet_row:
+                            shipping_date = "当日洗浄上がり品"
+
                         # 割り当て結果を記録
                         assignment_result = {
                             '出荷予定日': shipping_date,
@@ -3519,7 +3569,7 @@ class ModernDataExtractorUI:
                             '生産ロットID': lot[lot_cols.get('生産ロットID', -1)] if '生産ロットID' in lot_cols and pd.notna(lot[lot_cols['生産ロットID']]) else ''
                         }
                         assignment_results.append(assignment_result)
-                        
+
                         # 次のロットの不足数を計算（ロット数量を加算）
                         current_shortage += lot_quantity
                         
@@ -4390,7 +4440,8 @@ class ModernDataExtractorUI:
                                 '現在工程番号': lot_row.get('現在工程番号', ''),
                                 '現在工程名': lot_row.get('現在工程名', ''),
                                 '現在工程二次処理': lot_row.get('現在工程二次処理', ''),
-                                '生産ロットID': lot_row.get('生産ロットID', '')
+                                '生産ロットID': lot_row.get('生産ロットID', ''),
+                                '__from_cleaning_sheet': True
                             }
                             additional_assignments.append(additional_assignment)
                         else:
@@ -4410,7 +4461,8 @@ class ModernDataExtractorUI:
                                 '現在工程番号': lot_row.get('現在工程番号', ''),
                                 '現在工程名': lot_row.get('現在工程名', ''),
                                 '現在工程二次処理': lot_row.get('現在工程二次処理', ''),
-                                '生産ロットID': lot_row.get('生産ロットID', '')
+                                '生産ロットID': lot_row.get('生産ロットID', ''),
+                                '__from_cleaning_sheet': True
                             }
                             additional_assignments.append(additional_assignment)
                     
@@ -6375,6 +6427,7 @@ class ModernDataExtractorUI:
         if not lots_by_inspector:
             messagebox.showinfo("Seat chart", "No lot data is available for seating layout export.")
             return
+        unassigned_lots = lots_by_inspector.pop(self.UNASSIGNED_LOTS_KEY, [])
         inspector_names = self._resolve_inspector_names_for_seating()
         if not inspector_names:
             inspector_names = list(lots_by_inspector.keys())
@@ -6389,6 +6442,7 @@ class ModernDataExtractorUI:
         if chart is None:
             chart = build_initial_seating_chart(inspector_names)
         chart = attach_lots_to_chart(chart, lots_by_inspector)
+        chart["unassigned_lots"] = unassigned_lots
         try:
             save_seating_chart(SEATING_JSON_PATH, chart)
             generate_html(chart, SEATING_HTML_PATH, inspector_candidates=inspector_names)
@@ -6484,6 +6538,41 @@ class ModernDataExtractorUI:
         lot_id_candidates = ["生産ロットID", "ロットID", "LotID"]
         product_column_candidates = ["品番", "製品番号", "製品名", "品名"]
         lots = defaultdict(list)
+        unassigned_lots = []
+        def format_shipping_date(value):
+            if value is None or (isinstance(value, float) and pd.isna(value)):
+                return ""
+            if isinstance(value, (datetime, date)):
+                return value.strftime("%Y-%m-%d")
+            if isinstance(value, pd.Timestamp):
+                return value.strftime("%Y-%m-%d")
+            text = str(value).strip()
+            return text
+
+        def normalize_inspection_time(value):
+            if value is None or (isinstance(value, float) and pd.isna(value)):
+                return None
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
+        def resolve_inspection_time(divided_value, normal_value, assigned_flag):
+            divided = normalize_inspection_time(divided_value)
+            normal = normalize_inspection_time(normal_value)
+            if assigned_flag:
+                if divided is not None and divided > 0:
+                    return divided
+                if normal is not None:
+                    return normal
+                return divided if divided is not None else 0.0
+            # unassigned: prefer normal time when available
+            if normal is not None:
+                return normal
+            if divided is not None:
+                return divided
+            return 0.0
+
         for row_index, row in df.iterrows():
             lot_id = ""
             for candidate in lot_id_candidates:
@@ -6512,32 +6601,43 @@ class ModernDataExtractorUI:
                 value = row.get("現在工程名")
                 if pd.notna(value):
                     process_name = str(value).strip()
-            inspection_time = 0.0
-            value = None
-            if "分割検査時間" in df.columns:
-                value = row.get("分割検査時間")
-            elif "検査時間" in df.columns:
-                value = row.get("検査時間")
-            if pd.notna(value):
-                try:
-                    inspection_time = float(value)
-                except (TypeError, ValueError):
-                    inspection_time = 0.0
-            sec_per_piece = inspection_time * 3600.0
+            divided_time_value = row.get("分割検査時間") if "分割検査時間" in df.columns else None
+            normal_time_value = row.get("検査時間") if "検査時間" in df.columns else None
+            shipping_date_value = ""
+            if "出荷予定日" in df.columns:
+                shipping_date_value = row.get("出荷予定日")
+            shipping_date_text = format_shipping_date(shipping_date_value)
+            lot_base = {
+                "lot_id": lot_id,
+                "product_name": product_name,
+                "sec_per_piece": 0.0,
+                "inspection_time": 0.0,
+                "source_row_index": str(row_index),
+                "shipping_date": shipping_date_text,
+                "process_name": process_name,
+            }
+            assigned = False
             for inspector_col in inspector_cols:
                 name_value = row.get(inspector_col)
                 if not (pd.notna(name_value) and str(name_value).strip()):
                     continue
                 inspector_name = str(name_value).strip()
-                lots[inspector_name].append({
-                    "lot_id": lot_id,
-                    "product_name": product_name,
-                    "sec_per_piece": sec_per_piece,
-                    "inspection_time": inspection_time,
-                    "source_row_index": str(row_index),
-                    "source_inspector_col": inspector_col,
-                    "process_name": process_name,
-                })
+                lot_entry = lot_base.copy()
+                lot_entry["source_inspector_col"] = inspector_col
+                lots[inspector_name].append(lot_entry)
+                inspection_time = resolve_inspection_time(divided_time_value, normal_time_value, True)
+                lot_entry["inspection_time"] = inspection_time
+                lot_entry["sec_per_piece"] = inspection_time * 3600.0
+                assigned = True
+            if not assigned:
+                unassigned_entry = lot_base.copy()
+                unassigned_entry["source_inspector_col"] = ""
+                inspection_time = resolve_inspection_time(divided_time_value, normal_time_value, False)
+                unassigned_entry["inspection_time"] = inspection_time
+                unassigned_entry["sec_per_piece"] = inspection_time * 3600.0
+                unassigned_lots.append(unassigned_entry)
+        if unassigned_lots:
+            lots[self.UNASSIGNED_LOTS_KEY] = unassigned_lots
         return dict(lots)
 
     def _derive_lot_key(self, row, product_column_candidates):

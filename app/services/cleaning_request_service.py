@@ -807,6 +807,7 @@ def get_cleaning_lots(
             # 出荷予定日列を確実に設定（既存の値があっても上書き）
             # Googleスプレッドシートから取得したロットは全て"当日洗浄上がり品"とする
             final_lots_df['出荷予定日'] = "当日洗浄上がり品"
+            final_lots_df['__from_cleaning_sheet'] = True
             final_lots_df = _ensure_process_info_for_lots(
                 final_lots_df,
                 process_master_df,

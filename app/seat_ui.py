@@ -252,6 +252,84 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         gap: 1rem;
         margin-bottom: 0.8rem;
       }
+      .rule-block {
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+        align-items: flex-start;
+        margin-left: 0.5rem;
+      }
+      body.editing .rule-block {
+        display: none;
+      }
+      .legend-panel {
+        border: 1px solid #ff5c5c;
+        border-radius: 0.8rem;
+        padding: 0.35rem 0.8rem;
+        display: flex;
+        flex-direction: row;
+        flex-wrap: wrap;
+        gap: 0.75rem;
+        background: #fff;
+        font-size: 0.85rem;
+        color: #333;
+        align-items: center;
+      }
+      .legend-heading {
+        font-weight: 700;
+        font-size: 0.85rem;
+        margin: 0;
+      }
+      .legend-item {
+        display: flex;
+        align-items: center;
+        gap: 0.35rem;
+        color: #333;
+        font-size: 0.85rem;
+      }
+      .legend-swatch {
+        width: 14px;
+        height: 14px;
+        border-radius: 3px;
+        border: 1px solid rgba(0, 0, 0, 0.1);
+        display: inline-block;
+      }
+      .legend-swatch--red {
+        background: #ff4c4c;
+      }
+      .legend-swatch--yellow {
+        background: #f4a200;
+      }
+      .unassigned-area {
+        border: 1px solid #d9d9d9;
+        border-radius: 0.8rem;
+        padding: 0.4rem 0.9rem;
+        background: #fff;
+        min-width: 260px;
+        min-height: 90px;
+        display: flex;
+        flex-direction: column;
+        gap: 0.25rem;
+      }
+      .unassigned-area.unassigned-drop-target {
+        border-color: #1f7aef;
+        box-shadow: 0 0 0 2px rgba(31, 122, 239, 0.25);
+      }
+      .unassigned-title {
+        font-size: 0.85rem;
+        font-weight: 700;
+        margin: 0;
+      }
+      .unassigned-lots {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.35rem;
+        min-height: 32px;
+      }
+      .unassigned-empty-state {
+        font-size: 0.78rem;
+        color: #555;
+      }
       .grid-header h1 {
         margin: 0;
         font-size: 2rem;
@@ -306,6 +384,19 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       .seat-card.drop-target {
         box-shadow: 0 0 0 3px rgba(31, 122, 239, 0.35);
       }
+      .seat-card.seat-card--today-lot {
+        border-color: #ff4c4c;
+        box-shadow: 0 16px 30px rgba(255, 76, 76, 0.35);
+      }
+      .seat-card.seat-card--same-day-cleaning {
+        border-color: #f4a200;
+        box-shadow: 0 16px 30px rgba(244, 162, 0, 0.35);
+      }
+      body.editing .seat-card.seat-card--today-lot,
+      body.editing .seat-card.seat-card--same-day-cleaning {
+        border-color: #d6d6d6;
+        box-shadow: 0 8px 20px rgba(0, 0, 0, 0.1);
+      }
       .seat-header {
         display: flex;
         align-items: center;
@@ -340,6 +431,16 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         font-size: 0.7rem;
         line-height: 1.1;
         min-height: 18px;
+      }
+      .lot-card--today {
+        background: #ffe5e5;
+        border-color: #ff6a6a;
+        color: #5a1111;
+      }
+      .lot-card--same-day-cleaning {
+        background: #fff6d8;
+        border-color: #f3c64a;
+        color: #4a3300;
       }
       .lot-card:active {
         cursor: grabbing;
@@ -477,10 +578,21 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       <section class="grid-area">
         <div class="grid-header">
           <div class="title-block">
-            <h1 id="board-title">検査ロット振分けレイアウト（ロット移動）</h1>
+            <h1 id="board-title">検査ロット振分けレイアウト</h1>
             <p class="edit-instruction">座席編集モード: 座席位置の入れ替えのみ。ロット編集モード: ロットカードをドラッグで別席に移動できます。</p>
           </div>
-        <div class="grid-actions">
+          <div class="rule-block">
+            <div class="legend-panel">
+              <div class="legend-heading">表示ルール</div>
+              <label class="legend-item"><span class="legend-swatch legend-swatch--red"></span>当日出荷品</label>
+              <label class="legend-item"><span class="legend-swatch legend-swatch--yellow"></span>当日洗浄品</label>
+            </div>
+            <div class="unassigned-area" id="unassigned-area">
+              <div class="unassigned-title">未割当ロット</div>
+              <div id="unassigned-lots" class="unassigned-lots"></div>
+            </div>
+          </div>
+          <div class="grid-actions">
             <button id="save-json" class="primary mode-toggle" type="button">変更を保存</button>
             <button id="toggle-edit" class="secondary mode-toggle" type="button">座席編集モード</button>
           </div>
@@ -509,6 +621,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         const SEATING_JSON_PATH = SEATING_JSON_PATH_PLACEHOLDER;
         const SEATING_JSON_FILE_NAME = SEATING_JSON_FILE_NAME_PLACEHOLDER;
       const seats = Array.isArray(seatingData.seats) ? seatingData.seats : [];
+      let unassignedLots = Array.isArray(seatingData.unassigned_lots) ? [...seatingData.unassigned_lots] : [];
       let selectedSeatId = null;
       let draggingSeatId = null;
       let draggingLot = null;
@@ -526,6 +639,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       const inspectorDropdown = document.getElementById("inspector-dropdown");
       const inspectorList = document.getElementById("inspector-list");
       const inspectorDatalist = document.getElementById("inspector-names");
+      const unassignedContainer = document.getElementById("unassigned-lots");
       const modeSizes = {
         view: { width: 180, height: 150, gap: 8 },
         editing: { width: 135, height: 100, gap: 8 },
@@ -534,6 +648,27 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       let currentSlotHeight = modeSizes.view.height;
       let currentSlotGap = modeSizes.view.gap;
       const boardTitle = document.getElementById("board-title");
+      if (unassignedContainer) {
+        unassignedContainer.addEventListener("dragover", (event) => {
+          if (!editingMode && draggingLot) {
+            event.preventDefault();
+            unassignedContainer.classList.add("unassigned-drop-target");
+          }
+        });
+        unassignedContainer.addEventListener("dragleave", () => {
+          unassignedContainer.classList.remove("unassigned-drop-target");
+        });
+        unassignedContainer.addEventListener("drop", (event) => {
+          event.preventDefault();
+          if (!draggingLot) {
+            return;
+          }
+          moveLot(draggingLot.seatId, "unassigned", draggingLot.lotId);
+          draggingLot = null;
+          unassignedContainer.classList.remove("unassigned-drop-target");
+          clearDropStyles();
+        });
+      }
       const buildFileUrl = (path) => {
         if (!path) {
           return null;
@@ -547,6 +682,48 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         }
         return encodeURI(normalized);
       };
+      const normalizeShippingDateValue = (value) => {
+        if (value === undefined || value === null) {
+          return "";
+        }
+        if (typeof value === "string") {
+          return value.trim();
+        }
+        if (typeof value === "number") {
+          return String(value);
+        }
+        if (value instanceof Date) {
+          return value.toISOString().split("T")[0];
+        }
+        return String(value).trim();
+      };
+      const parseShippingDateToDate = (value) => {
+        if (!value) {
+          return null;
+        }
+        const normalizedValue = value.replace(/年|月/g, "-").replace(/日/g, "").replace(/\\s+/g, " ").trim();
+        const match = normalizedValue.match(/\\d{4}[-/]\\d{1,2}[-/]\\d{1,2}/);
+        const target = match ? match[0] : normalizedValue;
+        const parsed = Date.parse(target.replace(/\\//g, "-"));
+        if (Number.isNaN(parsed)) {
+          return null;
+        }
+        const parsedDate = new Date(parsed);
+        return new Date(parsedDate.getFullYear(), parsedDate.getMonth(), parsedDate.getDate());
+      };
+      const isShippingDateToday = (value) => {
+        const parsed = parseShippingDateToDate(value);
+        if (!parsed) {
+          return false;
+        }
+        const today = new Date();
+        return (
+          parsed.getFullYear() === today.getFullYear() &&
+          parsed.getMonth() === today.getMonth() &&
+          parsed.getDate() === today.getDate()
+        );
+      };
+      const isSameDayCleaningShippingDate = (value) => /当日洗浄/.test(value);
       const loadLatestSeatingData = async () => {
         const url = buildFileUrl(SEATING_JSON_PATH);
         if (!url) {
@@ -563,6 +740,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           }
           seats.length = 0;
           latest.seats.forEach((seat) => seats.push(seat));
+          unassignedLots.length = 0;
+          if (Array.isArray(latest.unassigned_lots)) {
+            latest.unassigned_lots.forEach((lot) => unassignedLots.push(lot));
+          }
           renderSeats();
         } catch (error) {
           console.warn("Failed to load latest seating JSON:", error);
@@ -695,6 +876,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
       const clearDropStyles = () => {
         grid.querySelectorAll(".seat-card").forEach((card) => card.classList.remove("drop-target"));
+        if (unassignedContainer) {
+          unassignedContainer.classList.remove("unassigned-drop-target");
+        }
       };
 
       const updateGridDimensions = () => {
@@ -725,21 +909,61 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         return `${hours.toFixed(1)}H`;
       };
 
+      const renderUnassignedLots = () => {
+        if (!unassignedContainer) {
+          return;
+        }
+        unassignedContainer.innerHTML = "";
+        if (!unassignedLots.length) {
+          const empty = document.createElement("div");
+          empty.className = "unassigned-empty-state";
+          empty.textContent = "未割当ロットはありません";
+          unassignedContainer.appendChild(empty);
+          return;
+        }
+        unassignedLots.forEach((lot) => {
+          unassignedContainer.appendChild(createLotCard("unassigned", lot));
+        });
+      };
+
+      const removeLotFromSource = (sourceId, lotId) => {
+        if (sourceId === "unassigned") {
+          const idx = unassignedLots.findIndex((lot) => lot.lot_id === lotId);
+          if (idx === -1) {
+            return null;
+          }
+          return unassignedLots.splice(idx, 1)[0];
+        }
+        const sourceSeat = seats.find((seat) => seat.id === sourceId);
+        if (!sourceSeat || !Array.isArray(sourceSeat.lots)) {
+          return null;
+        }
+        const index = sourceSeat.lots.findIndex((lot) => lot.lot_id === lotId);
+        if (index === -1) {
+          return null;
+        }
+        return sourceSeat.lots.splice(index, 1)[0];
+      };
+
       const moveLot = (fromSeatId, toSeatId, lotId) => {
         if (!fromSeatId || !toSeatId || !lotId || fromSeatId === toSeatId) {
           return;
         }
-        const fromSeat = seats.find((seat) => seat.id === fromSeatId);
-        const toSeat = seats.find((seat) => seat.id === toSeatId);
-        if (!fromSeat || !toSeat || !Array.isArray(fromSeat.lots) || !Array.isArray(toSeat.lots)) {
+        const lot = removeLotFromSource(fromSeatId, lotId);
+        if (!lot) {
           return;
         }
-        const index = fromSeat.lots.findIndex((lot) => lot.lot_id === lotId);
-        if (index === -1) {
-          return;
+        if (toSeatId === "unassigned") {
+          unassignedLots.push(lot);
+          renderUnassignedLots();
+        } else {
+          const targetSeat = seats.find((seat) => seat.id === toSeatId);
+          if (!targetSeat || !Array.isArray(targetSeat.lots)) {
+            return;
+          }
+          targetSeat.lots.push(lot);
         }
-        const [lot] = fromSeat.lots.splice(index, 1);
-        toSeat.lots.push(lot);
+        renderSeats();
       };
 
       const createLotCard = (seatId, lot) => {
@@ -749,12 +973,19 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         lotCard.dataset.seatId = seatId;
         lotCard.dataset.lotId = lot.lot_id;
 
+        const shippingDateRaw = normalizeShippingDateValue(lot.shipping_date);
+        const hasSameDayCleaning = isSameDayCleaningShippingDate(shippingDateRaw);
+        const hasTodayShipping = !hasSameDayCleaning && isShippingDateToday(shippingDateRaw);
+        if (hasSameDayCleaning) {
+          lotCard.classList.add("lot-card--same-day-cleaning");
+        } else if (hasTodayShipping) {
+          lotCard.classList.add("lot-card--today");
+        }
         const product = (lot.product_name || lot.lot_id || "未設定").replace(/^品番/, "").trim();
         const process = (lot.process_name || "工程未設定").replace(/^工程名?/, "").trim();
         const line = document.createElement("div");
         line.className = "lot-line";
         line.textContent = `${product} ｜ ${process}`;
-
         lotCard.appendChild(line);
         const inspectionTime = Number(lot.inspection_time) || 0;
 
@@ -791,6 +1022,20 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         card.style.width = `${currentSlotWidth}px`;
         card.style.height = `${currentSlotHeight}px`;
 
+        const seatLots = Array.isArray(seat.lots) ? seat.lots : [];
+        const seatHasSameDayCleaningLot = seatLots.some((lot) =>
+          isSameDayCleaningShippingDate(normalizeShippingDateValue(lot.shipping_date))
+        );
+        const seatHasTodayLot = seatLots.some((lot) => {
+          const label = normalizeShippingDateValue(lot.shipping_date);
+          return !isSameDayCleaningShippingDate(label) && isShippingDateToday(label);
+        });
+        if (seatHasTodayLot) {
+          card.classList.add("seat-card--today-lot");
+        } else if (seatHasSameDayCleaningLot) {
+          card.classList.add("seat-card--same-day-cleaning");
+        }
+
         const hasName = !!seat.name;
         if (hasName) {
           const header = document.createElement("div");
@@ -814,8 +1059,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         if (!editingMode && hasName) {
           const lotList = document.createElement("div");
           lotList.className = "lot-list";
-          const lots = Array.isArray(seat.lots) ? seat.lots : [];
-          lots.forEach((lot) => lotList.appendChild(createLotCard(seat.id, lot)));
+          seatLots.forEach((lot) => lotList.appendChild(createLotCard(seat.id, lot)));
           card.appendChild(lotList);
         }
 
@@ -876,6 +1120,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           .sort((a, b) => (a.row === b.row ? a.col - b.col : a.row - b.row))
           .forEach((seat) => grid.appendChild(createSeatCard(seat)));
         updateGridDimensions();
+        renderUnassignedLots();
       };
 
       const setEditingMode = (enabled) => {
@@ -884,7 +1129,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         document.body.classList.toggle("editing", enabled);
         toggleEditButton.textContent = enabled ? "ロット編集モード" : "座席編集モード";
         if (boardTitle) {
-          boardTitle.textContent = editingMode ? "座席プレビュー（位置調整）" : "検査ロット振分けレイアウト（ロット移動）";
+        boardTitle.textContent = editingMode ? "座席プレビュー（位置調整）" : "検査ロット振分けレイアウト";
         }
         if (!enabled) {
           selectedSeatId = null;
