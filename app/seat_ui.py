@@ -356,6 +356,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         font-size: 0.85rem;
         color: #1f7aef;
       }
+      .save-location {
+        margin: 0.2rem 0 0;
+        font-size: 0.8rem;
+        color: #555;
+        word-break: break-all;
+      }
       .grid-actions {
         display: flex;
         gap: 0.5rem;
@@ -692,6 +698,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           </div>
         </div>
         <p class="download-hint" id="json-hint"></p>
+        <p class="download-hint save-location" id="json-path-hint"></p>
         <div id="seat-grid" aria-live="polite"></div>
         <div id="lot-split-menu" class="lot-context-menu hidden" aria-hidden="true">
           <label for="lot-split-count">何分割しますか？</label>
@@ -749,6 +756,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       const lotSplitCountInput = document.getElementById("lot-split-count");
       const lotSplitApplyButton = document.getElementById("lot-split-apply");
       const lotSplitCancelButton = document.getElementById("lot-split-cancel");
+      const saveLocationHint = document.getElementById("json-path-hint");
       const modeSizes = {
         view: { width: 180, height: 150, gap: 8 },
         editing: { width: 135, height: 100, gap: 8 },
@@ -1080,6 +1088,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           targetSeat.lots.push(lot);
         }
         renderSeats();
+      };
+      const formatSavePath = () => {
+        if (typeof SEATING_JSON_PATH !== "string") {
+          return "未設定";
+        }
+        const trimmed = SEATING_JSON_PATH.trim();
+        return trimmed || "未設定";
       };
 
       const distributeIntegerValue = (value, segments) => {
@@ -1693,6 +1708,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         }
         if (downloadHint) {
           downloadHint.textContent = `保存対象: ${SEATING_JSON_FILE_NAME}（初回は場所を選択、次回以降は自動で上書き）`;
+        }
+        if (saveLocationHint) {
+          const displayPath = formatSavePath();
+          saveLocationHint.textContent = `保存先: ${displayPath}`;
+          saveLocationHint.title = displayPath;
         }
       };
 
