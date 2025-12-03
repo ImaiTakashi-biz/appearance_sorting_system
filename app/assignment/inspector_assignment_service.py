@@ -4045,6 +4045,31 @@ class InspectorAssignmentManager:
             dict: 休暇情報辞書（休暇でない場合はNone）
         """
         return self.inspector_name_to_vacation.get(inspector_name)
+
+    def _remove_inspector_from_same_day_sets(
+        self,
+        product_number: str,
+        product_name: str,
+        inspector_code: str
+    ) -> None:
+        """当日洗浄制約のセットから検査員を除外して最新状態にする"""
+        if not inspector_code:
+            return
+
+        if product_number:
+            existing = self.same_day_cleaning_inspectors.get(product_number)
+            if existing and inspector_code in existing:
+                existing.discard(inspector_code)
+                if not existing:
+                    del self.same_day_cleaning_inspectors[product_number]
+
+        if product_name:
+            product_name_str = str(product_name).strip()
+            existing_by_name = self.same_day_cleaning_inspectors_by_product_name.get(product_name_str)
+            if existing_by_name and inspector_code in existing_by_name:
+                existing_by_name.discard(inspector_code)
+                if not existing_by_name:
+                    del self.same_day_cleaning_inspectors_by_product_name[product_name_str]
     
     def is_inspector_on_vacation(self, inspector_name: str) -> bool:
         """
@@ -6426,6 +6451,10 @@ class InspectorAssignmentManager:
                             break
                         
                         # このロットに割り当てられている検査員を取得
+                        low_priority_product_number = low_priority_row.get('品番', '')
+                        low_priority_product_name = low_priority_row.get('品名', '')
+                        low_priority_product_name_str = str(low_priority_product_name).strip() if pd.notna(low_priority_product_name) else ''
+                        
                         for i in range(1, 6):
                             inspector_col = f'検査員{i}'
                             inspector_value = low_priority_row.get(inspector_col, '')
@@ -6493,6 +6522,11 @@ class InspectorAssignmentManager:
                                     self.log_message(
                                         f"アプローチ3: 優先度の低いロット {low_priority_index} (品番: {low_priority_row['品番']}, 出荷予定日: {low_priority_shipping_date}) "
                                         f"から検査員 '{inspector_name}' (コード: {inspector_code}) を再割当てしました"
+                                    )
+                                    self._remove_inspector_from_same_day_sets(
+                                        low_priority_product_number,
+                                        low_priority_product_name_str,
+                                        inspector_code
                                     )
                                     
                                     # 履歴からこの検査員の時間を引く

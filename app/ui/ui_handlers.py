@@ -4184,7 +4184,9 @@ class ModernDataExtractorUI:
                         self.config.google_sheets_url_cleaning,
                         self.config.google_sheets_url_cleaning_instructions,
                         self.config.google_sheets_credentials_path,
-                        log_callback=self.log_message
+                        log_callback=self.log_message,
+                        process_master_path=self.config.process_master_path if self.config else None,
+                        inspection_target_keywords=self.inspection_target_keywords
                     )
                     if not cleaning_lots_df.empty:
                         self.log_message(f"洗浄二次処理依頼から {len(cleaning_lots_df)}件のロットを取得しました")

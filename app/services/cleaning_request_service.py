@@ -7,7 +7,7 @@ import re
 import pyodbc
 import pandas as pd
 from datetime import datetime, timedelta
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Tuple
 from loguru import logger
 
 from app.export.google_sheets_exporter_service import GoogleSheetsExporter
@@ -389,32 +389,140 @@ def _get_today_requests_from_sheets(exporter: GoogleSheetsExporter, sheet_name: 
         return []
 
 
+def _load_process_master(process_master_path: str, log_callback: callable) -> Optional[pd.DataFrame]:
+    """工程マスタを読み込み、存在しない/失敗時はNoneを返す"""
+    if not process_master_path:
+        return None
+    if not os.path.exists(process_master_path):
+        log_callback(f"工程マスタファイルが見つかりません: {process_master_path}")
+        return None
+    try:
+        df = pd.read_excel(process_master_path, engine='openpyxl')
+        log_callback(f"工程マスタを読み込みました: {len(df)}件")
+        return df
+    except Exception as e:
+        log_callback(f"工程マスタの読み込みに失敗しました: {str(e)}")
+        return None
+
+
+def _infer_process_info(
+    product_number: str,
+    process_master_df: pd.DataFrame,
+    inspection_target_keywords: List[str],
+    log_callback: callable
+) -> Tuple[Optional[str], Optional[str]]:
+    """工程マスタから品番とキーワードで工程番号と工程名を推定"""
+    if not product_number or process_master_df is None or process_master_df.empty:
+        return None, None
+
+    keywords = [kw.strip() for kw in inspection_target_keywords if isinstance(kw, str) and kw.strip()]
+    if not keywords:
+        return None, None
+
+    product_col = process_master_df.columns[0]
+    matching_rows = process_master_df[process_master_df[product_col] == product_number]
+    if matching_rows.empty:
+        return None, None
+
+    row = matching_rows.iloc[0]
+    for col_idx in range(1, len(process_master_df.columns)):
+        cell_value = row.iloc[col_idx]
+        if pd.isna(cell_value):
+            continue
+        cell_str = str(cell_value).strip()
+        if not cell_str:
+            continue
+        for keyword in keywords:
+            if keyword in cell_str:
+                process_number = str(process_master_df.columns[col_idx]).strip()
+                log_callback(
+                    f"工程マスタから工程番号を推定: 品番='{product_number}', "
+                    f"工程番号='{process_number}', 工程名='{cell_str}', キーワード='{keyword}'"
+                )
+                return process_number, cell_str
+    return None, None
+
+
+def _ensure_process_info_for_lots(
+    lots_df: pd.DataFrame,
+    process_master_df: Optional[pd.DataFrame],
+    inspection_target_keywords: List[str],
+    log_callback: callable
+) -> pd.DataFrame:
+    """指定されたロット群に対して工程番号/工程名が欠けていれば補完する"""
+    if lots_df.empty or process_master_df is None:
+        return lots_df
+
+    keywords = [
+        kw.strip() for kw in inspection_target_keywords if isinstance(kw, str) and kw.strip()
+    ]
+    if not keywords:
+        keywords = ["外観"]
+
+    if '現在工程名' not in lots_df.columns:
+        lots_df['現在工程名'] = ""
+    if '現在工程番号' not in lots_df.columns:
+        lots_df['現在工程番号'] = ""
+
+    for idx, row in lots_df.iterrows():
+        prod_no = str(row.get("品番", "") or "").strip()
+        if not prod_no:
+            continue
+        current_name = str(row.get("現在工程名", "") or "").strip()
+        if current_name:
+            continue
+
+        inferred_number, inferred_name = _infer_process_info(
+            prod_no,
+            process_master_df,
+            keywords,
+            log_callback
+        )
+        if inferred_name:
+            lots_df.at[idx, "現在工程名"] = inferred_name
+        if inferred_number:
+            lots_df.at[idx, "現在工程番号"] = inferred_number
+
+    return lots_df
+
+
 def get_cleaning_lots(
     connection: pyodbc.Connection,
     google_sheets_url_cleaning: str,
     google_sheets_url_cleaning_instructions: str,
     google_sheets_credentials_path: str,
-    log_callback: Optional[callable] = None
+    log_callback: Optional[callable] = None,
+    process_master_path: Optional[str] = None,
+    inspection_target_keywords: Optional[List[str]] = None
 ) -> pd.DataFrame:
     """
-    洗浄二次処理依頼と洗浄依頼からロットを取得
+    ?????????????????????
     
     Args:
-        connection: Accessデータベース接続
-        google_sheets_url_cleaning: 洗浄二次処理依頼のスプレッドシートURL
-        google_sheets_url_cleaning_instructions: 洗浄指示のスプレッドシートURL
-        google_sheets_credentials_path: Google Sheets認証情報のパス
-        log_callback: ログ出力用のコールバック関数（オプション）
+        connection: Access????????
+        google_sheets_url_cleaning: ?????????????????URL
+        google_sheets_url_cleaning_instructions: ?????????????URL
+        google_sheets_credentials_path: Google Sheets???????
+        log_callback: ?????????????????????
+        process_master_path: ??????????????????????????????
+        inspection_target_keywords: ?????????????????? ['??']?
     
     Returns:
-        pd.DataFrame: 取得したロットデータ（出荷予定日列に"当日洗浄上がり品"が設定されている）
+        pd.DataFrame: ??????????????????"????????"?????????
     """
     def log(msg):
         if log_callback:
             log_callback(msg)
         else:
             logger.info(msg)
-    
+
+    process_master_df = _load_process_master(process_master_path, log) if process_master_path else None
+    normalized_keywords = [
+        kw.strip() for kw in (inspection_target_keywords or []) if isinstance(kw, str) and kw.strip()
+    ]
+    if not normalized_keywords:
+        normalized_keywords = ["外観"]
+
     try:
         # GoogleSheetsExporterを初期化
         exporter_cleaning = GoogleSheetsExporter(
@@ -562,6 +670,17 @@ def get_cleaning_lots(
                 
                 # 号機と品番が両方存在する場合のみ追加
                 if machine and product_number:
+                    process_number = ""
+                    process_name = ""
+                    if process_master_df is not None:
+                        inferred_number, inferred_name = _infer_process_info(
+                            product_number,
+                            process_master_df,
+                            normalized_keywords,
+                            log
+                        )
+                        process_number = inferred_number or ""
+                        process_name = inferred_name or ""
                     row_data = {
                         "品番": product_number,
                         "品名": instruction.get("品名", "").strip(),
@@ -571,8 +690,8 @@ def get_cleaning_lots(
                         "数量": instruction.get("数量", "").strip(),
                         "ロット数量": instruction.get("数量", "").strip(),  # 数量をロット数量にも設定
                         "生産ロットID": "",  # 未記載
-                        "現在工程名": "",  # 未記載
-                        "現在工程番号": "",  # 未記載
+                        "現在工程名": process_name,
+                        "現在工程番号": process_number,
                         "現在工程二次処理": "",  # 未記載
                     }
                     instruction_rows.append(row_data)
@@ -688,6 +807,12 @@ def get_cleaning_lots(
             # 出荷予定日列を確実に設定（既存の値があっても上書き）
             # Googleスプレッドシートから取得したロットは全て"当日洗浄上がり品"とする
             final_lots_df['出荷予定日'] = "当日洗浄上がり品"
+            final_lots_df = _ensure_process_info_for_lots(
+                final_lots_df,
+                process_master_df,
+                normalized_keywords,
+                log
+            )
             
             log(f"洗浄二次処理依頼から {len(final_lots_df)}件のロットを取得しました（重複除去後）")
             log(f"出荷予定日: 全て「当日洗浄上がり品」に設定しました")
