@@ -9,7 +9,7 @@ from pathlib import Path
 from collections import defaultdict
 import warnings  # 警告抑制のため
 import webbrowser
-from typing import List
+from typing import Dict, List, Optional, Tuple
 
 # pandasのUserWarningを抑制（SQLAlchemy接続の推奨警告）
 warnings.filterwarnings('ignore', category=UserWarning, message='.*pandas only supports SQLAlchemy.*')
@@ -66,6 +66,7 @@ class ModernDataExtractorUI:
     # キャッシュ設定定数
     TABLE_STRUCTURE_CACHE_TTL = 3600  # 1時間（秒）
     MASTER_CACHE_TTL_MINUTES = 5  # 5分
+    ACCESS_LOTS_CACHE_TTL_SECONDS = 300  # 5分（秒）
     
     # UI設定定数
     DEFAULT_WINDOW_SIZE = "1200x800"
@@ -190,13 +191,19 @@ class ModernDataExtractorUI:
         self.cache_timestamps = {}
         self.cache_file_mtimes = {}  # ファイル更新時刻を保存（高速化）
         self.cache_ttl = timedelta(minutes=self.MASTER_CACHE_TTL_MINUTES)
-        
+
+        # Accessデータ取得キャッシュ
+        self._access_lots_cache: Dict[Tuple[str, Tuple[str, ...], Tuple[str, ...]], pd.DataFrame] = {}
+        self._access_lots_cache_timestamp: Dict[Tuple[str, Tuple[str, ...], Tuple[str, ...]], datetime] = {}
+
         # 在庫ロット（t_現品票履歴）のテーブル構造キャッシュ
         self._inventory_table_structure_cache = None
         self._inventory_table_structure_timestamp = None
         
         # 現在表示中のテーブル
         self.current_display_table = None
+        self.inspector_column_map_for_seating: Dict[str, str] = {}
+        self.seating_flow_prompt_label: Optional[ctk.CTkLabel] = None
 
         # メインスクロールのバインド状態
         self._main_scroll_bound = False
@@ -980,7 +987,9 @@ class ModernDataExtractorUI:
             button_row = ctk.CTkFrame(item_frame, fg_color="transparent")
             button_row.pack(fill="x", padx=10, pady=(6, 8))
             button_frame = ctk.CTkFrame(button_row, fg_color="transparent")
-            button_frame.pack(side="right")
+            button_frame.pack(fill="x")
+            button_frame.grid_columnconfigure(0, weight=1)
+            button_frame.grid_columnconfigure(1, weight=1)
 
             # 検査員固定ボタン
             inspector_button = ctk.CTkButton(
@@ -988,13 +997,12 @@ class ModernDataExtractorUI:
                 text="検査員固定",
                 command=lambda idx=idx: self.fix_inspectors_for_product(idx),
                 font=ctk.CTkFont(family="Yu Gothic", size=12, weight="bold"),
-                width=100,
                 height=32,
                 fg_color="#10B981" if item['固定検査員'] else "#6B7280",
                 hover_color="#059669" if item['固定検査員'] else "#4B5563",
                 text_color="white"
             )
-            inspector_button.pack(side="left", padx=(0, 5))
+            inspector_button.grid(row=0, column=0, sticky="ew", padx=(0, 5))
             
             # 登録変更ボタン
             modify_button = ctk.CTkButton(
@@ -1002,13 +1010,12 @@ class ModernDataExtractorUI:
                 text="登録変更",
                 command=lambda idx=idx: self.modify_registered_product(idx),
                 font=ctk.CTkFont(family="Yu Gothic", size=12, weight="bold"),
-                width=100,
                 height=32,
                 fg_color="#3B82F6",
                 hover_color="#2563EB",
                 text_color="white"
             )
-            modify_button.pack(side="left")
+            modify_button.grid(row=0, column=1, sticky="ew")
     
     def delete_registered_product(self, index):
         """登録された品番を削除（後方互換性のため残す）"""
@@ -2177,6 +2184,13 @@ class ModernDataExtractorUI:
         # 初期メッセージ
         self.show_initial_message()
     
+    def _set_seating_flow_prompt(self, text: Optional[str]) -> None:
+        """座席操作後の案内メッセージを更新"""
+        if self.seating_flow_prompt_label is None:
+            return
+        display_text = text or ""
+        self.seating_flow_prompt_label.configure(text=display_text)
+
     def create_data_table(self):
         """データ表示用のテーブルを作成"""
         # テーブルとスクロールバー用のフレーム
@@ -3185,6 +3199,30 @@ class ModernDataExtractorUI:
         self._inventory_table_structure_timestamp = now
         return columns, has_rows
 
+    def _build_access_cache_key(
+        self,
+        scope: str,
+        identifiers: List[str],
+        keywords: Optional[List[str]] = None
+    ) -> Tuple[str, Tuple[str, ...], Tuple[str, ...]]:
+        cleaned_ids = tuple(sorted({str(identifier).strip() for identifier in identifiers if str(identifier).strip()}))
+        keyword_tuple = tuple(keywords) if keywords else ()
+        return (scope, cleaned_ids, keyword_tuple)
+
+    def _try_get_access_cache(self, key: Tuple[str, Tuple[str, ...], Tuple[str, ...]]) -> Optional[pd.DataFrame]:
+        timestamp = self._access_lots_cache_timestamp.get(key)
+        if timestamp and (datetime.now() - timestamp).total_seconds() < self.ACCESS_LOTS_CACHE_TTL_SECONDS:
+            cached = self._access_lots_cache.get(key)
+            if cached is not None:
+                return cached.copy()
+        self._access_lots_cache.pop(key, None)
+        self._access_lots_cache_timestamp.pop(key, None)
+        return None
+
+    def _store_access_cache(self, key: Tuple[str, Tuple[str, ...], Tuple[str, ...]], df: pd.DataFrame) -> None:
+        self._access_lots_cache[key] = df.copy()
+        self._access_lots_cache_timestamp[key] = datetime.now()
+
     def get_available_lots_for_shortage(self, connection, shortage_df):
         """不足数がマイナスの品番に対して利用可能なロットを取得"""
         try:
@@ -3197,6 +3235,16 @@ class ModernDataExtractorUI:
                 self.log_message("不足数がマイナスの品番が見つかりません")
                 return pd.DataFrame()
             self.log_message(f"不足数がマイナスの品番: {len(shortage_products)}件")
+
+            cache_key = self._build_access_cache_key(
+                "shortage",
+                shortage_products,
+                self.inspection_target_keywords
+            )
+            cached_lots = self._try_get_access_cache(cache_key)
+            if cached_lots is not None:
+                self.log_message("Accessのロットデータをキャッシュから再利用しました")
+                return cached_lots
 
             actual_columns, has_rows = self._get_inventory_table_structure(connection)
             if not has_rows:
@@ -3222,12 +3270,13 @@ class ModernDataExtractorUI:
                 if self.inspection_target_keywords:
                     keyword_conditions = []
                     for keyword in self.inspection_target_keywords:
-                        escaped_keyword = keyword.replace("'", "''").replace("%", "[%]").replace("_", "[_]")
-                        keyword_conditions.append(f"現在工程名 LIKE '%{escaped_keyword}%'")
+                        escaped_keyword = keyword.replace("%", "[%]").replace("_", "[_]")
+                        keyword_conditions.append("現在工程名 LIKE ?")
+                        params.append(f"%{escaped_keyword}%")
                     if keyword_conditions:
                         keyword_filter = "(" + " OR ".join(keyword_conditions) + ")"
                         where_conditions.append(keyword_filter)
-                        self.log_message(f"検査対象キーワードでフィルタリング: {len(self.inspection_target_keywords)}件のキーワード")
+                        self.log_message(f"検査対象キーワードでフィルタリング: {len(keyword_conditions)}件のキーワード")
                 else:
                     self.log_message("検査対象キーワードが設定されていません。全てのロットを対象とします。")
 
@@ -3252,6 +3301,8 @@ class ModernDataExtractorUI:
                 self.log_message("利用可能なロットが見つかりませんでした")
                 return pd.DataFrame()
 
+            self._store_access_cache(cache_key, lots_df)
+
             self.log_message(f"利用可能なロットを取得しました: {len(lots_df)}件")
             return lots_df
 
@@ -3271,7 +3322,17 @@ class ModernDataExtractorUI:
                 return pd.DataFrame()
             
             self.log_message(f"登録済み品番のロットを取得中: {len(registered_product_numbers)}件の品番")
-            
+
+            cache_key = self._build_access_cache_key(
+                "registered",
+                registered_product_numbers,
+                self.inspection_target_keywords
+            )
+            cached_lots = self._try_get_access_cache(cache_key)
+            if cached_lots is not None:
+                self.log_message("Accessのロットデータ（登録済み品番）をキャッシュから再利用しました")
+                return cached_lots
+
             # テーブル構造を確認
             actual_columns, has_rows = self._get_inventory_table_structure(connection)
             if not has_rows:
@@ -3296,11 +3357,12 @@ class ModernDataExtractorUI:
                 if self.inspection_target_keywords:
                     keyword_conditions = []
                     for keyword in self.inspection_target_keywords:
-                        escaped_keyword = keyword.replace("'", "''").replace("%", "[%]").replace("_", "[_]")
-                        keyword_conditions.append(f"現在工程名 LIKE '%{escaped_keyword}%'")
+                        escaped_keyword = keyword.replace("%", "[%]").replace("_", "[_]")
+                        keyword_conditions.append("現在工程名 LIKE ?")
+                        params.append(f"%{escaped_keyword}%")
                     if keyword_conditions:
                         where_conditions.append("(" + " OR ".join(keyword_conditions) + ")")
-
+                        self.log_message(f"検査対象キーワードでフィルタリング: {len(keyword_conditions)}件のキーワード")
             where_clause = " AND ".join(where_conditions)
             order_conditions = ["品番"]
             if "指示日" in available_columns:
@@ -3320,7 +3382,9 @@ class ModernDataExtractorUI:
             if lots_df.empty:
                 self.log_message("登録済み品番のロットが見つかりませんでした")
                 return pd.DataFrame()
-            
+
+            self._store_access_cache(cache_key, lots_df)
+
             self.log_message(f"登録済み品番のロットを取得しました: {len(lots_df)}件")
             
             return lots_df
@@ -3479,117 +3543,120 @@ class ModernDataExtractorUI:
         try:
             if shortage_df.empty or lots_df.empty:
                 return pd.DataFrame()
-            
-            assignment_results = []
-            
+
+            if '数量' not in lots_df.columns:
+                self.log_message("ロットデータに数量列がありません")
+                return pd.DataFrame()
+
+            negative_shortage = shortage_df[shortage_df['不足数'] < 0].copy()
+            if negative_shortage.empty:
+                return pd.DataFrame()
+
+            grouped_shortage = (
+                negative_shortage.groupby('品番', sort=False, as_index=False)
+                .first()
+            )
+            grouped_shortage['required_qty'] = grouped_shortage['不足数'].abs()
+            grouped_shortage = grouped_shortage[grouped_shortage['required_qty'] > 0]
+            if grouped_shortage.empty:
+                return pd.DataFrame()
+
+            grouped_shortage = grouped_shortage.set_index('品番', drop=False)
+            grouped_shortage = grouped_shortage.rename(columns={'不足数': 'initial_shortage'})
+            shortage_products = grouped_shortage.index.tolist()
+
+            filtered_lots = lots_df[lots_df['品番'].isin(shortage_products)].copy()
+            if filtered_lots.empty:
+                return pd.DataFrame()
+
+            if '指示日' in filtered_lots.columns:
+                filtered_lots['_sort_value'] = filtered_lots['指示日'].apply(
+                    lambda x: str(x) if pd.notna(x) else ''
+                )
+                filtered_lots = filtered_lots.sort_values(['品番', '_sort_value'], na_position='last')
+                filtered_lots = filtered_lots.drop(columns=['_sort_value'])
+            else:
+                filtered_lots = filtered_lots.sort_values('品番')
+
+            filtered_lots['lot_quantity'] = pd.to_numeric(filtered_lots['数量'], errors='coerce').fillna(0)
+            filtered_lots['cum_qty'] = filtered_lots.groupby('品番')['lot_quantity'].cumsum()
+            filtered_lots['prev_cum_qty'] = filtered_lots['cum_qty'] - filtered_lots['lot_quantity']
+
+            filtered_lots = filtered_lots.merge(
+                grouped_shortage[['initial_shortage', 'required_qty']],
+                left_on='品番',
+                right_index=True,
+                how='inner'
+            )
+
+            filtered_lots = filtered_lots[filtered_lots['required_qty'].notna() & (filtered_lots['required_qty'] > 0)]
+            if filtered_lots.empty:
+                self.log_message("ロット割り当て対象の不足品番が見つかりません")
+                return pd.DataFrame()
+
+            selected_mask = filtered_lots['prev_cum_qty'] < filtered_lots['required_qty']
+            selected_lots = filtered_lots[selected_mask].copy()
+            if selected_lots.empty:
+                self.log_message("ロット割り当て結果がありません")
+                return pd.DataFrame()
+
+            selected_lots['不足数'] = selected_lots['initial_shortage'] + selected_lots['prev_cum_qty']
+
+            if '出荷予定日' in selected_lots.columns:
+                shipping_series = selected_lots['出荷予定日'].fillna('')
+            else:
+                shipping_series = pd.Series('', index=selected_lots.index)
+            default_shipping = grouped_shortage['出荷予定日'].fillna('')
+            shipping_series = shipping_series.where(
+                shipping_series != '',
+                selected_lots['品番'].map(default_shipping)
+            )
+            shipping_series = shipping_series.fillna('')
+
             def _safe_int(value):
                 try:
                     return int(value)
                 except Exception:
                     return 0
-            
-            # 品番ごとに処理
-            for product_number, product_shortage in shortage_df.groupby('品番'):
-                try:
-                    initial_shortage = product_shortage['不足数'].iloc[0]
-                    if initial_shortage >= 0:
-                        continue
 
-                    required_qty = abs(initial_shortage)
-                    product_lots = lots_df[lots_df['品番'] == product_number].copy()
-                    if product_lots.empty:
-                        continue
-                    if '数量' not in product_lots.columns:
-                        self.log_message(f"品番 {product_number} のロットデータに数量列がありません")
-                        continue
+            def _get_column_series(col_name):
+                if col_name in selected_lots.columns:
+                    return selected_lots[col_name].fillna('')
+                return pd.Series([''] * len(selected_lots), index=selected_lots.index)
 
-                    if '指示日' in product_lots.columns:
-                        product_lots = product_lots.copy()
-                        product_lots['_指示日_ソート用'] = product_lots['指示日'].apply(
-                            lambda x: str(x) if pd.notna(x) else ''
-                        )
-                        product_lots = product_lots.sort_values('_指示日_ソート用', na_position='last')
-                        product_lots = product_lots.drop(columns=['_指示日_ソート用'])
+            def _map_shortage_field(col_name):
+                if col_name in grouped_shortage.columns:
+                    mapping = grouped_shortage[col_name]
+                    return selected_lots['品番'].map(mapping).fillna('')
+                return pd.Series([''] * len(selected_lots), index=selected_lots.index)
 
-                    lot_quantities = pd.to_numeric(product_lots['数量'], errors='coerce').fillna(0)
-                    if lot_quantities.empty:
-                        continue
+            def _map_shortage_int(col_name):
+                return _map_shortage_field(col_name).apply(_safe_int)
 
-                    cum_quantities = lot_quantities.cumsum()
-                    cum_array = cum_quantities.to_numpy()
-                    limit_idx = np.searchsorted(cum_array, required_qty, side='left')
-                    if limit_idx >= len(cum_array):
-                        limit_idx = len(cum_array) - 1
+            assigned_counts = selected_lots['品番'].value_counts()
+            for product_number, lot_count in assigned_counts.items():
+                self.log_message(f"品番 {product_number} に {lot_count}件のロットを割り当てました")
 
-                    selected_lots = product_lots.iloc[:limit_idx + 1].copy()
-                    selected_quantities = lot_quantities.iloc[:limit_idx + 1]
-                    selected_cum = selected_quantities.cumsum()
-                    prev_cum = selected_cum.shift(fill_value=0)
-                    shortage_values = initial_shortage + prev_cum
+            result_df = pd.DataFrame({
+                '出荷予定日': shipping_series.values,
+                '品番': selected_lots['品番'].values,
+                '品名': _map_shortage_field('品名'),
+                '客先': _map_shortage_field('客先'),
+                '出荷数': _map_shortage_int('出荷数'),
+                '在庫数': _map_shortage_int('在庫数'),
+                '在梱包数': _map_shortage_int('梱包・完了'),
+                '不足数': selected_lots['不足数'].values,
+                'ロット数量': selected_lots['lot_quantity'].round(0).astype(int).values,
+                '指示日': _get_column_series('指示日').values,
+                '号機': _get_column_series('号機').values,
+                '現在工程番号': _get_column_series('現在工程番号').values,
+                '現在工程名': _get_column_series('現在工程名').values,
+                '現在工程二次処理': _get_column_series('現在工程二次処理').values,
+                '生産ロットID': _get_column_series('生産ロットID').values,
+            })
+            self.log_message(f"ロット割り当て完了: {len(result_df)}件")
+            return result_df
 
-                    default_shipping = (
-                        product_shortage['出荷予定日'].iloc[0]
-                        if '出荷予定日' in product_shortage.columns else ''
-                    )
-                    if '出荷予定日' in selected_lots.columns:
-                        shipping_series = selected_lots['出荷予定日'].fillna(default_shipping)
-                    else:
-                        shipping_series = pd.Series(
-                            [default_shipping] * len(selected_lots),
-                            index=selected_lots.index
-                        )
-
-                    if '__from_cleaning_sheet' in selected_lots.columns:
-                        textual_markers = {"当日洗浄上がり品", "当日洗浄品", "先行検査", "当日先行検査", ""}
-                        parsed_dates = pd.to_datetime(shipping_series, errors='coerce')
-                        shipping_str = shipping_series.fillna("").astype(str).str.strip()
-                        mask = selected_lots['__from_cleaning_sheet'].astype(bool) & (
-                            parsed_dates.isna() | shipping_str.isin(textual_markers)
-                        )
-                        shipping_series.loc[mask] = "当日洗浄上がり品"
-
-                    def _get_column_series(col_name):
-                        if col_name in selected_lots.columns:
-                            return selected_lots[col_name].fillna('')
-                        return pd.Series([''] * len(selected_lots), index=selected_lots.index)
-
-                    def _get_shortage_field(col_name):
-                        if col_name in product_shortage.columns:
-                            val = product_shortage[col_name].iloc[0]
-                            return val if pd.notna(val) else ''
-                        return ''
-
-                    assignment_df = pd.DataFrame({
-                        '出荷予定日': shipping_series.values,
-                        '品番': product_number,
-                        '品名': _get_shortage_field('品名'),
-                        '客先': _get_shortage_field('客先'),
-                        '出荷数': _safe_int(_get_shortage_field('出荷数')),
-                        '在庫数': _safe_int(_get_shortage_field('在庫数')),
-                        '在梱包数': _safe_int(_get_shortage_field('梱包・完了')),
-                        '不足数': shortage_values.values,
-                        'ロット数量': selected_quantities.astype(int).values,
-                        '指示日': _get_column_series('指示日').values,
-                        '号機': _get_column_series('号機').values,
-                        '現在工程番号': _get_column_series('現在工程番号').values,
-                        '現在工程名': _get_column_series('現在工程名').values,
-                        '現在工程二次処理': _get_column_series('現在工程二次処理').values,
-                        '生産ロットID': _get_column_series('生産ロットID').values,
-                    })
-                    assignment_results.append(assignment_df)
-                    self.log_message(f"品番 {product_number} に {len(assignment_df)}件のロットを割り当てました")
-                except Exception as e:
-                    self.log_message(f"品番 {product_number} のロット割り当て中にエラーが発生しました: {str(e)}")
-                    continue
-            
-            if assignment_results:
-                result_df = pd.concat(assignment_results, ignore_index=True)
-                self.log_message(f"ロット割り当て完了: {len(result_df)}件")
-                return result_df
-            else:
-                self.log_message("ロット割り当て結果がありません")
-                return pd.DataFrame()
-                
         except Exception as e:
             self.log_message(f"ロット割り当て中にエラーが発生しました: {str(e)}")
             return pd.DataFrame()
@@ -6103,6 +6170,15 @@ class ModernDataExtractorUI:
             )
             self.seating_view_button.pack(side="right", padx=(0, 25))
             
+            self.seating_flow_prompt_label = ctk.CTkLabel(
+                inspector_frame,
+                text="",
+                font=ctk.CTkFont(family="Yu Gothic", size=11, weight="bold"),
+                text_color="#1F7AEF",
+                anchor="w"
+            )
+            self.seating_flow_prompt_label.pack(fill="x", padx=15, pady=(0, 10))
+
             # テーブルフレーム
             table_frame = tk.Frame(inspector_frame)
             table_frame.pack(fill="both", expand=True, padx=15, pady=(0, 15))
@@ -6417,6 +6493,29 @@ class ModernDataExtractorUI:
                 self.root.after(20, lambda: self._verify_and_restore_scroll(tree, target_pos, retry_count + 1))
         except:
             pass
+
+    @staticmethod
+    def _normalize_inspector_column_name(name: Optional[str]) -> str:
+        if not name:
+            return ''
+        normalized = ''.join(name.split())
+        return normalized.lower()
+
+    @staticmethod
+    def _normalize_seating_row_key(value: object) -> Optional[str]:
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            numeric = float(text)
+            if numeric.is_integer():
+                return str(int(numeric))
+            normalized = str(numeric).rstrip('0').rstrip('.')
+            return normalized if normalized else text
+        except (ValueError, TypeError):
+            return text
     
     def open_seating_chart(self):
         """Export current lot assignments to the seating UI."""
@@ -6447,11 +6546,13 @@ class ModernDataExtractorUI:
             chart = build_initial_seating_chart(inspector_names)
         chart = attach_lots_to_chart(chart, lots_by_inspector)
         chart["unassigned_lots"] = unassigned_lots
+        chart["inspector_column_map"] = self.inspector_column_map_for_seating.copy()
         try:
             save_seating_chart(SEATING_JSON_PATH, chart)
             generate_html(chart, SEATING_HTML_PATH, inspector_candidates=inspector_names)
             webbrowser.open(SEATING_HTML_PATH)
             self.log_message(f"Seat chart generated: {SEATING_HTML_PATH}")
+            self._set_seating_flow_prompt("座席表で割当を変更したら「ロット振分変更反映」を押してください。")
         except Exception as exc:
             messagebox.showerror("Seat chart", f"Failed to generate seat chart: {exc}")
             logger.error("Seat chart export failed", exc_info=True)
@@ -6470,61 +6571,61 @@ class ModernDataExtractorUI:
             messagebox.showerror("Seat chart sync", f"Failed to load seating JSON: {exc}")
             logger.error("Seat chart load failed", exc_info=True)
             return
-        lot_col_mapping = {}
-        rowcol_to_inspector = {}
+        inspector_cols = [col for col in self.current_inspector_data.columns if col.startswith("検査員")]
+        normalized_columns: List[Tuple[str, str]] = []
+        seen_norms = set()
+        for col in inspector_cols:
+            normalized_col = self._normalize_inspector_column_name(col)
+            if normalized_col and normalized_col not in seen_norms:
+                normalized_columns.append((normalized_col, col))
+                seen_norms.add(normalized_col)
+
+        rowcol_to_inspector: Dict[Tuple[str, str], str] = {}
         for seat in chart.get("seats", []):
             inspector_name = (seat.get("name") or "").strip()
             if not inspector_name:
                 continue
             for lot in seat.get("lots", []):
-                lot_id = lot.get("lot_id")
                 source_row = lot.get("source_row_index")
+                source_row_key = lot.get("source_row_key")
                 source_col = lot.get("source_inspector_col")
-                if lot_id and source_col:
-                    lot_col_mapping[(lot_id, source_col)] = inspector_name
-                if source_row is not None and source_col:
-                    rowcol_to_inspector[(str(source_row), source_col)] = inspector_name
-        if not lot_col_mapping and not rowcol_to_inspector:
+                normalized_row = (
+                    source_row_key if source_row_key else self._normalize_seating_row_key(source_row)
+                )
+                normalized_col = self._normalize_inspector_column_name(source_col)
+                if normalized_row and normalized_col:
+                    rowcol_to_inspector[(normalized_row, normalized_col)] = inspector_name
+
+        if not rowcol_to_inspector:
+            logger.info("Seat chart sync: rowcol_to_inspector is empty")
             messagebox.showinfo("Seat chart sync", "Seating chart has no lot assignments.")
             return
+        logger.info("Seat chart sync: rowcol_to_inspector entries=%d", len(rowcol_to_inspector))
+
         df = self.current_inspector_data.copy()
-        inspector_cols = [col for col in df.columns if col.startswith("検査員")]
-        lot_id_candidates = ["生産ロットID", "ロットID", "LotID"]
         updated = 0
         for row_index, row in df.iterrows():
-            lot_id_value = None
-            for candidate in lot_id_candidates:
-                if candidate in df.columns:
-                    value = row.get(candidate)
-                    if pd.notna(value) and str(value).strip():
-                        lot_id_value = str(value).strip()
-                        break
-            if not lot_id_value:
-                lot_id_value = None
+            row_key = self._normalize_seating_row_key(row_index)
+            if not row_key:
+                continue
             row_modified = False
-            for inspector_col in inspector_cols:
-                assigned = rowcol_to_inspector.get((str(row_index), inspector_col))
-                if assigned:
-                    if df.at[row_index, inspector_col] != assigned:
-                        df.at[row_index, inspector_col] = assigned
-                        updated += 1
-                        row_modified = True
-                    continue
-                if lot_id_value:
-                    new_inspector = lot_col_mapping.get((lot_id_value, inspector_col))
-                    if new_inspector:
-                        if df.at[row_index, inspector_col] != new_inspector:
-                            df.at[row_index, inspector_col] = new_inspector
-                            updated += 1
-                            row_modified = True
+            for normalized_col, actual_col in normalized_columns:
+                assigned = rowcol_to_inspector.get((row_key, normalized_col))
+                if assigned and df.at[row_index, actual_col] != assigned:
+                    df.at[row_index, actual_col] = assigned
+                    updated += 1
+                    row_modified = True
             if row_modified:
                 self._recalculate_inspector_count_and_divided_time(df, row_index)
         if updated == 0:
             messagebox.showinfo("Seat chart sync", "No matching lots were updated.")
             return
+
         self.current_inspector_data = df
         self.display_inspector_assignment_table(df, preserve_scroll_position=True)
         self.update_detail_popup_if_open()
+        self.original_inspector_data = df.copy()
+        self._set_seating_flow_prompt("変更が反映されました。次に「Googleスプレッドシートへ出力」を押してください。")
         self.log_message(f"Applied seating results to {updated} lots.")
 
     def _serialize_inspector_lots_for_seating(self):
@@ -6539,6 +6640,7 @@ class ModernDataExtractorUI:
             col for col in df.columns
             if col.startswith("検査員") and col[len("検査員"):].isdigit()
         ]
+        inspector_column_map: Dict[str, str] = {}
         lot_id_candidates = ["生産ロットID", "ロットID", "LotID"]
         product_column_candidates = ["品番", "製品番号", "製品名", "品名"]
         lots = defaultdict(list)
@@ -6611,12 +6713,14 @@ class ModernDataExtractorUI:
             if "出荷予定日" in df.columns:
                 shipping_date_value = row.get("出荷予定日")
             shipping_date_text = format_shipping_date(shipping_date_value)
+            row_key = self._normalize_seating_row_key(row_index)
             lot_base = {
                 "lot_id": lot_id,
                 "product_name": product_name,
                 "sec_per_piece": 0.0,
                 "inspection_time": 0.0,
                 "source_row_index": str(row_index),
+                "source_row_key": row_key,
                 "shipping_date": shipping_date_text,
                 "process_name": process_name,
             }
@@ -6628,6 +6732,7 @@ class ModernDataExtractorUI:
                 inspector_name = str(name_value).strip()
                 lot_entry = lot_base.copy()
                 lot_entry["source_inspector_col"] = inspector_col
+                inspector_column_map.setdefault(inspector_name, inspector_col)
                 lots[inspector_name].append(lot_entry)
                 inspection_time = resolve_inspection_time(divided_time_value, normal_time_value, True)
                 lot_entry["inspection_time"] = inspection_time
@@ -6642,6 +6747,7 @@ class ModernDataExtractorUI:
                 unassigned_lots.append(unassigned_entry)
         if unassigned_lots:
             lots[self.UNASSIGNED_LOTS_KEY] = unassigned_lots
+        self.inspector_column_map_for_seating = inspector_column_map.copy()
         return dict(lots)
 
     def _derive_lot_key(self, row, product_column_candidates):
@@ -8052,6 +8158,7 @@ class ModernDataExtractorUI:
                     f"出力件数: {len(self.current_inspector_data)}件"
                 )
                 self.log_message("Googleスプレッドシートへの出力が完了しました")
+                self._set_seating_flow_prompt("")
             else:
                 messagebox.showerror(
                     "エラー",
@@ -8541,12 +8648,21 @@ class ModernDataExtractorUI:
             # exe化対応のパス解決を使用
             guide_path_str = resolve_resource_path("inspector_assignment_rules_help.html")
             guide_path = Path(guide_path_str)
-            
-            if guide_path.exists():
-                webbrowser.open(guide_path.as_uri())
-                self.log_message(f"ガイドを開きました: {guide_path}")
-            else:
+            if not guide_path.exists():
                 messagebox.showerror("エラー", f"ガイドファイルが見つかりません:\n{guide_path}")
+                return
+
+            try:
+                # UNCパスや特殊なパスを扱うため、Windowsでは os.startfile を使う
+                if os.name == "nt":
+                    os.startfile(guide_path_str)
+                else:
+                    webbrowser.open(guide_path.as_uri())
+            except OSError:
+                # os.startfile が使えない場合は URI で開く（クロスプラットフォーム対応）
+                webbrowser.open(guide_path.as_uri())
+
+            self.log_message(f"ガイドを開きました: {guide_path}")
         except Exception as e:
             error_msg = f"ガイドを開く際にエラーが発生しました: {str(e)}"
             self.log_message(error_msg)

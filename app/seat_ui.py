@@ -717,12 +717,16 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     </main>
     <datalist id="inspector-names"></datalist>
       <script>
-        const seatingData = SEATING_DATA_PLACEHOLDER;
-        const INSPECTOR_CANDIDATES = INSPECTOR_CANDIDATES_PLACEHOLDER;
-        const SEATING_JSON_PATH = SEATING_JSON_PATH_PLACEHOLDER;
-        const SEATING_JSON_FILE_NAME = SEATING_JSON_FILE_NAME_PLACEHOLDER;
+      const seatingData = SEATING_DATA_PLACEHOLDER;
+      const INSPECTOR_CANDIDATES = INSPECTOR_CANDIDATES_PLACEHOLDER;
+      const INSPECTOR_COLUMN_MAP = INSPECTOR_COLUMN_MAP_PLACEHOLDER;
+      const SEATING_JSON_PATH = SEATING_JSON_PATH_PLACEHOLDER;
+      const SEATING_JSON_FILE_NAME = SEATING_JSON_FILE_NAME_PLACEHOLDER;
       const seats = Array.isArray(seatingData.seats) ? seatingData.seats : [];
       let unassignedLots = Array.isArray(seatingData.unassigned_lots) ? [...seatingData.unassigned_lots] : [];
+      const inspectorColumnMap = INSPECTOR_COLUMN_MAP && typeof INSPECTOR_COLUMN_MAP === "string"
+        ? JSON.parse(INSPECTOR_COLUMN_MAP)
+        : (INSPECTOR_COLUMN_MAP || {});
       let selectedSeatId = null;
       let draggingSeatId = null;
       let draggingLot = null;
@@ -1062,11 +1066,16 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         }
         if (toSeatId === "unassigned") {
           unassignedLots.push(lot);
+          lot.source_inspector_col = "";
           renderUnassignedLots();
         } else {
           const targetSeat = seats.find((seat) => seat.id === toSeatId);
           if (!targetSeat || !Array.isArray(targetSeat.lots)) {
             return;
+          }
+          const inspectorColumn = inspectorColumnMap[targetSeat.name];
+          if (typeof inspectorColumn === "string" && inspectorColumn.trim()) {
+            lot.source_inspector_col = inspectorColumn;
           }
           targetSeat.lots.push(lot);
         }
@@ -1634,9 +1643,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           await writable.write(JSON.stringify(payload, null, 2));
           await writable.close();
           if (hadPersistedHandle) {
-            alert(`${SEATING_JSON_FILE_NAME} を選択済みファイルに上書き保存しました。`);
+            alert(`${SEATING_JSON_FILE_NAME} を上書き保存しました。\n次回以降はダイアログなしで同じファイルに書き込みます。`);
           } else {
-            alert(`${SEATING_JSON_FILE_NAME} を保存しました。次回からは自動的に同じ場所に上書きされます。`);
+            alert(`${SEATING_JSON_FILE_NAME} を保存しました。\n初回は保存先をダイアログで選択してください。以降はそのまま自動で上書きされます。`);
           }
         } catch (error) {
           if (error?.name === "AbortError") {
@@ -1679,10 +1688,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         const instruction = document.querySelector(".edit-instruction");
         const downloadHint = document.getElementById("json-hint");
         if (instruction) {
-          instruction.textContent = "";
+          instruction.textContent =
+            "初回は『保存』ボタンで保存先を選択すると、そのまま選んだファイルに保存されます。2回目以降は同じファイルにダイアログなしで自動上書きされるため、ファイルを移動したりコピーする必要はありません。";
         }
         if (downloadHint) {
-          downloadHint.textContent = `Save path: ${SEATING_JSON_PATH}`;
+          downloadHint.textContent = `保存対象: ${SEATING_JSON_FILE_NAME}（初回は場所を選択、次回以降は自動で上書き）`;
         }
       };
 
@@ -1711,9 +1721,14 @@ def generate_html(
     candidates = inspector_candidates or DEFAULT_INSPECTOR_NAMES
     sorted_names = sorted({name for name in candidates if name and name.strip()})
     inspector_json = json.dumps(sorted_names, ensure_ascii=False)
+    column_map = chart.get("inspector_column_map", {})
+    if not isinstance(column_map, dict):
+        column_map = {}
+    column_map_json = json.dumps(column_map, ensure_ascii=False)
     html = (
         HTML_TEMPLATE.replace("SEATING_DATA_PLACEHOLDER", json.dumps(chart, ensure_ascii=False))
         .replace("INSPECTOR_CANDIDATES_PLACEHOLDER", inspector_json)
+        .replace("INSPECTOR_COLUMN_MAP_PLACEHOLDER", column_map_json)
         .replace("SEATING_JSON_PATH_PLACEHOLDER", json.dumps(SEATING_JSON_PATH, ensure_ascii=False))
         .replace(
             "SEATING_JSON_FILE_NAME_PLACEHOLDER",
