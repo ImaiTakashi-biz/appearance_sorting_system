@@ -214,7 +214,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>検査ロット振分けレイアウト（ロット移動）</title>
+    <title>検査ロット振分けレイアウト</title>
     <style>
       * { box-sizing: border-box; }
       body {
@@ -1468,7 +1468,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         document.body.classList.toggle("editing", enabled);
         toggleEditButton.textContent = enabled ? "ロット編集モード" : "座席編集モード";
         if (boardTitle) {
-        boardTitle.textContent = editingMode ? "座席プレビュー（位置調整）" : "検査ロット振分けレイアウト";
+        boardTitle.textContent = editingMode ? "座席プレビュー" : "検査ロット振分けレイアウト";
         }
         if (!enabled) {
           selectedSeatId = null;
@@ -1620,10 +1620,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
       const saveJsonFileSystem = async () => {
         if (!fileSystemAvailable()) {
-          alert("FileSystem Access API をサポートしていない環境では保存できません。");
+          alert("FileSystem Access API をサポートしていない環境では保存できません。ダウンロードで保存してください。");
           return;
         }
         try {
+          const hadPersistedHandle = !!savedFileHandle;
           const handle = await requestFileHandle();
           if (!handle) {
             return;
@@ -1632,7 +1633,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           const writable = await handle.createWritable();
           await writable.write(JSON.stringify(payload, null, 2));
           await writable.close();
-          alert(`${SEATING_JSON_FILE_NAME} を保存しました。${SEATING_JSON_PATH} に上書きしてください。`);
+          if (hadPersistedHandle) {
+            alert(`${SEATING_JSON_FILE_NAME} を選択済みファイルに上書き保存しました。`);
+          } else {
+            alert(`${SEATING_JSON_FILE_NAME} を保存しました。次回からは自動的に同じ場所に上書きされます。`);
+          }
         } catch (error) {
           if (error?.name === "AbortError") {
             return;

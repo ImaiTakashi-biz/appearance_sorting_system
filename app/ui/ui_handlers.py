@@ -27,6 +27,7 @@ import customtkinter as ctk
 import tkinter as tk
 from tkinter import messagebox, filedialog, ttk
 import pandas as pd
+import numpy as np
 import pyodbc
 from datetime import datetime, date, timedelta
 import threading
@@ -189,6 +190,10 @@ class ModernDataExtractorUI:
         self.cache_timestamps = {}
         self.cache_file_mtimes = {}  # ファイル更新時刻を保存（高速化）
         self.cache_ttl = timedelta(minutes=self.MASTER_CACHE_TTL_MINUTES)
+        
+        # 在庫ロット（t_現品票履歴）のテーブル構造キャッシュ
+        self._inventory_table_structure_cache = None
+        self._inventory_table_structure_timestamp = None
         
         # 現在表示中のテーブル
         self.current_display_table = None
@@ -971,10 +976,12 @@ class ModernDataExtractorUI:
             )
             fixed_inspectors_value.pack(side="left", fill="x", expand=True)
             
-            # ボタンフレーム
-            button_frame = ctk.CTkFrame(item_frame, fg_color="transparent")
-            button_frame.pack(side="right", padx=10, pady=6)
-            
+            # ボタン行（幅が狭い環境でも折り返ししやすいよう段落を分離）
+            button_row = ctk.CTkFrame(item_frame, fg_color="transparent")
+            button_row.pack(fill="x", padx=10, pady=(6, 8))
+            button_frame = ctk.CTkFrame(button_row, fg_color="transparent")
+            button_frame.pack(side="right")
+
             # 検査員固定ボタン
             inspector_button = ctk.CTkButton(
                 button_frame,
@@ -3140,110 +3147,114 @@ class ModernDataExtractorUI:
             packaging_summary.columns = ['品番', '梱包・完了']
             
             self.log_message(f"梱包工程データを取得しました: {len(packaging_summary)}件")
-            
+
             return packaging_summary
             
         except Exception as e:
             self.log_message(f"梱包工程データの取得中にエラーが発生しました: {str(e)}")
             return pd.DataFrame()
-    
+
+    def _get_inventory_table_structure(self, connection):
+        """t_現品票履歴テーブルの列情報をキャッシュ"""
+        import time
+
+        now = time.time()
+        cache_valid = (
+            self._inventory_table_structure_timestamp is not None and
+            (now - self._inventory_table_structure_timestamp) < self.TABLE_STRUCTURE_CACHE_TTL
+        )
+
+        if cache_valid and self._inventory_table_structure_cache:
+            cached = self._inventory_table_structure_cache
+            return cached.get("columns", []), cached.get("has_rows", False)
+
+        columns_query = "SELECT TOP 1 * FROM [t_現品票履歴]"
+        try:
+            sample_df = pd.read_sql(columns_query, connection)
+        except Exception as e:
+            self.log_message(f"t_現品票履歴の構造取得に失敗しました: {str(e)}")
+            return [], False
+
+        has_rows = not sample_df.empty
+        columns = sample_df.columns.tolist()
+
+        self._inventory_table_structure_cache = {
+            "columns": columns,
+            "has_rows": has_rows,
+        }
+        self._inventory_table_structure_timestamp = now
+        return columns, has_rows
+
     def get_available_lots_for_shortage(self, connection, shortage_df):
         """不足数がマイナスの品番に対して利用可能なロットを取得"""
         try:
             if shortage_df.empty:
                 self.log_message("不足数がマイナスのデータがありません")
                 return pd.DataFrame()
-            
-            # 不足数がマイナスの品番を取得
+
             shortage_products = shortage_df[shortage_df['不足数'] < 0]['品番'].dropna().unique().tolist()
             if not shortage_products:
                 self.log_message("不足数がマイナスの品番が見つかりません")
                 return pd.DataFrame()
-            
             self.log_message(f"不足数がマイナスの品番: {len(shortage_products)}件")
-            
-            # まずテーブル構造を確認
-            self.log_message("t_現品票履歴テーブル構造を確認中...")
-            columns_query = f"SELECT TOP 1 * FROM [t_現品票履歴]"
-            sample_df = pd.read_sql(columns_query, connection)
-            
-            if sample_df.empty:
+
+            actual_columns, has_rows = self._get_inventory_table_structure(connection)
+            if not has_rows:
                 self.log_message("t_現品票履歴テーブルにデータが見つかりません")
                 return pd.DataFrame()
-            
-            # 実際の列名を取得
-            actual_columns = sample_df.columns.tolist()
-            self.log_message(f"t_現品票履歴テーブルの列: {actual_columns}")
-            
-            # 利用可能な列のみでクエリを作成
+
             available_columns = [col for col in actual_columns if col in [
                 "品番", "数量", "指示日", "号機", "現在工程番号", "現在工程名", "現在工程二次処理", "生産ロットID"
             ]]
-            
             if not available_columns:
                 self.log_message("必要な列が見つかりません。全列を取得します。")
                 available_columns = actual_columns
-            
-            # 利用可能な列のみでクエリを作成
+
             columns_str = ", ".join([f"[{col}]" for col in available_columns])
-            
-            # 品番のリストをSQL用の文字列に変換
-            product_numbers_str = "', '".join([str(pn) for pn in shortage_products])
-            
-            # WHERE条件を動的に構築
-            where_conditions = [f"品番 IN ('{product_numbers_str}')"]
-            
-            # 現在工程名が存在する場合のみ条件を追加
+
+            placeholders = ", ".join("?" for _ in shortage_products)
+            where_conditions = [f"品番 IN ({placeholders})"]
+            params = list(shortage_products)
+
             if "現在工程名" in available_columns:
                 where_conditions.append("現在工程名 NOT LIKE '%完了%'")
                 where_conditions.append("現在工程名 NOT LIKE '%梱包%'")
-                
-                # 検査対象.csvのキーワードでフィルタリング
                 if self.inspection_target_keywords:
-                    # キーワードのいずれかが現在工程名に含まれる条件を追加
                     keyword_conditions = []
                     for keyword in self.inspection_target_keywords:
-                        # SQLインジェクション対策: キーワードをエスケープ
                         escaped_keyword = keyword.replace("'", "''").replace("%", "[%]").replace("_", "[_]")
                         keyword_conditions.append(f"現在工程名 LIKE '%{escaped_keyword}%'")
-                    
                     if keyword_conditions:
-                        # OR条件でキーワードのいずれかに一致する条件を追加
                         keyword_filter = "(" + " OR ".join(keyword_conditions) + ")"
                         where_conditions.append(keyword_filter)
                         self.log_message(f"検査対象キーワードでフィルタリング: {len(self.inspection_target_keywords)}件のキーワード")
                 else:
                     self.log_message("検査対象キーワードが設定されていません。全てのロットを対象とします。")
-            
+
             where_clause = " AND ".join(where_conditions)
-            
-            # ORDER BY条件を動的に構築
             order_conditions = ["品番"]
             if "指示日" in available_columns:
                 order_conditions.append("指示日 ASC")
             elif "号機" in available_columns:
                 order_conditions.append("号機 ASC")
-            
             order_clause = ", ".join(order_conditions)
-            
-            # 完了・梱包以外の工程のロットを取得
+
             lots_query = f"""
             SELECT {columns_str}
             FROM [t_現品票履歴]
             WHERE {where_clause}
             ORDER BY {order_clause}
             """
-            
-            lots_df = pd.read_sql(lots_query, connection)
-            
+
+            lots_df = pd.read_sql(lots_query, connection, params=params)
+
             if lots_df.empty:
                 self.log_message("利用可能なロットが見つかりませんでした")
                 return pd.DataFrame()
-            
+
             self.log_message(f"利用可能なロットを取得しました: {len(lots_df)}件")
-            
             return lots_df
-            
+
         except Exception as e:
             self.log_message(f"利用可能ロットの取得中にエラーが発生しました: {str(e)}")
             return pd.DataFrame()
@@ -3262,70 +3273,49 @@ class ModernDataExtractorUI:
             self.log_message(f"登録済み品番のロットを取得中: {len(registered_product_numbers)}件の品番")
             
             # テーブル構造を確認
-            columns_query = f"SELECT TOP 1 * FROM [t_現品票履歴]"
-            sample_df = pd.read_sql(columns_query, connection)
-            
-            if sample_df.empty:
+            actual_columns, has_rows = self._get_inventory_table_structure(connection)
+            if not has_rows:
                 self.log_message("t_現品票履歴テーブルにデータが見つかりません")
                 return pd.DataFrame()
-            
-            # 実際の列名を取得
-            actual_columns = sample_df.columns.tolist()
-            
-            # 利用可能な列のみでクエリを作成
-            # 品名と客先も取得する（先行検査品の品名・客先を表示するため）
+
             available_columns = [col for col in actual_columns if col in [
                 "品番", "品名", "客先", "数量", "指示日", "号機", "現在工程番号", "現在工程名", 
                 "現在工程二次処理", "生産ロットID"
             ]]
-            
             if not available_columns:
                 available_columns = actual_columns
-            
+
             columns_str = ", ".join([f"[{col}]" for col in available_columns])
-            
-            # 品番のリストをSQL用の文字列に変換
-            product_numbers_str = "', '".join([str(pn) for pn in registered_product_numbers])
-            
-            # WHERE条件を構築
-            where_conditions = [f"品番 IN ('{product_numbers_str}')"]
-            
-            # 現在工程名が存在する場合のみ条件を追加
+            placeholders = ", ".join("?" for _ in registered_product_numbers)
+            where_conditions = [f"品番 IN ({placeholders})"]
+            params = list(registered_product_numbers)
+
             if "現在工程名" in available_columns:
                 where_conditions.append("現在工程名 NOT LIKE '%完了%'")
                 where_conditions.append("現在工程名 NOT LIKE '%梱包%'")
-                
-                # 検査対象.csvのキーワードでフィルタリング
                 if self.inspection_target_keywords:
                     keyword_conditions = []
                     for keyword in self.inspection_target_keywords:
                         escaped_keyword = keyword.replace("'", "''").replace("%", "[%]").replace("_", "[_]")
                         keyword_conditions.append(f"現在工程名 LIKE '%{escaped_keyword}%'")
-                    
                     if keyword_conditions:
-                        keyword_filter = "(" + " OR ".join(keyword_conditions) + ")"
-                        where_conditions.append(keyword_filter)
-            
+                        where_conditions.append("(" + " OR ".join(keyword_conditions) + ")")
+
             where_clause = " AND ".join(where_conditions)
-            
-            # ORDER BY条件（指示日順、生産日の古い順）
             order_conditions = ["品番"]
             if "指示日" in available_columns:
                 order_conditions.append("指示日 ASC")
             elif "号機" in available_columns:
                 order_conditions.append("号機 ASC")
-            
             order_clause = ", ".join(order_conditions)
-            
-            # クエリを実行
+
             lots_query = f"""
             SELECT {columns_str}
             FROM [t_現品票履歴]
             WHERE {where_clause}
             ORDER BY {order_clause}
             """
-            
-            lots_df = pd.read_sql(lots_query, connection)
+            lots_df = pd.read_sql(lots_query, connection, params=params)
             
             if lots_df.empty:
                 self.log_message("登録済み品番のロットが見つかりませんでした")
@@ -3492,89 +3482,108 @@ class ModernDataExtractorUI:
             
             assignment_results = []
             
-            # 品番ごとに処理
-            for product_number in shortage_df['品番'].unique():
+            def _safe_int(value):
                 try:
-                    product_shortage = shortage_df[shortage_df['品番'] == product_number]
+                    return int(value)
+                except Exception:
+                    return 0
+            
+            # 品番ごとに処理
+            for product_number, product_shortage in shortage_df.groupby('品番'):
+                try:
+                    initial_shortage = product_shortage['不足数'].iloc[0]
+                    if initial_shortage >= 0:
+                        continue
+
+                    required_qty = abs(initial_shortage)
                     product_lots = lots_df[lots_df['品番'] == product_number].copy()
-                    
                     if product_lots.empty:
                         continue
-                    
-                    # 指示日順でソート（型を統一してからソート）
+                    if '数量' not in product_lots.columns:
+                        self.log_message(f"品番 {product_number} のロットデータに数量列がありません")
+                        continue
+
                     if '指示日' in product_lots.columns:
-                        # 指示日を文字列に統一してからソート（None/NaNは最後に）
                         product_lots = product_lots.copy()
                         product_lots['_指示日_ソート用'] = product_lots['指示日'].apply(
                             lambda x: str(x) if pd.notna(x) else ''
                         )
                         product_lots = product_lots.sort_values('_指示日_ソート用', na_position='last')
                         product_lots = product_lots.drop(columns=['_指示日_ソート用'])
+
+                    lot_quantities = pd.to_numeric(product_lots['数量'], errors='coerce').fillna(0)
+                    if lot_quantities.empty:
+                        continue
+
+                    cum_quantities = lot_quantities.cumsum()
+                    cum_array = cum_quantities.to_numpy()
+                    limit_idx = np.searchsorted(cum_array, required_qty, side='left')
+                    if limit_idx >= len(cum_array):
+                        limit_idx = len(cum_array) - 1
+
+                    selected_lots = product_lots.iloc[:limit_idx + 1].copy()
+                    selected_quantities = lot_quantities.iloc[:limit_idx + 1]
+                    selected_cum = selected_quantities.cumsum()
+                    prev_cum = selected_cum.shift(fill_value=0)
+                    shortage_values = initial_shortage + prev_cum
+
+                    default_shipping = (
+                        product_shortage['出荷予定日'].iloc[0]
+                        if '出荷予定日' in product_shortage.columns else ''
+                    )
+                    if '出荷予定日' in selected_lots.columns:
+                        shipping_series = selected_lots['出荷予定日'].fillna(default_shipping)
                     else:
-                        # 指示日列がない場合はそのまま
-                        pass
-                    
-                    # 品番ごとの不足数を取得（マイナス値のまま）
-                    initial_shortage = product_shortage['不足数'].iloc[0]
-                    current_shortage = initial_shortage
-                    
-                    # ロットを順番に割り当て（itertuples()で高速化）
-                    # 列名のインデックスマップを作成
-                    lot_cols = {col: idx for idx, col in enumerate(product_lots.columns)}
+                        shipping_series = pd.Series(
+                            [default_shipping] * len(selected_lots),
+                            index=selected_lots.index
+                        )
 
-                    for lot in product_lots.itertuples(index=False):
-                        if current_shortage >= 0:  # 不足数が0以上になったら終了
-                            break
+                    if '__from_cleaning_sheet' in selected_lots.columns:
+                        textual_markers = {"当日洗浄上がり品", "当日洗浄品", "先行検査", "当日先行検査", ""}
+                        parsed_dates = pd.to_datetime(shipping_series, errors='coerce')
+                        shipping_str = shipping_series.fillna("").astype(str).str.strip()
+                        mask = selected_lots['__from_cleaning_sheet'].astype(bool) & (
+                            parsed_dates.isna() | shipping_str.isin(textual_markers)
+                        )
+                        shipping_series.loc[mask] = "当日洗浄上がり品"
 
-                        lot_quantity = int(lot[lot_cols['数量']]) if pd.notna(lot[lot_cols['数量']]) else 0
+                    def _get_column_series(col_name):
+                        if col_name in selected_lots.columns:
+                            return selected_lots[col_name].fillna('')
+                        return pd.Series([''] * len(selected_lots), index=selected_lots.index)
 
-                        # 出荷予定日の決定：ロットに設定されている場合はそれを使用（洗浄二次処理依頼のロット用）
-                        # ロットに「出荷予定日」列があり、値が設定されている場合はそれを使用
-                        if '出荷予定日' in lot_cols and pd.notna(lot[lot_cols['出荷予定日']]):
-                            shipping_date = lot[lot_cols['出荷予定日']]
-                        else:
-                            # ロットに設定がない場合は、不足データの出荷予定日を使用
-                            shipping_date = product_shortage['出荷予定日'].iloc[0]
+                    def _get_shortage_field(col_name):
+                        if col_name in product_shortage.columns:
+                            val = product_shortage[col_name].iloc[0]
+                            return val if pd.notna(val) else ''
+                        return ''
 
-                        # 出荷予定日を洗浄依頼由来ロットに限定して「当日洗浄上がり品」に固定（実日付がある場合は保持）
-                        is_cleaning_sheet_row = ('__from_cleaning_sheet' in lot_cols and bool(lot[lot_cols['__from_cleaning_sheet']]))
-                        if is_cleaning_sheet_row:
-                            parsed_date = pd.to_datetime(shipping_date, errors='coerce')
-                            shipping_date_str = str(shipping_date).strip()
-                            textual_markers = {"当日洗浄上がり品", "当日洗浄品", "先行検査", "当日先行検査", ""}
-                            if pd.isna(parsed_date) or shipping_date_str in textual_markers:
-                                shipping_date = "当日洗浄上がり品"
-
-                        # 割り当て結果を記録
-                        assignment_result = {
-                            '出荷予定日': shipping_date,
-                            '品番': product_number,
-                            '品名': product_shortage['品名'].iloc[0],
-                            '客先': product_shortage['客先'].iloc[0],
-                            '出荷数': int(product_shortage['出荷数'].iloc[0]),
-                            '在庫数': int(product_shortage['在庫数'].iloc[0]),
-                            '在梱包数': int(product_shortage['梱包・完了'].iloc[0]),
-                            '不足数': current_shortage,  # 現在の不足数（マイナス値）
-                            'ロット数量': lot_quantity,  # ロット全体の数量を表示
-                            '指示日': lot[lot_cols.get('指示日', -1)] if '指示日' in lot_cols and pd.notna(lot[lot_cols['指示日']]) else '',
-                            '号機': lot[lot_cols.get('号機', -1)] if '号機' in lot_cols and pd.notna(lot[lot_cols['号機']]) else '',
-                            '現在工程番号': lot[lot_cols.get('現在工程番号', -1)] if '現在工程番号' in lot_cols and pd.notna(lot[lot_cols['現在工程番号']]) else '',
-                            '現在工程名': lot[lot_cols.get('現在工程名', -1)] if '現在工程名' in lot_cols and pd.notna(lot[lot_cols['現在工程名']]) else '',
-                            '現在工程二次処理': lot[lot_cols.get('現在工程二次処理', -1)] if '現在工程二次処理' in lot_cols and pd.notna(lot[lot_cols['現在工程二次処理']]) else '',
-                            '生産ロットID': lot[lot_cols.get('生産ロットID', -1)] if '生産ロットID' in lot_cols and pd.notna(lot[lot_cols['生産ロットID']]) else ''
-                        }
-                        assignment_results.append(assignment_result)
-
-                        # 次のロットの不足数を計算（ロット数量を加算）
-                        current_shortage += lot_quantity
-                        
+                    assignment_df = pd.DataFrame({
+                        '出荷予定日': shipping_series.values,
+                        '品番': product_number,
+                        '品名': _get_shortage_field('品名'),
+                        '客先': _get_shortage_field('客先'),
+                        '出荷数': _safe_int(_get_shortage_field('出荷数')),
+                        '在庫数': _safe_int(_get_shortage_field('在庫数')),
+                        '在梱包数': _safe_int(_get_shortage_field('梱包・完了')),
+                        '不足数': shortage_values.values,
+                        'ロット数量': selected_quantities.astype(int).values,
+                        '指示日': _get_column_series('指示日').values,
+                        '号機': _get_column_series('号機').values,
+                        '現在工程番号': _get_column_series('現在工程番号').values,
+                        '現在工程名': _get_column_series('現在工程名').values,
+                        '現在工程二次処理': _get_column_series('現在工程二次処理').values,
+                        '生産ロットID': _get_column_series('生産ロットID').values,
+                    })
+                    assignment_results.append(assignment_df)
+                    self.log_message(f"品番 {product_number} に {len(assignment_df)}件のロットを割り当てました")
                 except Exception as e:
-                    # 個別の品番でエラーが発生しても、他の品番の処理を継続
                     self.log_message(f"品番 {product_number} のロット割り当て中にエラーが発生しました: {str(e)}")
                     continue
             
             if assignment_results:
-                result_df = pd.DataFrame(assignment_results)
+                result_df = pd.concat(assignment_results, ignore_index=True)
                 self.log_message(f"ロット割り当て完了: {len(result_df)}件")
                 return result_df
             else:
@@ -6066,7 +6075,7 @@ class ModernDataExtractorUI:
 
             self.seating_reflect_button = ctk.CTkButton(
                 seating_buttons_frame,
-                text="ロット投分変更反映",
+                text="ロット振分変更反映",
                 command=self.apply_seating_chart_results,
                 width=160,
                 height=30,
