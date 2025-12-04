@@ -9,6 +9,44 @@ from loguru import logger
 
 from app.seat_ui import SEATING_JSON_PATH, SEATING_HTML_PATH, save_seating_chart
 
+SEAT_CHART_PORT_FILE_NAME = "seat_chart_server_port.txt"
+
+
+def _get_port_store_path() -> str:
+    directory = os.path.dirname(SEATING_HTML_PATH) or os.getcwd()
+    return os.path.join(directory, SEAT_CHART_PORT_FILE_NAME)
+
+
+def _load_persisted_seat_chart_port() -> int | None:
+    try:
+        path = _get_port_store_path()
+        if not os.path.exists(path):
+            return None
+        with open(path, "r", encoding="utf-8") as handle:
+            raw = handle.read().strip()
+        port = int(raw)
+        if 0 < port < 65536:
+            return port
+    except (ValueError, OSError) as exc:
+        logger.debug("Seat chart port persistence read failed: %s", exc)
+    return None
+
+
+def _persist_seat_chart_port(port: int | None) -> None:
+    try:
+        path = _get_port_store_path()
+        if port is None:
+            if os.path.exists(path):
+                os.remove(path)
+            return
+        directory = os.path.dirname(path)
+        if directory and not os.path.exists(directory):
+            os.makedirs(directory, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(str(port))
+    except OSError as exc:
+        logger.debug("Seat chart port persistence write failed: %s", exc)
+
 
 class SeatChartRequestHandler(BaseHTTPRequestHandler):
     """シンプルな HTML 配信 + 保存API 用ハンドラー。"""
@@ -80,14 +118,35 @@ class SeatChartServer:
         base_dir = os.path.dirname(SEATING_HTML_PATH) or os.getcwd()
         self._directory = base_dir
         self._port: int | None = None
+        self._preferred_port: int | None = _load_persisted_seat_chart_port()
 
     def start(self) -> None:
         """サーバーが起動していない場合は起動します。"""
         with self._lock:
             if self._server is not None:
                 return
-            server = _ThreadingHTTPServer(("127.0.0.1", 0), SeatChartRequestHandler)
+            server: ThreadingHTTPServer | None = None
+            last_error: Exception | None = None
+            ports = []
+            if self._preferred_port is not None:
+                ports.append(self._preferred_port)
+            ports.append(0)
+            for port_candidate in ports:
+                try:
+                    server = _ThreadingHTTPServer(("127.0.0.1", port_candidate), SeatChartRequestHandler)
+                    break
+                except OSError as exc:
+                    last_error = exc
+                    logger.debug("Seat chart server port %s is unavailable: %s", port_candidate, exc)
+            if server is None:
+                error_msg = "Failed to bind seat chart server socket"
+                logger.error(error_msg)
+                if last_error:
+                    logger.error(last_error)
+                raise RuntimeError(error_msg)
             self._port = server.server_port
+            self._preferred_port = self._port
+            _persist_seat_chart_port(self._port)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             self._server = server
