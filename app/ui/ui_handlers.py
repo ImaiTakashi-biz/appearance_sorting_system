@@ -38,7 +38,6 @@ from loguru import logger
 from app.config import DatabaseConfig
 import calendar
 import locale
-from app.export.excel_exporter_service import ExcelExporter
 from app.export.google_sheets_exporter_service import GoogleSheetsExporter
 from app.assignment.inspector_assignment_service import InspectorAssignmentManager
 from app.services.cleaning_request_service import get_cleaning_lots
@@ -142,9 +141,6 @@ class ModernDataExtractorUI:
         today = date.today()
         self.current_year = today.year
         self.current_month = today.month
-        
-        # Excelエクスポーターの初期化
-        self.excel_exporter = ExcelExporter()
         
         # Googleスプレッドシートエクスポーターの初期化（設定読み込み後に更新）
         self.google_sheets_exporter = None
@@ -2445,37 +2441,6 @@ class ModernDataExtractorUI:
             self.log_message("設定のリロードが完了しました")
         else:
             self.log_message("設定のリロードに失敗しました")
-    
-    def export_to_excel(self):
-        """Excelエクスポート機能"""
-        try:
-            # ロット割り当てデータがあるかチェック
-            if self.current_assignment_data is not None and not self.current_assignment_data.empty:
-                # ロット割り当て結果をエクスポート
-                success = self.excel_exporter.export_lot_assignment_to_excel(
-                    self.current_assignment_data, 
-                    self.root
-                )
-                if success:
-                    logger.info("ロット割り当て結果のExcelエクスポートが完了しました")
-            else:
-                # メインデータをエクスポート
-                if self.current_main_data is not None and not self.current_main_data.empty:
-                    success = self.excel_exporter.export_main_data_to_excel(
-                        self.current_main_data, 
-                        self.root
-                    )
-                    if success:
-                        logger.info("抽出データのExcelエクスポートが完了しました")
-                else:
-                    messagebox.showwarning(
-                        "警告", 
-                        "エクスポートするデータがありません。\n先にデータを抽出してください。"
-                    )
-        except Exception as e:
-            error_msg = f"Excelエクスポート中にエラーが発生しました: {str(e)}"
-            logger.error(error_msg)
-            messagebox.showerror("エクスポートエラー", error_msg)
     
     def validate_dates(self):
         """日付の妥当性を検証"""
@@ -8609,28 +8574,6 @@ class ModernDataExtractorUI:
     
     
     
-    
-    def export_selected_table(self):
-        """選択されたテーブルをExcel出力"""
-        try:
-            if self.current_display_table is None:
-                messagebox.showwarning("警告", "表示中のテーブルがありません。\n先にテーブルを選択してください。")
-                return
-            
-            if self.current_display_table == "main" and self.current_main_data is not None:
-                self.excel_exporter.export_main_data_to_excel(self.current_main_data)
-            elif self.current_display_table == "assignment" and self.current_assignment_data is not None:
-                self.excel_exporter.export_lot_assignment_to_excel(self.current_assignment_data)
-            elif self.current_display_table == "inspector" and self.current_inspector_data is not None:
-                self.excel_exporter.export_inspector_assignment_to_excel(self.current_inspector_data)
-            else:
-                messagebox.showwarning("警告", "エクスポート可能なデータがありません。")
-                
-        except Exception as e:
-            error_msg = f"Excel出力中にエラーが発生しました: {str(e)}"
-            self.log_message(error_msg)
-            logger.error(error_msg)
-            messagebox.showerror("エラー", error_msg)
     
     def create_menu_bar(self):
         """メニューバーを作成"""

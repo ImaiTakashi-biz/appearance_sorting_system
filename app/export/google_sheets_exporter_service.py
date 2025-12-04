@@ -362,16 +362,15 @@ class GoogleSheetsExporter:
             
             # 個別に書き込み（gspreadのupdateメソッドを使用）
             if values_to_write:
-                success_count = 0
-                for range_str, values in values_to_write.items():
-                    try:
-                        worksheet.update(range_str, values, value_input_option='USER_ENTERED')
-                        success_count += 1
-                    except Exception as e:
-                        log(f"警告: 範囲 {range_str} の書き込みに失敗しました: {str(e)}")
-                
-                if success_count > 0:
-                    log(f"{success_count}/{len(values_to_write)}個の範囲にデータを書き込みました")
+                try:
+                    batch_updates = [
+                        {"range": range_str, "values": values}
+                        for range_str, values in values_to_write.items()
+                    ]
+                    worksheet.batch_update(batch_updates, value_input_option='USER_ENTERED')
+                    log(f"{len(batch_updates)}/{len(values_to_write)}個の範囲にデータを書き込みました")
+                except Exception as e:
+                    log(f"警告: まとめて書き込みに失敗しました: {str(e)}")
             
             log(f"Googleスプレッドシートへの出力が完了しました: {len(inspector_df)}件")
             return True

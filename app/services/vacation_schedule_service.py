@@ -184,7 +184,8 @@ def load_vacation_schedule(sheets_url: str, credentials_path: str, sheet_name: s
             return {}
         
         # 全データを取得
-        all_values = worksheet.get_all_values()
+        # 必要な範囲のみ取得して処理負荷を削減
+        all_values = worksheet.get('A1:AG100')
         
         if not all_values or len(all_values) < 3:
             logger.warning("データが存在しないか、フォーマットが正しくありません")
