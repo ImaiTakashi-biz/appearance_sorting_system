@@ -11,6 +11,7 @@ import logging
 import copy
 import openpyxl
 from pathlib import Path
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +28,10 @@ WORK_HOURS_BUFFER = 0.05  # 0.05h（3分）の余裕を確保
 # 追加：勤務時間の10%超過を許容
 WORK_HOURS_OVERRUN_RATE = 0.1
 SAME_DAY_WORK_HOURS_OVERRUN_RATE = 0.2
+HIGH_PRIORITY_RESERVED_CAPACITY_HOURS = 3.5  # 優先ロットの間、各検査員が確保すべき時間（h）
+HIGH_PRIORITY_SHIPPING_THRESHOLD = 2        # この番付以下（当日・当日洗浄）を優先ロットとする
+SAME_DAY_FORCE_SECOND_INSPECTOR_HOURS = 3.0  # 当日洗浄上がり品で最低2人以上とする検査時間の境界（h）
+SAME_DAY_RELAXATION_THRESHOLD_HOURS = 3.0    # 当日洗浄上がり品の制約緩和を始める検査時間の境界（h）
 
 # 品番切替ペナルティ係数
 PENALTY_LOT_COUNT_ALPHA = 2.0 / 60.0  # 割当ロット数に対するペナルティ（2分相当を時間に変換）
@@ -69,8 +74,10 @@ class InspectorAssignmentManager:
         self.required_inspectors_threshold = (
             required_inspectors_threshold 
             if required_inspectors_threshold is not None 
-            else 3.0
+            else 3.5
         )
+        self.same_day_relaxation_threshold = SAME_DAY_RELAXATION_THRESHOLD_HOURS
+        self.same_day_force_second_inspector_threshold = SAME_DAY_FORCE_SECOND_INSPECTOR_HOURS
         # 検査員の割り当て履歴を追跡（公平な割り当てのため）
         self.inspector_assignment_count = {}
         self.inspector_last_assignment = {}
@@ -125,7 +132,9 @@ class InspectorAssignmentManager:
         self.violation_count = 0  # 総違反件数（swap対象となった違反の数）
         # 【追加】固定検査員情報を保持（品番ごとの固定検査員リスト）
         # 形式: {品番: [検査員名1, 検査員名2, ...]}
-        self.fixed_inspectors_by_product = {}
+        # 品番ごとの固定検査員情報:
+        # {品番: [ {'process': '工程名', 'inspectors': ['A', 'B']}, ... ]}
+        self.fixed_inspectors_by_product: Dict[str, List[Dict[str, Any]]] = {}
         # 同日洗浄品の制約緩和フラグ（品番: ロットインデックス）
         self.same_day_constraint_relaxations = set()
         # 【高速化】検査員マスタのインデックス（O(1)アクセス用）
@@ -196,6 +205,21 @@ class InspectorAssignmentManager:
         # バッファをクリア
         self.log_buffer.clear()
 
+    def _normalize_shipping_date_string(self, shipping_date: Any) -> str:
+        """出荷予定日を文字列化して空白をトリム"""
+        if pd.isna(shipping_date):
+            return ''
+        return str(shipping_date).strip()
+
+    def _is_same_day_cleaning_label(self, shipping_date: Any) -> bool:
+        """出荷予定日が当日洗浄・先行検査系かどうか判定"""
+        shipping_date_str = self._normalize_shipping_date_string(shipping_date)
+        if not shipping_date_str:
+            return False
+        if shipping_date_str in {"当日洗浄上がり品", "当日洗浄品", "当日先行検査", "先行検査"}:
+            return True
+        return "当日洗浄" in shipping_date_str or "当日洗流" in shipping_date_str
+
     def _apply_work_hours_overrun(self, hours: float) -> float:
         """勤務時間上限に許容率を適用（10%超過まで許容）"""
         return hours * (1.0 + WORK_HOURS_OVERRUN_RATE)
@@ -214,7 +238,12 @@ class InspectorAssignmentManager:
         self.same_day_same_name_relaxation_attempts[key] = attempts + 1
         return True
 
-    def _should_relax_hours_for_lot(self, product_number: str, shipping_date_str: str) -> bool:
+    def _should_relax_hours_for_lot(
+        self,
+        product_number: str,
+        shipping_date_str: str,
+        inspection_time: Optional[float] = None
+    ) -> bool:
         """
         特定ロットに対して勤務時間ルールや必要人数の緩和を適用すべきか
         """
@@ -226,7 +255,95 @@ class InspectorAssignmentManager:
             return True
         if shipping_date_str in keywords or "当日洗浄" in shipping_date_str:
             return True
+        if inspection_time is not None and inspection_time >= self.same_day_relaxation_threshold:
+            return True
         return False
+
+    def _calc_required_inspectors(self, inspection_time: float, threshold: Optional[float] = None) -> int:
+        """検査時間としきい値から必要検査員数を計算"""
+        threshold_value = threshold if threshold is not None else self.required_inspectors_threshold
+        if inspection_time <= 0 or pd.isna(inspection_time):
+            return 1
+        if inspection_time <= threshold_value:
+            return 1
+        calculated = max(2, int(inspection_time / threshold_value) + 1)
+        return min(5, calculated)
+
+    def _is_same_day_high_duration(self, inspection_time: float) -> bool:
+        """当日洗浄ロットが制約緩和の対象となる長時間ロットか判定"""
+        if inspection_time is None or pd.isna(inspection_time):
+            return False
+        return inspection_time >= self.same_day_relaxation_threshold
+
+    def _should_force_same_day_dual_assignment(self, inspection_time: float) -> bool:
+        """当日洗浄ロットに最低2人以上を確保すべきか判定"""
+        if inspection_time is None or pd.isna(inspection_time):
+            return False
+        return inspection_time >= self.same_day_force_second_inspector_threshold
+    def _split_process_keywords(self, process_filter: str) -> List[str]:
+        """工程名フィルターを / や ／ で分割してキーワードリストを作成"""
+        if not process_filter:
+            return []
+        return [keyword.strip() for keyword in re.split(r"[／/]", process_filter) if keyword.strip()]
+
+    def _process_filter_matches(self, process_filter: str, actual_process_name: Optional[str]) -> bool:
+        """登録済み品番の工程フィルタが現在工程名に一致するか判定"""
+        if not process_filter:
+            return False
+        keywords = self._split_process_keywords(process_filter)
+        if not keywords:
+            return False
+        candidate = str(actual_process_name or "").strip()
+        if not candidate:
+            return False
+        for keyword in keywords:
+            if keyword in candidate:
+                return True
+        return False
+
+    def _get_tuple_value(
+        self,
+        row: Any,
+        cols_map: Dict[str, int],
+        column_name: str,
+        default: str = ''
+    ) -> str:
+        """itertuplesの結果（namedtuple）から列値を取り出し、文字列化する"""
+        idx = cols_map.get(column_name, -1)
+        if idx == -1:
+            return default
+        value = row[idx]
+        if pd.isna(value):
+            return default
+        return str(value).strip()
+
+    def _collect_fixed_inspector_names(
+        self,
+        product_number: str,
+        process_name_context: Optional[str]
+    ) -> List[str]:
+        """
+        品番・工程名にマッチする固定検査員名のリストを取得（重複は除去）
+        """
+        entries = self.fixed_inspectors_by_product.get(product_number, [])
+        if not entries:
+            return []
+        result: List[str] = []
+        seen: Set[str] = set()
+        for entry in entries:
+            process_filter = entry.get('process', '').strip()
+            if process_filter:
+                if not self._process_filter_matches(process_filter, process_name_context):
+                    continue
+            for name in entry.get('inspectors', []):
+                if not name:
+                    continue
+                name_str = str(name).strip()
+                if not name_str or name_str in seen:
+                    continue
+                seen.add(name_str)
+                result.append(name_str)
+        return result
     
     def enable_log_batching(self, batch_size: int = 10) -> None:
         """
@@ -706,7 +823,8 @@ class InspectorAssignmentManager:
         # 【追加】固定検査員が設定されている品番を最優先にするソートキーを追加
         def has_fixed_inspectors(row: Any) -> bool:
             product_number = row['品番']
-            fixed_inspector_names = self.fixed_inspectors_by_product.get(product_number, [])
+            process_name = row.get('現在工程名', '')
+            fixed_inspector_names = self._collect_fixed_inspector_names(product_number, process_name)
             return len(fixed_inspector_names) > 0
         
         result_df['_has_fixed_inspectors'] = result_df.apply(has_fixed_inspectors, axis=1)
@@ -827,18 +945,8 @@ class InspectorAssignmentManager:
             if shipping_date_str == "当日":
                 return 1
 
-            def is_same_day_cleaning_text(text: str) -> bool:
-                if not text:
-                    return False
-                text = text.strip()
-                return (
-                    text in {"当日洗浄上がり品", "当日洗浄品"} or
-                    "当日洗浄" in text or
-                    "当日洗流" in text
-                )
-
             # 2. 当日洗浄品
-            if is_same_day_cleaning_text(shipping_date_str):
+            if self._is_same_day_cleaning_label(shipping_date):
                 return 2
 
             # 3. 2営業日以内（当日以降）
@@ -858,31 +966,21 @@ class InspectorAssignmentManager:
             return 6
         
         result_df['_shipping_priority'] = result_df.apply(calculate_priority, axis=1)
+        result_df['_is_high_priority'] = result_df['_shipping_priority'] <= HIGH_PRIORITY_SHIPPING_THRESHOLD
         
         # 同一品番の当日洗浄上がり品/先行検査品のロット数を事前にカウント（各ロットに均等に検査員を分散させるため）
         same_day_cleaning_product_counts: Dict[str, int] = {}
         for row_idx, row in enumerate(result_df.itertuples(index=False)):
             shipping_date = row[result_cols.get('出荷予定日', -1)] if '出荷予定日' in result_cols else 'N/A'
             shipping_date_str = str(shipping_date).strip() if pd.notna(shipping_date) else ''
-            is_same_day_cleaning = (
-                shipping_date_str == "当日洗浄上がり品" or
-                shipping_date_str == "当日洗浄品" or
-                "当日洗浄" in shipping_date_str or
-                shipping_date_str == "先行検査" or
-                shipping_date_str == "当日先行検査"
-            )
+            is_same_day_cleaning = self._is_same_day_cleaning_label(shipping_date)
             if is_same_day_cleaning:
                 product_number = row[result_cols['品番']]
                 same_day_cleaning_product_counts[product_number] = same_day_cleaning_product_counts.get(product_number, 0) + 1
         
         # 各ロットにロット数を記録
         # 高速化: ベクトル化（applyの代わりに条件分岐をベクトル化）
-        shipping_date_col = result_df.get('出荷予定日', pd.Series([''] * len(result_df), index=result_df.index))
-        shipping_date_str = shipping_date_col.astype(str).str.strip()
-        is_same_day_cleaning_mask = (
-            shipping_date_str.isin(["当日洗浄上がり品", "当日洗浄品", "先行検査", "当日先行検査"]) |
-            shipping_date_str.str.contains("当日洗浄", na=False)
-        )
+        is_same_day_cleaning_mask = result_df['出荷予定日'].apply(self._is_same_day_cleaning_label)
         product_numbers = result_df['品番'].astype(str).str.strip()
         result_df['_same_day_cleaning_lot_count'] = (
             is_same_day_cleaning_mask * product_numbers.map(same_day_cleaning_product_counts).fillna(0)
@@ -918,7 +1016,7 @@ class InspectorAssignmentManager:
             self.log_message(f"固定検査員が設定されている品番のロットを最優先で割り当てます: {len(fixed_inspector_lots)}ロット（品番: {list(fixed_products)}）")
         
         # 一時列を削除
-        result_df = result_df.drop(columns=['_shipping_priority', '_force_same_day_priority'], errors='ignore')
+        result_df = result_df.drop(columns=['_force_same_day_priority'], errors='ignore')
         
         self.log_message("並び順ロジック: 緊急度 → 2営業日以内の出荷 → 固定リソース → 新製品の順で並び替えました。")
 
@@ -1261,6 +1359,7 @@ class InspectorAssignmentManager:
             # 結果用のDataFrameを準備
             result_df = self._prepare_result_dataframe(inspector_df)
             
+            process_name_context: str = ''
             # 出荷予定日でソート（古い順）- 最優先ルール
             # 日付形式を統一してからソート（当日洗浄品は文字列として保持）
             result_df['出荷予定日'] = result_df['出荷予定日'].apply(self._convert_shipping_date)
@@ -1277,6 +1376,14 @@ class InspectorAssignmentManager:
             # 列名のインデックスマップを作成（itertuples用）
             result_cols = {col: idx for idx, col in enumerate(result_df.columns)}
             result_df = self._sort_lots_by_priority(result_df, result_cols)
+            high_priority_mask = result_df.get('_is_high_priority', pd.Series([False] * len(result_df), index=result_df.index)).astype(bool)
+            high_priority_total = int(high_priority_mask.sum())
+            high_priority_remaining = high_priority_total
+            if high_priority_total > 0:
+                self.log_message(
+                    f"優先度の高いロット {high_priority_total}件（当日/当日洗浄）を優先するため、各検査員の割当枠から "
+                    f"{HIGH_PRIORITY_RESERVED_CAPACITY_HOURS:.1f}h を確保します"
+                )
             
             # 各ロットに対して検査員を割り当て
             result_cols_after_sort = {col: idx for idx, col in enumerate(result_df.columns)}
@@ -1295,17 +1402,17 @@ class InspectorAssignmentManager:
                 # 当日洗浄上がり品かどうかを判定（先に判定）
                 shipping_date = row[result_cols_after_sort.get('出荷予定日', -1)] if '出荷予定日' in result_cols_after_sort else 'N/A'
                 shipping_date_str = str(shipping_date).strip() if pd.notna(shipping_date) else ''
-                is_same_day_cleaning = (
-                    shipping_date_str == "当日洗浄上がり品" or
-                    shipping_date_str == "当日洗浄品" or
-                    "当日洗浄" in shipping_date_str or
-                shipping_date_str == "先行検査" or
-                shipping_date_str == "当日先行検査"
-                )
+                is_same_day_cleaning = self._is_same_day_cleaning_label(shipping_date)
+                high_priority_idx = result_cols_after_sort.get('_is_high_priority', -1)
+                is_high_priority = bool(row[high_priority_idx]) if high_priority_idx != -1 else False
+                if is_high_priority and high_priority_remaining > 0:
+                    high_priority_remaining -= 1
+                reserve_for_high_priority = (high_priority_remaining > 0) and not is_high_priority
 
                 two_business_idx = result_cols_after_sort.get('_within_two_business_days', -1)
                 is_two_business_day = bool(row[two_business_idx]) if two_business_idx != -1 else False
                 is_high_priority_urgent = is_same_day_cleaning or is_two_business_day
+                is_same_day_high_duration = is_same_day_cleaning and self._is_same_day_high_duration(inspection_time)
                 
                 # ロット数量が0の場合は検査員を割り当てない
                 if lot_quantity == 0 or pd.isna(lot_quantity) or inspection_time == 0 or pd.isna(inspection_time):
@@ -1331,7 +1438,8 @@ class InspectorAssignmentManager:
                 
                 # 【追加】固定検査員が設定されている品番の場合、固定検査員を優先的に配置
                 # 登録済み品番リストの固定検査員が設定されている品番は、出荷予定日よりも優先して割り当てる
-                fixed_inspector_names = self.fixed_inspectors_by_product.get(product_number, [])
+                process_name = self._get_tuple_value(row, result_cols_after_sort, '現在工程名')
+                fixed_inspector_names = self._collect_fixed_inspector_names(product_number, process_name)
                 fixed_candidate_count = 0
                 if fixed_inspector_names:
                     # 固定検査員とそれ以外に分離
@@ -1359,7 +1467,8 @@ class InspectorAssignmentManager:
                         complete_candidates = self.get_available_inspectors(
                             product_number, process_number, skill_master_df, inspector_master_df,
                             shipping_date=shipping_date, allow_new_team_fallback=False,
-                            process_master_df=process_master_df, inspection_target_keywords=inspection_target_keywords
+                            process_master_df=process_master_df, inspection_target_keywords=inspection_target_keywords,
+                            process_name_context=process_name
                         )
                         
                         # 追加された固定検査員を確認
@@ -1383,18 +1492,9 @@ class InspectorAssignmentManager:
                     fixed_candidate_count = 0
                 
                 # 必要な検査員人数を計算（先に計算してから、当日洗浄上がり品の制約を適用）
-                # 1人の検査員に3時間を超えないようにする制約を考慮
-                if inspection_time <= 0:
-                    required_inspectors = 1
-                else:
-                    # 1人の検査員に設定された時間を超えないようにする制約を考慮
-                    # 必要人数 = 検査時間 / 設定時間（切り上げ、最低2人）
-                    if inspection_time <= self.required_inspectors_threshold:
-                        required_inspectors = 1
-                    else:
-                        calculated_inspectors = max(2, int(inspection_time / self.required_inspectors_threshold) + 1)
-                        # 5名以上になる場合は5名に制限（特例）
-                        required_inspectors = min(5, calculated_inspectors)
+                required_inspectors = self._calc_required_inspectors(inspection_time)
+                if is_same_day_cleaning and self._should_force_same_day_dual_assignment(inspection_time):
+                    required_inspectors = max(required_inspectors, 2)
                 
                 if fixed_candidate_count > 0:
                     fixed_slot_count = min(fixed_candidate_count, 5)
@@ -1517,6 +1617,13 @@ class InspectorAssignmentManager:
                         )
                         filtered_inspectors = original_available_inspectors.copy()
 
+                    if is_same_day_high_duration and len(filtered_inspectors) < required_inspectors:
+                        self.log_message(
+                            f"🔶 当日洗浄上がり品 {product_number} ({inspection_time:.1f}h) は長時間ロットのため制約緩和フラグを適用し、候補リストを維持します（必要: {required_inspectors}人）",
+                            level='info'
+                        )
+                        filtered_inspectors = original_available_inspectors.copy()
+
                     available_inspectors = filtered_inspectors
                     excluded_count = original_count - len(available_inspectors)
                     if excluded_count > 0:
@@ -1581,6 +1688,14 @@ class InspectorAssignmentManager:
                         self.log_message(f"新製品チームメンバー: {len(available_inspectors)}人取得しました")
                     else:
                         self.log_message(f"新規品 {product_number}: get_available_inspectorsから {len(available_inspectors)}人の検査員が返されました（新製品チームの可能性あり）")
+                if not available_inspectors and is_same_day_high_duration:
+                    fallback_inspectors = self.get_new_product_team_inspectors(inspector_master_df)
+                    if fallback_inspectors:
+                        available_inspectors = fallback_inspectors
+                        self.log_message(
+                            f"⚡ 長時間の当日洗浄上がり品 {product_number} ({inspection_time:.1f}h) に対し、新製品チームを投入して候補を確保しました"
+                        )
+                        continue
                 elif not available_inspectors:
                     # 詳細な原因を特定
                     skill_rows = skill_master_df[skill_master_df.iloc[:, 0] == product_number]
@@ -1624,9 +1739,12 @@ class InspectorAssignmentManager:
                 # 検査員の残勤務時間に応じた非対称分配（貪欲法）を実行
                 # 特例: 一ロットで検査員が5名以上必要になる場合、5名に制限
                 
+                process_name_context = self._get_tuple_value(row, result_cols_after_sort, '現在工程名')
                 assigned_inspectors, remaining_time, assigned_time_sum = self.assign_inspectors_asymmetric(
                     available_inspectors, inspection_time, inspector_master_df, product_number, is_new_product,
-                    max_inspectors=required_inspectors, allow_same_day_overrun=is_same_day_cleaning
+                    max_inspectors=required_inspectors, allow_same_day_overrun=is_same_day_cleaning,
+                    reserve_capacity_for_high_priority=reserve_for_high_priority,
+                    process_name_context=process_name_context
                 )
                 
                 # デバッグログ出力
@@ -1677,7 +1795,8 @@ class InspectorAssignmentManager:
                     additional_candidates = self.get_available_inspectors(
                         product_number, process_number, skill_master_df, inspector_master_df,
                         shipping_date=shipping_date, allow_new_team_fallback=True,
-                        process_master_df=process_master_df, inspection_target_keywords=inspection_target_keywords
+                        process_master_df=process_master_df, inspection_target_keywords=inspection_target_keywords,
+                        process_name_context=process_name
                     )
                     
                     # 既にこの品番または同じ品名の他の品番に割り当てられた検査員を除外（品番単位・品名単位の制約）
@@ -1758,7 +1877,8 @@ class InspectorAssignmentManager:
                     # 必要人数に達するまで、検査時間を強制的に分割する
                     reassigned_inspectors, reassigned_remaining, reassigned_time_sum = self.assign_inspectors_asymmetric(
                         all_candidates_filtered, inspection_time, inspector_master_df, product_number, is_new_product,
-                        max_inspectors=required_inspectors, allow_same_day_overrun=is_same_day_cleaning
+                        max_inspectors=required_inspectors, allow_same_day_overrun=is_same_day_cleaning,
+                        process_name_context=process_name_context
                     )
                     
                     # 必要人数に達しない場合、検査時間を強制的に分割する
@@ -1875,7 +1995,8 @@ class InspectorAssignmentManager:
                                 # 検査時間全体を再分配
                                 final_assigned, final_remaining, final_time_sum = self.assign_inspectors_asymmetric(
                                     all_candidates_with_new_team, inspection_time, inspector_master_df, product_number, is_new_product=True,
-                                    max_inspectors=required_inspectors, allow_same_day_overrun=is_same_day_cleaning
+                                    max_inspectors=required_inspectors, allow_same_day_overrun=is_same_day_cleaning,
+                                    process_name_context=process_name_context
                                 )
                                 
                                 # 必要人数に達しない場合、検査時間を強制的に分割する
@@ -2027,6 +2148,7 @@ class InspectorAssignmentManager:
                 
                 # 検査員が選択されなかった場合（ルール違反を避けるため未割当）
                 # 当日洗浄上がり品の場合は優先順位が高いため、未割当ロット再処理で再試行される
+                target_process_name = self._get_tuple_value(row, result_cols_after_sort, '現在工程名')
                 if len(assigned_inspectors) == 0:
                     # 詳細な原因を記録
                     reason_parts = []
@@ -2035,7 +2157,13 @@ class InspectorAssignmentManager:
                     else:
                         # 改善ポイント: 非対称分配ではdivided_timeが存在しないため、inspection_timeを使用
                         # filter_available_inspectorsの結果を確認（簡易的なチェック用にinspection_timeを使用）
-                        filtered_count = len(self.filter_available_inspectors(available_inspectors, inspection_time, inspector_master_df, product_number))
+                        filtered_count = len(self.filter_available_inspectors(
+                            available_inspectors,
+                            inspection_time,
+                            inspector_master_df,
+                            product_number,
+                            process_name_context=target_process_name
+                        ))
                         if filtered_count == 0:
                             reason_parts.append("勤務時間または4時間上限により全員除外")
                         else:
@@ -2240,6 +2368,10 @@ class InspectorAssignmentManager:
                 result_df = result_df.drop(columns=['_is_new_product'])
             if '_has_fixed_inspectors' in result_df.columns:
                 result_df = result_df.drop(columns=['_has_fixed_inspectors'])
+            if '_is_high_priority' in result_df.columns:
+                result_df = result_df.drop(columns=['_is_high_priority'])
+            if '_shipping_priority' in result_df.columns:
+                result_df = result_df.drop(columns=['_shipping_priority'])
             
             # 最終的な表示用ソート: 出荷予定日、品番、指示日の順
             # 出荷予定日のソートキー関数
@@ -2377,7 +2509,8 @@ class InspectorAssignmentManager:
         shipping_date: Optional[Any] = None,
         allow_new_team_fallback: bool = False,
         process_master_df: Optional[pd.DataFrame] = None,
-        inspection_target_keywords: Optional[List[str]] = None
+        inspection_target_keywords: Optional[List[str]] = None,
+        process_name_context: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """
         利用可能な検査員を取得
@@ -2393,12 +2526,14 @@ class InspectorAssignmentManager:
                 False: 新規品対応チームを使用しない（通常の品番の場合）
             process_master_df: 工程マスタのDataFrame（先行検査品・当日洗浄品用）
             inspection_target_keywords: 検査対象CSVのキーワードリスト（先行検査品・当日洗浄品用）
+            process_name_context: 現在工程名（固定検査員の工程フィルタに使用）
         
         Returns:
             利用可能な検査員のリスト
         """
         try:
             available_inspectors = []
+            target_process_name = str(process_name_context or '').strip()
             
             # 先行検査品・当日洗浄品で工程番号が空の場合、工程マスタから推定
             if (process_number is None or str(process_number).strip() == ''):
@@ -2719,7 +2854,7 @@ class InspectorAssignmentManager:
                     self.log_message(f"📊 除外された検査員数: {len(skill_values_excluded)}人")
             
             # 【追加】固定検査員を優先的に配置
-            fixed_inspector_names = self.fixed_inspectors_by_product.get(product_number, [])
+            fixed_inspector_names = self._collect_fixed_inspector_names(product_number, target_process_name)
             if fixed_inspector_names:
                 self.log_message(f"品番 '{product_number}' の固定検査員: {fixed_inspector_names}")
                 # 固定検査員とそれ以外に分離
@@ -3182,7 +3317,9 @@ class InspectorAssignmentManager:
         product_number: str,
         is_new_product: bool = False,
         max_inspectors: Optional[int] = None,
-        allow_same_day_overrun: bool = False
+        allow_same_day_overrun: bool = False,
+        reserve_capacity_for_high_priority: bool = False,
+        process_name_context: Optional[str] = None
     ) -> Tuple[List[Dict[str, Any]], float, float]:
         """
         改善ポイント: 非対称分配＋部分割当の実装
@@ -3208,6 +3345,7 @@ class InspectorAssignmentManager:
             ]
         """
         try:
+            target_process_name = process_name_context or ''
             if not available_inspectors:
                 return [], required_hours, 0.0
             
@@ -3217,7 +3355,7 @@ class InspectorAssignmentManager:
             
             # 各検査員の利用可能容量を計算
             # 【追加】固定検査員情報を取得（登録済み品番の特別処置）
-            fixed_inspector_names = self.fixed_inspectors_by_product.get(product_number, [])
+            fixed_inspector_names = self._collect_fixed_inspector_names(product_number, target_process_name)
             
             candidates_with_capacity = []
             for inspector in available_inspectors:
@@ -3234,6 +3372,8 @@ class InspectorAssignmentManager:
                 if allow_same_day_overrun:
                     allowed_max_hours = self._apply_same_day_work_hours_overrun(allowed_max_hours)
                 remaining_capacity = max(0.0, allowed_max_hours - daily_hours - WORK_HOURS_BUFFER)
+                if reserve_capacity_for_high_priority:
+                    remaining_capacity = max(0.0, remaining_capacity - HIGH_PRIORITY_RESERVED_CAPACITY_HOURS)
                 
                 # 品番4時間上限を考慮
                 product_hours = self.inspector_product_hours.get(code, {}).get(product_number, 0.0)
@@ -3348,7 +3488,8 @@ class InspectorAssignmentManager:
         inspector_master_df: pd.DataFrame,
         product_number: str,
         is_new_product: bool = False,
-        relax_work_hours: bool = False
+        relax_work_hours: bool = False,
+        process_name_context: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """
         検査員を選択する（スキル組み合わせ考慮・勤務時間考慮・公平な割り当て方式）
@@ -3378,6 +3519,7 @@ class InspectorAssignmentManager:
             # 各検査員の割り当て回数と最終割り当て時刻を更新
             current_time = pd.Timestamp.now()
             current_date = current_time.date()
+            target_process_name = process_name_context or ''
             
             # 利用可能な検査員に割り当て履歴を追加
             for inspector in available_inspectors:
@@ -3396,7 +3538,14 @@ class InspectorAssignmentManager:
             # 勤務時間を考慮して利用可能な検査員をフィルタリング
             if is_new_product:
                 self.log_message(f"新規品 {product_number}: 新製品チームメンバー {len(available_inspectors)}人をフィルタリング中")
-            available_inspectors = self.filter_available_inspectors(available_inspectors, divided_time, inspector_master_df, product_number, relax_work_hours=relax_work_hours)
+            available_inspectors = self.filter_available_inspectors(
+                available_inspectors,
+                divided_time,
+                inspector_master_df,
+                product_number,
+                relax_work_hours=relax_work_hours,
+                process_name_context=target_process_name
+            )
             
             if is_new_product:
                 self.log_message(f"新規品 {product_number}: 勤務時間チェック後 {len(available_inspectors)}人が利用可能")
@@ -3458,7 +3607,8 @@ class InspectorAssignmentManager:
             
             # スキル組み合わせロジックを適用
             selected_inspectors = self.select_inspectors_with_skill_combination(
-                filtered_by_product, required_count, divided_time, current_time, current_date, inspector_master_df, product_number
+                filtered_by_product, required_count, divided_time, current_time, current_date, inspector_master_df, product_number,
+                process_name_context=target_process_name
             )
             
             return selected_inspectors
@@ -3475,7 +3625,8 @@ class InspectorAssignmentManager:
         current_time: pd.Timestamp,
         current_date: date,
         inspector_master_df: pd.DataFrame,
-        product_number: Optional[str] = None
+        product_number: Optional[str] = None,
+        process_name_context: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """
         スキル組み合わせを考慮した検査員選択
@@ -3493,6 +3644,7 @@ class InspectorAssignmentManager:
             選択された検査員リスト
         """
         try:
+            target_process_name = process_name_context or ''
             # 特例: 一ロットで検査員が5名以上必要になる場合、5名に制限
             if required_count > 5:
                 required_count = 5
@@ -3500,7 +3652,7 @@ class InspectorAssignmentManager:
             # 【追加】固定検査員情報を取得（登録済み品番の特別処置）
             fixed_inspector_names = []
             if product_number:
-                fixed_inspector_names = self.fixed_inspectors_by_product.get(product_number, [])
+                fixed_inspector_names = self._collect_fixed_inspector_names(product_number, target_process_name)
             
             # スキルレベル別に検査員を分類
             skill_groups = {
@@ -3994,7 +4146,8 @@ class InspectorAssignmentManager:
         divided_time: float,
         inspector_master_df: pd.DataFrame,
         product_number: str,
-        relax_work_hours: bool = False
+        relax_work_hours: bool = False,
+        process_name_context: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """
         勤務時間と品番上限を考慮して利用可能な検査員をフィルタリングする（第1パスは緩和版）。
@@ -4106,7 +4259,7 @@ class InspectorAssignmentManager:
                 )
 
             # 【追加】固定検査員を優先的に配置
-            fixed_inspector_names = self.fixed_inspectors_by_product.get(product_number, [])
+            fixed_inspector_names = self._collect_fixed_inspector_names(product_number, process_name_context)
             if fixed_inspector_names:
                 # 固定検査員とそれ以外に分離
                 fixed_inspectors = []
@@ -5715,7 +5868,8 @@ class InspectorAssignmentManager:
                                     continue
                                 
                                 # 【追加】固定検査員を保護：このロットに固定検査員が割り当てられている場合は再割当てをスキップ
-                                fixed_inspector_names = self.fixed_inspectors_by_product.get(product_number, [])
+                                lot_process_name = str(row.get('現在工程名', '') or '').strip()
+                                fixed_inspector_names = self._collect_fixed_inspector_names(product_number, lot_process_name)
                                 if fixed_inspector_names:
                                     # 現在割り当てられている検査員名を取得
                                     current_inspector_value = row.get(f'検査員{inspector_col_num}', '')
@@ -5772,7 +5926,8 @@ class InspectorAssignmentManager:
                                     available_inspectors = self.get_available_inspectors(
                                         product_number, process_number, skill_master_df, inspector_master_df,
                                         shipping_date=shipping_date, allow_new_team_fallback=True,
-                                        process_master_df=process_master_df, inspection_target_keywords=inspection_target_keywords
+                                        process_master_df=process_master_df, inspection_target_keywords=inspection_target_keywords,
+                                        process_name_context=lot_process_name
                                     )
                                 
                                 if not available_inspectors:
@@ -6231,12 +6386,14 @@ class InspectorAssignmentManager:
                             
                             # スキルマスタから利用可能な検査員を取得
                             process_number = lot_info['row'].get('現在工程番号', '')
+                            lot_process_name = str(lot_info['row'].get('現在工程名', '') or '').strip()
                             skill_rows = skill_master_df[skill_master_df.iloc[:, 0] == product_number]
                             is_new_product = skill_rows.empty
                             available_inspectors = self.get_available_inspectors(
                                 product_number, process_number, skill_master_df, inspector_master_df,
                                 shipping_date=shipping_date, allow_new_team_fallback=is_new_product,
-                                process_master_df=process_master_df, inspection_target_keywords=inspection_target_keywords
+                                process_master_df=process_master_df, inspection_target_keywords=inspection_target_keywords,
+                                process_name_context=lot_process_name
                             )
                             
                             if not available_inspectors and is_new_product:
@@ -6594,15 +6751,16 @@ class InspectorAssignmentManager:
                     unassigned_product_name_str = str(unassigned_product_name).strip() if pd.notna(unassigned_product_name) else ''
                     shipping_date_raw = unassigned_row.get('出荷予定日', '')
                     shipping_date_str = str(shipping_date_raw).strip() if pd.notna(shipping_date_raw) else ''
-                    relax_hours = self._should_relax_hours_for_lot(unassigned_product_number, shipping_date_str)
+                    relax_hours = self._should_relax_hours_for_lot(
+                        unassigned_product_number, shipping_date_str, unassigned_inspection_time
+                    )
+                    is_same_day_unassigned_high_duration = self._is_same_day_high_duration(unassigned_inspection_time)
 
                     # 必要な検査員数を計算
                     threshold_for_calc = 2.5 if relax_hours else self.required_inspectors_threshold
-                    if unassigned_inspection_time <= threshold_for_calc:
-                        required_inspectors = 1
-                    else:
-                        required_inspectors = max(2, int(unassigned_inspection_time / threshold_for_calc) + 1)
-                        required_inspectors = min(5, required_inspectors)
+                    required_inspectors = self._calc_required_inspectors(unassigned_inspection_time, threshold_for_calc)
+                    if is_same_day_unassigned_high_duration:
+                        required_inspectors = max(required_inspectors, 2)
                     
                     # 優先度の低いロットから検査員を取得
                     reassigned_inspectors = []
@@ -6664,7 +6822,7 @@ class InspectorAssignmentManager:
                                     daily_hours = self.inspector_daily_assignments.get(inspector_code, {}).get(current_date, 0.0)
                                     max_daily_hours = self.get_inspector_max_hours(inspector_code, inspector_master_df)
                                     allowed_max_hours = self._apply_work_hours_overrun(max_daily_hours)
-                                    if relax_hours:
+                                    if relax_hours or is_same_day_unassigned_high_duration:
                                         allowed_max_hours = self._apply_same_day_work_hours_overrun(allowed_max_hours)
                                     if daily_hours + divided_time > allowed_max_hours:  # 100%まで許容
                                         continue
@@ -6672,7 +6830,11 @@ class InspectorAssignmentManager:
                                     # 5. 4時間上限チェック
                                     product_hours = self.inspector_product_hours.get(inspector_code, {}).get(unassigned_product_number, 0.0)
                                     if product_hours + divided_time > PRODUCT_LIMIT_DRAFT_THRESHOLD:  # 4.5時間まで許容
-                                        continue
+                                        if not (relax_hours or is_same_day_unassigned_high_duration):
+                                            continue
+                                        inspector_entry = next((insp for insp in available_inspectors if insp['コード'] == inspector_code), None)
+                                        if inspector_entry is not None:
+                                            inspector_entry['__near_product_limit'] = True
                                     
                                     # 再割当て可能な検査員を追加
                                     reassigned_inspectors.append({
@@ -6865,6 +7027,8 @@ class InspectorAssignmentManager:
                     
                     # rowオブジェクトが必要な場合は、元のDataFrameから取得
                     row = unassigned_df.loc[idx]
+
+                    lot_process_name = str(row.get('現在工程名', '') or '').strip()
                     
                     # ロット数量が0の場合は検査員を割り当てない
                     if lot_quantity == 0 or pd.isna(lot_quantity) or inspection_time == 0 or pd.isna(inspection_time):
@@ -6918,7 +7082,8 @@ class InspectorAssignmentManager:
                         available_inspectors = self.get_available_inspectors(
                             product_number, process_number, skill_master_df, inspector_master_df,
                             shipping_date=shipping_date, allow_new_team_fallback=is_near_shipping_date,
-                            process_master_df=process_master_df, inspection_target_keywords=inspection_target_keywords
+                            process_master_df=process_master_df, inspection_target_keywords=inspection_target_keywords,
+                            process_name_context=lot_process_name
                         )
                     
                     if not available_inspectors:
@@ -6993,14 +7158,15 @@ class InspectorAssignmentManager:
                                 constraint_msg = "・".join(constraint_types) if constraint_types else "制約"
                                 self.log_message(f"⚠️ 警告: 未割当ロット再処理: 当日洗浄上がり品 {product_number} の候補が0人ですが、優先順位が高いため{constraint_msg}の制約を緩和して再試行します", level='warning')
                                 # 元の候補を再取得（フィルタリング前）
-                                if is_new_product:
-                                    available_inspectors = self.get_new_product_team_inspectors(inspector_master_df)
-                                else:
-                                    available_inspectors = self.get_available_inspectors(
-                                        product_number, process_number, skill_master_df, inspector_master_df,
-                                        shipping_date=shipping_date, allow_new_team_fallback=True,
-                                        process_master_df=process_master_df, inspection_target_keywords=inspection_target_keywords
-                                    )
+                            if is_new_product:
+                                available_inspectors = self.get_new_product_team_inspectors(inspector_master_df)
+                            else:
+                                available_inspectors = self.get_available_inspectors(
+                                    product_number, process_number, skill_master_df, inspector_master_df,
+                                    shipping_date=shipping_date, allow_new_team_fallback=True,
+                                    process_master_df=process_master_df, inspection_target_keywords=inspection_target_keywords,
+                                    process_name_context=lot_process_name
+                                )
                                 self.log_message(f"未割当ロット再処理: 当日洗浄上がり品 {product_number}: 制約緩和後の候補数 {len(available_inspectors)}人")
                         elif len(available_inspectors) < required_inspectors:
                             self.log_message(f"⚠️ 警告: 未割当ロット再処理: 当日洗浄上がり品 {product_number} の候補が不足しています（必要: {required_inspectors}人、利用可能: {len(available_inspectors)}人）。可能な限り割り当てます。", level='warning')
@@ -7226,7 +7392,8 @@ class InspectorAssignmentManager:
                                 available_inspectors = self.get_available_inspectors(
                                     product_number, process_number, skill_master_df, inspector_master_df,
                                     shipping_date=shipping_date, allow_new_team_fallback=True,
-                                    process_master_df=process_master_df, inspection_target_keywords=inspection_target_keywords
+                                    process_master_df=process_master_df, inspection_target_keywords=inspection_target_keywords,
+                                    process_name_context=lot_process_name
                                 )
                             self.log_message(f"未割当ロット再処理: 当日洗浄上がり品 {product_number}: 制約緩和後の候補数 {len(available_inspectors)}人")
                         
@@ -7729,9 +7896,11 @@ class InspectorAssignmentManager:
                         excluded_codes = assigned_codes | already_assigned_to_product | already_assigned_to_product_name
                         
                         # 代替検査員を取得
+                        lot_process_name = str(row.get('現在工程名', '') or '').strip()
                         available_inspectors = self.get_available_inspectors(
                             product_number, process_number, skill_master_df, inspector_master_df,
-                            shipping_date=shipping_date, process_master_df=process_master_df
+                            shipping_date=shipping_date, process_master_df=process_master_df,
+                            process_name_context=lot_process_name
                         )
                         
                         # 除外条件を満たす検査員を探す
@@ -7973,12 +8142,14 @@ class InspectorAssignmentManager:
                             
                             # スキルマスタから利用可能な検査員を取得
                             process_number = lot_info['row'].get('現在工程番号', '')
+                            lot_process_name = str(lot_info['row'].get('現在工程名', '') or '').strip()
                             skill_rows = skill_master_df[skill_master_df.iloc[:, 0] == product_number]
                             is_new_product = skill_rows.empty
                             available_inspectors = self.get_available_inspectors(
                                 product_number, process_number, skill_master_df, inspector_master_df,
                                 shipping_date=shipping_date, allow_new_team_fallback=is_new_product,
-                                process_master_df=process_master_df, inspection_target_keywords=inspection_target_keywords
+                                process_master_df=process_master_df, inspection_target_keywords=inspection_target_keywords,
+                                process_name_context=lot_process_name
                             )
                             
                             if not available_inspectors and is_new_product:
@@ -8490,13 +8661,15 @@ class InspectorAssignmentManager:
                 if removed_inspector:
                     # 代替検査員を探す
                     process_number = row.get('現在工程番号', '')
+                    lot_process_name = str(row.get('現在工程名', '') or '').strip()
                     # スキルマスタに登録があるか確認
                     skill_rows = skill_master_df[skill_master_df.iloc[:, 0] == product_number]
                     is_new_product = skill_rows.empty
                     shipping_date = row.get('出荷予定日', None)
                     available_inspectors = self.get_available_inspectors(
                         product_number, process_number, skill_master_df, inspector_master_df,
-                        shipping_date=shipping_date, allow_new_team_fallback=is_new_product
+                        shipping_date=shipping_date, allow_new_team_fallback=is_new_product,
+                        process_name_context=lot_process_name
                     )
                     # 新規品の場合は新製品チームも取得
                     if not available_inspectors and is_new_product:
@@ -8764,13 +8937,15 @@ class InspectorAssignmentManager:
                 if inspection_time < self.required_inspectors_threshold:
                     # 置き換え処理（増員ではなく）
                     process_number = row.get('現在工程番号', '')
+                    lot_process_name = str(row.get('現在工程名', '') or '').strip()
                     # スキルマスタに登録があるか確認
                     skill_rows = skill_master_df[skill_master_df.iloc[:, 0] == product_number]
                     is_new_product = skill_rows.empty
                     shipping_date = row.get('出荷予定日', None)
                     available_inspectors = self.get_available_inspectors(
                         product_number, process_number, skill_master_df, inspector_master_df,
-                        shipping_date=shipping_date, allow_new_team_fallback=is_new_product
+                        shipping_date=shipping_date, allow_new_team_fallback=is_new_product,
+                        process_name_context=lot_process_name
                     )
                     # 新規品の場合は新製品チームも取得
                     if not available_inspectors and is_new_product:
@@ -9020,13 +9195,15 @@ class InspectorAssignmentManager:
                 elif len(current_inspectors) >= 5:
                     # 置き換え処理（増員ではなく）
                     process_number = row.get('現在工程番号', '')
+                    lot_process_name = str(row.get('現在工程名', '') or '').strip()
                     # スキルマスタに登録があるか確認
                     skill_rows = skill_master_df[skill_master_df.iloc[:, 0] == product_number]
                     is_new_product = skill_rows.empty
                     shipping_date = row.get('出荷予定日', None)
                     available_inspectors = self.get_available_inspectors(
                         product_number, process_number, skill_master_df, inspector_master_df,
-                        shipping_date=shipping_date, allow_new_team_fallback=is_new_product
+                        shipping_date=shipping_date, allow_new_team_fallback=is_new_product,
+                        process_name_context=lot_process_name
                     )
                     # 新規品の場合は新製品チームも取得
                     if not available_inspectors and is_new_product:
@@ -9159,13 +9336,15 @@ class InspectorAssignmentManager:
                     # 現在の検査員が5名未満の場合のみ増員を試みる
                     if len(current_inspectors) < 5:
                         process_number = row.get('現在工程番号', '')
+                        lot_process_name = str(row.get('現在工程名', '') or '').strip()
                         # スキルマスタに登録があるか確認
                         skill_rows = skill_master_df[skill_master_df.iloc[:, 0] == product_number]
                         is_new_product = skill_rows.empty
                         shipping_date = row.get('出荷予定日', None)
                         available_inspectors = self.get_available_inspectors(
                             product_number, process_number, skill_master_df, inspector_master_df,
-                            shipping_date=shipping_date, allow_new_team_fallback=is_new_product
+                            shipping_date=shipping_date, allow_new_team_fallback=is_new_product,
+                            process_name_context=lot_process_name
                         )
                         # 新規品の場合は新製品チームも取得
                         if not available_inspectors and is_new_product:

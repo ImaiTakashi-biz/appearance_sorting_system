@@ -9,7 +9,7 @@ from pathlib import Path
 from collections import defaultdict, deque
 import warnings  # 警告抑制のため
 import webbrowser
-from typing import Deque, Dict, List, Optional, Tuple
+from typing import Deque, Dict, List, Optional, Tuple, Any
 
 # pandasのUserWarningを抑制（SQLAlchemy接続の推奨警告）
 warnings.filterwarnings('ignore', category=UserWarning, message='.*pandas only supports SQLAlchemy.*')
@@ -1369,20 +1369,34 @@ class ModernDataExtractorUI:
                 return
             
             # 固定検査員情報を辞書形式で構築
-            fixed_inspectors_dict = {}
+            fixed_inspectors_dict: Dict[str, List[Dict[str, Any]]] = {}
             for item in self.registered_products:
-                product_number = item.get('品番', '')
-                fixed_inspectors = item.get('固定検査員', [])
-                if product_number and fixed_inspectors:
-                    fixed_inspectors_dict[product_number] = fixed_inspectors
+                product_number = str(item.get('品番', '')).strip()
+                process_name = str(item.get('工程名', '') or '').strip()
+                fixed_inspectors = [
+                    str(name).strip()
+                    for name in item.get('固定検査員', [])
+                    if name and str(name).strip()
+                ]
+                if not product_number or not fixed_inspectors:
+                    continue
+                unique_inspectors = list(dict.fromkeys(fixed_inspectors))
+                fixed_inspectors_dict.setdefault(product_number, []).append({
+                    'process': process_name,
+                    'inspectors': unique_inspectors
+                })
             
             # InspectorAssignmentManagerに設定
             self.inspector_manager.fixed_inspectors_by_product = fixed_inspectors_dict
             
             if fixed_inspectors_dict:
                 self.log_message(f"固定検査員情報を設定しました: {len(fixed_inspectors_dict)}品番")
-                for product, inspectors in fixed_inspectors_dict.items():
-                    self.log_message(f"  品番 '{product}': {', '.join(inspectors)}")
+                for product, entries in fixed_inspectors_dict.items():
+                    for entry in entries:
+                        process_text = entry.get('process') or '全工程'
+                        inspectors = entry.get('inspectors', [])
+                        inspectors_text = ', '.join(inspectors)
+                        self.log_message(f"  品番 '{product}' (工程: {process_text}) → {inspectors_text}")
             else:
                 self.log_message("固定検査員情報は設定されていません")
                 
