@@ -798,7 +798,7 @@ class InspectorAssignmentManager:
             result_df['_force_same_day_priority'] = result_df['_force_same_day_priority'].fillna(False).astype(bool)
 
         # 出荷予定日の優先順位を設定（厳守ルール）
-        # 優先度: 1=当日、2=当日洗浄品、3=先行検査品、4=翌日/翌営業日、5=それ以降
+        # 優先度: 1=当日、2=当日洗浄品、3=2営業日以内、4=登録済品番（当日ON）、5=登録済品番、6=その他
         today = pd.Timestamp.now().normalize()
         today_date = today.date()
 
@@ -815,27 +815,47 @@ class InspectorAssignmentManager:
         
         def calculate_priority(row: Any) -> int:
             shipping_date = row['出荷予定日']
-            if row.get('_force_same_day_priority', False):
-                return 1
-            if pd.isna(shipping_date):
-                return 3
-            shipping_date_str = str(shipping_date).strip()
-            # 緊急度：当日/当日洗浄/先行検査
-            urgent_strings = {"先行検査", "当日先行検査"}
-            if shipping_date_str in urgent_strings:
-                return 1
-            if "当日洗浄" in shipping_date_str or shipping_date_str == "当日洗浄上がり品" or shipping_date_str == "当日洗浄品":
-                return 1
+            shipping_date_str = str(shipping_date).strip() if pd.notna(shipping_date) else ''
+            # 1. 当日出荷
             try:
                 parsed = pd.to_datetime(shipping_date, errors='coerce')
-                if pd.notna(parsed):
-                    if parsed.date() == today_date:
-                        return 1
-                    if parsed.date() <= two_business_days_ahead:
-                        return 2
             except Exception:
-                pass
-            return 3
+                parsed = pd.NaT
+
+            if pd.notna(parsed) and parsed.date() == today_date:
+                return 1
+            if shipping_date_str == "当日":
+                return 1
+
+            def is_same_day_cleaning_text(text: str) -> bool:
+                if not text:
+                    return False
+                text = text.strip()
+                return (
+                    text in {"当日洗浄上がり品", "当日洗浄品"} or
+                    "当日洗浄" in text or
+                    "当日洗流" in text
+                )
+
+            # 2. 当日洗浄品
+            if is_same_day_cleaning_text(shipping_date_str):
+                return 2
+
+            # 3. 2営業日以内（当日以降）
+            if pd.notna(parsed):
+                if parsed.date() > today_date and parsed.date() <= two_business_days_ahead:
+                    return 3
+
+            # 4. 登録済品番（当日ON）
+            if row.get('_force_same_day_priority', False):
+                return 4
+
+            # 5. 登録済品番（通常）
+            if row.get('_has_fixed_inspectors', False):
+                return 5
+
+            # 6. その他
+            return 6
         
         result_df['_shipping_priority'] = result_df.apply(calculate_priority, axis=1)
         
@@ -1446,16 +1466,18 @@ class InspectorAssignmentManager:
                     # 同一品番の複数ロットがある場合、各ロットに均等に検査員を分散させる
                     # 利用可能な検査員数をロット数で割って、各ロットに割り当て可能な検査員数を計算
                     if lot_count > 1 and len(filtered_inspectors) > 0:
-                        # 各ロットに割り当て可能な検査員数（切り上げ）
-                        available_per_lot = int(len(filtered_inspectors) / lot_count) + (1 if len(filtered_inspectors) % lot_count > 0 else 0)
-                        # 現在のロットに割り当て可能な検査員数（既に割り当てられたロット数を考慮）
                         remaining_lots = lot_count - current_assigned_lot_count + 1
-                        max_inspectors_for_this_lot = min(required_inspectors, available_per_lot * remaining_lots)
-                        
-                        # 必要人数を調整（ただし、最小限の必要人数は維持）
-                        if max_inspectors_for_this_lot < required_inspectors:
-                            self.log_message(f"当日洗浄上がり品/先行検査品 {product_number}: 同一品番の複数ロット（{lot_count}ロット）があるため、このロットの必要人数を {required_inspectors}人から {max_inspectors_for_this_lot}人に調整します（均等分散）")
-                            required_inspectors = max(1, max_inspectors_for_this_lot)
+                        if remaining_lots <= 0:
+                            remaining_lots = 1
+                        unique_pool_size = len(original_available_inspectors)
+                        used_up = current_assigned_lot_count - 1
+                        remaining_unique = max(1, unique_pool_size - used_up)
+                        if remaining_unique < required_inspectors:
+                            new_required = max(1, remaining_unique)
+                            self.log_message(
+                                f"当日洗浄上がり品/先行検査品 {product_number}: 同一品番の複数ロット（{lot_count}ロット）に対し、残り {remaining_unique}人しか候補がいないため必要人数を {required_inspectors}人から {new_required}人に調整します（均等分散）"
+                            )
+                            required_inspectors = new_required
                     
                     # 【改善】品番単位・品名単位の制約を適用（候補が不足している場合は緩和）
                     same_name_relaxation_used = False

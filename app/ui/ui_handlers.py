@@ -6,10 +6,10 @@
 import os
 import sys
 from pathlib import Path
-from collections import defaultdict
+from collections import defaultdict, deque
 import warnings  # 警告抑制のため
 import webbrowser
-from typing import Dict, List, Optional, Tuple
+from typing import Deque, Dict, List, Optional, Tuple
 
 # pandasのUserWarningを抑制（SQLAlchemy接続の推奨警告）
 warnings.filterwarnings('ignore', category=UserWarning, message='.*pandas only supports SQLAlchemy.*')
@@ -6550,12 +6550,44 @@ class ModernDataExtractorUI:
         try:
             save_seating_chart(SEATING_JSON_PATH, chart)
             generate_html(chart, SEATING_HTML_PATH, inspector_candidates=inspector_names)
-            webbrowser.open(SEATING_HTML_PATH)
+            self._open_seating_chart_html(SEATING_HTML_PATH)
             self.log_message(f"Seat chart generated: {SEATING_HTML_PATH}")
             self._set_seating_flow_prompt("座席表で割当を変更したら「ロット振分変更反映」を押してください。")
         except Exception as exc:
             messagebox.showerror("Seat chart", f"Failed to generate seat chart: {exc}")
             logger.error("Seat chart export failed", exc_info=True)
+
+    def _open_seating_chart_html(self, html_path: str) -> None:
+        """ネットワーク共有先の HTML をブラウザで開くためのラッパー"""
+        try:
+            seating_path = Path(html_path)
+            if not seating_path.exists():
+                logger.warning("Seat chart HTMLが見つかりません: %s", html_path)
+                messagebox.showwarning("Seat chart", f"座席表HTMLが存在しません: {html_path}")
+                return
+            try:
+                file_url = seating_path.as_uri()
+            except ValueError:
+                file_url = seating_path.resolve().as_uri()
+            opened = False
+            try:
+                opened = webbrowser.open(file_url)
+            except Exception:
+                opened = False
+            if not opened and os.name == "nt" and hasattr(os, "startfile"):
+                try:
+                    os.startfile(str(seating_path))
+                    opened = True
+                except Exception:
+                    logger.debug("os.startfile による座席表 HTML の起動に失敗しました", exc_info=True)
+            if opened:
+                logger.info("Seat chart opened: %s", file_url)
+            else:
+                logger.warning("Seat chart HTML を自動的に開けませんでした: %s", html_path)
+                messagebox.showwarning("Seat chart", f"座席表HTMLを開くことができませんでした。\n{html_path}")
+        except Exception as exc:
+            logger.error("Seat chart HTML を開けませんでした", exc_info=True)
+            messagebox.showerror("Seat chart", f"座席表を開く処理でエラーが発生しました: {exc}")
 
     def apply_seating_chart_results(self):
         """Update the assignment table from the seating_chart.json file."""
@@ -6581,6 +6613,10 @@ class ModernDataExtractorUI:
                 seen_norms.add(normalized_col)
 
         rowcol_to_inspector: Dict[Tuple[str, str], str] = {}
+        product_column_candidates = ["品番", "製品番号", "製品名", "品名"]
+        lot_key_to_inspector: Dict[str, Deque[str]] = {}
+        seen_rowcol_keys = set()
+        seen_lot_keys = set()
         for seat in chart.get("seats", []):
             inspector_name = (seat.get("name") or "").strip()
             if not inspector_name:
@@ -6594,13 +6630,25 @@ class ModernDataExtractorUI:
                 )
                 normalized_col = self._normalize_inspector_column_name(source_col)
                 if normalized_row and normalized_col:
-                    rowcol_to_inspector[(normalized_row, normalized_col)] = inspector_name
+                    rowcol_key = (normalized_row, normalized_col)
+                    if rowcol_key not in seen_rowcol_keys:
+                        rowcol_to_inspector[rowcol_key] = inspector_name
+                        seen_rowcol_keys.add(rowcol_key)
+                lot_key = lot.get("lot_key")
+                if lot_key:
+                    if lot_key not in seen_lot_keys:
+                        lot_key_to_inspector.setdefault(lot_key, deque()).append(inspector_name)
+                        seen_lot_keys.add(lot_key)
 
-        if not rowcol_to_inspector:
+        if not rowcol_to_inspector and not lot_key_to_inspector:
             logger.info("Seat chart sync: rowcol_to_inspector is empty")
             messagebox.showinfo("Seat chart sync", "Seating chart has no lot assignments.")
             return
-        logger.info("Seat chart sync: rowcol_to_inspector entries=%d", len(rowcol_to_inspector))
+        logger.info(
+            "Seat chart sync: rowcol_to_inspector entries={}, lot_key entries={}",
+            len(rowcol_to_inspector),
+            len(lot_key_to_inspector),
+        )
 
         df = self.current_inspector_data.copy()
         updated = 0
@@ -6608,9 +6656,16 @@ class ModernDataExtractorUI:
             row_key = self._normalize_seating_row_key(row_index)
             if not row_key:
                 continue
+            lot_key = self._derive_lot_key(row, row_index, product_column_candidates)
             row_modified = False
             for normalized_col, actual_col in normalized_columns:
                 assigned = rowcol_to_inspector.get((row_key, normalized_col))
+                if not assigned and lot_key:
+                    inspectors_queue = lot_key_to_inspector.get(lot_key)
+                    if inspectors_queue:
+                        assigned = inspectors_queue.popleft()
+                        if not inspectors_queue:
+                            lot_key_to_inspector.pop(lot_key, None)
                 if assigned and df.at[row_index, actual_col] != assigned:
                     df.at[row_index, actual_col] = assigned
                     updated += 1
@@ -6622,7 +6677,15 @@ class ModernDataExtractorUI:
             return
 
         self.current_inspector_data = df
+        self.current_display_table = "inspector"
+        if hasattr(self, 'inspector_button'):
+            self.update_button_states("inspector")
         self.display_inspector_assignment_table(df, preserve_scroll_position=True)
+        # 強制的に GUI を更新して、視覚的な反映を促す
+        try:
+            self.root.update_idletasks()
+        except Exception:
+            pass
         self.update_detail_popup_if_open()
         self.original_inspector_data = df.copy()
         self._set_seating_flow_prompt("変更が反映されました。次に「Googleスプレッドシートへ出力」を押してください。")
@@ -6681,6 +6744,7 @@ class ModernDataExtractorUI:
 
         for row_index, row in df.iterrows():
             lot_id = ""
+            lot_key = self._derive_lot_key(row, row_index, product_column_candidates)
             for candidate in lot_id_candidates:
                 if candidate in df.columns:
                     value = row.get(candidate)
@@ -6690,7 +6754,7 @@ class ModernDataExtractorUI:
                             lot_id = candidate_id
                             break
             if not lot_id:
-                lot_id = self._derive_lot_key(row, product_column_candidates)
+                lot_id = self._derive_lot_key(row, row_index, product_column_candidates)
             if not lot_id:
                 lot_id = f"lot-{row_index}"
             product_name = ""
@@ -6721,6 +6785,7 @@ class ModernDataExtractorUI:
                 "inspection_time": 0.0,
                 "source_row_index": str(row_index),
                 "source_row_key": row_key,
+                "lot_key": lot_key,
                 "shipping_date": shipping_date_text,
                 "process_name": process_name,
             }
@@ -6750,7 +6815,7 @@ class ModernDataExtractorUI:
         self.inspector_column_map_for_seating = inspector_column_map.copy()
         return dict(lots)
 
-    def _derive_lot_key(self, row, product_column_candidates):
+    def _derive_lot_key(self, row, row_index, product_column_candidates):
         """品番・ロット数量・指示日から代替の lot_id を構築"""
         parts: List[str] = []
         for candidate in product_column_candidates:
@@ -6768,7 +6833,11 @@ class ModernDataExtractorUI:
             value = row.get("指示日")
             if pd.notna(value):
                 parts.append(str(value).strip())
-        return "_".join(parts) if parts else ""
+        key_components = []
+        key_components.append(f"idx{row_index}")
+        if parts:
+            key_components.extend(parts)
+        return "_".join(key_components)
     def _resolve_inspector_names_for_seating(self):
         """Return inspector names derived from the master or current table."""
         names = []
