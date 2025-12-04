@@ -350,17 +350,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         margin: 0;
         font-size: 0.95rem;
         color: #555;
-      }
-      .download-hint {
-        margin: 0;
-        font-size: 0.85rem;
-        color: #1f7aef;
-      }
-      .save-location {
-        margin: 0.2rem 0 0;
-        font-size: 0.8rem;
-        color: #555;
-        word-break: break-all;
+        white-space: pre-line;
       }
       .grid-actions {
         display: flex;
@@ -697,8 +687,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             <button id="toggle-edit" class="secondary mode-toggle" type="button">座席編集モード</button>
           </div>
         </div>
-        <p class="download-hint" id="json-hint"></p>
-        <p class="download-hint save-location" id="json-path-hint"></p>
         <div id="seat-grid" aria-live="polite"></div>
         <div id="lot-split-menu" class="lot-context-menu hidden" aria-hidden="true">
           <label for="lot-split-count">何分割しますか？</label>
@@ -756,7 +744,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       const lotSplitCountInput = document.getElementById("lot-split-count");
       const lotSplitApplyButton = document.getElementById("lot-split-apply");
       const lotSplitCancelButton = document.getElementById("lot-split-cancel");
-      const saveLocationHint = document.getElementById("json-path-hint");
       const modeSizes = {
         view: { width: 180, height: 150, gap: 8 },
         editing: { width: 135, height: 100, gap: 8 },
@@ -1089,14 +1076,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         }
         renderSeats();
       };
-      const formatSavePath = () => {
-        if (typeof SEATING_JSON_PATH !== "string") {
-          return "未設定";
-        }
-        const trimmed = SEATING_JSON_PATH.trim();
-        return trimmed || "未設定";
-      };
-
       const distributeIntegerValue = (value, segments) => {
         if (!Number.isFinite(value) || segments <= 0) {
           return Array(segments).fill(0);
@@ -1701,18 +1680,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
       const setInstructionContent = () => {
         const instruction = document.querySelector(".edit-instruction");
-        const downloadHint = document.getElementById("json-hint");
         if (instruction) {
           instruction.textContent =
-            "初回は『保存』ボタンで保存先を選択すると、そのまま選んだファイルに保存されます。2回目以降は同じファイルにダイアログなしで自動上書きされるため、ファイルを移動したりコピーする必要はありません。";
-        }
-        if (downloadHint) {
-          downloadHint.textContent = `保存対象: ${SEATING_JSON_FILE_NAME}（初回は場所を選択、次回以降は自動で上書き）`;
-        }
-        if (saveLocationHint) {
-          const displayPath = formatSavePath();
-          saveLocationHint.textContent = `保存先: ${displayPath}`;
-          saveLocationHint.title = displayPath;
+            `アプリから起動された座席表は保存ボタンで自動的にネットワーク共有に保存されます。
+割当を整えたらアプリに戻って「ロット振分変更反映」を押してください。`;
         }
       };
 
