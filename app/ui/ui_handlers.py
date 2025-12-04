@@ -53,6 +53,7 @@ from app.seat_ui import (
     save_seating_chart,
     generate_html,
 )
+from app.seat_ui_server import SeatChartServer
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import matplotlib.font_manager as fm
@@ -159,6 +160,7 @@ class ModernDataExtractorUI:
         self.current_main_data = None
         self.current_assignment_data = None
         self.current_inspector_data = None
+        self._seat_chart_server = SeatChartServer()
         
         # スキル表示状態管理
         self.show_skill_values = False
@@ -6530,13 +6532,21 @@ class ModernDataExtractorUI:
                 logger.warning("Seat chart HTMLが見つかりません: %s", html_path)
                 messagebox.showwarning("Seat chart", f"座席表HTMLが存在しません: {html_path}")
                 return
+            file_url = ""
             try:
                 file_url = seating_path.as_uri()
             except ValueError:
                 file_url = seating_path.resolve().as_uri()
+            server_url = None
+            try:
+                self._seat_chart_server.start()
+                server_url = self._seat_chart_server.get_html_url(html_path)
+            except Exception as exc:
+                logger.debug("Seat chart server の起動に失敗しました: %s", exc)
+            target_url = server_url or file_url
             opened = False
             try:
-                opened = webbrowser.open(file_url)
+                opened = webbrowser.open(target_url)
             except Exception:
                 opened = False
             if not opened and os.name == "nt" and hasattr(os, "startfile"):
@@ -6546,7 +6556,7 @@ class ModernDataExtractorUI:
                 except Exception:
                     logger.debug("os.startfile による座席表 HTML の起動に失敗しました", exc_info=True)
             if opened:
-                logger.info("Seat chart opened: %s", file_url)
+                logger.info("Seat chart opened: %s", target_url)
             else:
                 logger.warning("Seat chart HTML を自動的に開けませんでした: %s", html_path)
                 messagebox.showwarning("Seat chart", f"座席表HTMLを開くことができませんでした。\n{html_path}")
@@ -8233,13 +8243,19 @@ class ModernDataExtractorUI:
                 except (AttributeError, tk.TclError) as e:
                     logger.debug(f"グラフフレームの破棄でエラー（無視）: {e}")
                 self.graph_frame = None
-            
+              
             # matplotlibのリソースをクリーンアップ
             try:
                 import matplotlib.pyplot as plt
                 plt.close('all')
             except Exception as e:
                 logger.debug(f"matplotlibのクリーンアップでエラー（無視）: {e}")
+
+            # Seat chart server を停止（起動していれば）
+            try:
+                self._seat_chart_server.stop()
+            except Exception as e:
+                logger.debug(f"Seat chart server の停止でエラー（無視）: {e}")
             
             logger.info("リソースのクリーンアップが完了しました")
             

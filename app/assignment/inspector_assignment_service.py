@@ -3620,7 +3620,7 @@ class InspectorAssignmentManager:
                         )
                         all_inspectors_with_priority.append((priority, insp))
                 
-                all_inspectors_with_priority.sort(key=lambda x: x[0])
+                all_inspectors_with_priority.sort(key=self._priority_sort_key)
                 if all_inspectors_with_priority:
                     selected_inspector = all_inspectors_with_priority[0][1]
                     if selected_inspector.get('__is_fixed', False):
@@ -3667,7 +3667,7 @@ class InspectorAssignmentManager:
                         )
                         all_inspectors_with_priority.append((priority, insp))
                 
-                all_inspectors_with_priority.sort(key=lambda x: x[0])
+                all_inspectors_with_priority.sort(key=self._priority_sort_key)
                 # 特例: 一ロットで検査員が5名以上必要になる場合、5名に制限
                 max_count = min(5, required_count)
                 selected_inspectors = [insp for _, insp in all_inspectors_with_priority[:max_count]]
@@ -3768,7 +3768,7 @@ class InspectorAssignmentManager:
                 # スキル1の候補から最適な1人を選択（固定検査員 > 未使用・時間バランスを優先）
                 skill1_candidates = [(p, i, sl) for p, i, sl in all_candidates if sl == 1]
                 if skill1_candidates:
-                    skill1_candidates.sort(key=lambda x: x[0])
+                    skill1_candidates.sort(key=self._priority_sort_key)
                     best_skill1 = skill1_candidates[0][1]
                     selected.append(best_skill1)
                     code = best_skill1['コード']
@@ -3782,7 +3782,7 @@ class InspectorAssignmentManager:
                         fixed_candidates = [(p, i, sl) for p, i, sl in remaining_candidates if i.get('__is_fixed', False)]
                         if fixed_candidates:
                             # 固定検査員がいる場合、優先的に選択（バランスを考慮してソート）
-                            fixed_candidates.sort(key=lambda x: x[0])
+                            fixed_candidates.sort(key=self._priority_sort_key)
                             selected.append(fixed_candidates[0][1])
                             code = fixed_candidates[0][1]['コード']
                             self.log_message(f"  固定検査員選択（登録済み品番の特別処置）: {fixed_candidates[0][1]['氏名']} (総勤務時間: {self.inspector_work_hours.get(code, 0.0):.1f}h, 割当回数: {self.inspector_assignment_count.get(code, 0)})")
@@ -3791,19 +3791,19 @@ class InspectorAssignmentManager:
                             skill3_candidates = [(p, i, sl) for p, i, sl in remaining_candidates if sl == 3]
                             if skill3_candidates:
                                 # スキル3がいる場合、優先的に選択（バランスを考慮してソート）
-                                skill3_candidates.sort(key=lambda x: x[0])
+                                skill3_candidates.sort(key=self._priority_sort_key)
                                 selected.append(skill3_candidates[0][1])
                                 code = skill3_candidates[0][1]['コード']
                                 self.log_message(f"  スキル3選択（教育のため）: {skill3_candidates[0][1]['氏名']} (総勤務時間: {self.inspector_work_hours.get(code, 0.0):.1f}h, 割当回数: {self.inspector_assignment_count.get(code, 0)})")
                             else:
                                 # スキル3がいない場合、バランスを考慮して選択
-                                remaining_candidates.sort(key=lambda x: x[0])
+                                remaining_candidates.sort(key=self._priority_sort_key)
                                 selected.append(remaining_candidates[0][1])
                                 code = remaining_candidates[0][1]['コード']
                                 self.log_message(f"  2人目選択: {remaining_candidates[0][1]['氏名']} (総勤務時間: {self.inspector_work_hours.get(code, 0.0):.1f}h, 割当回数: {self.inspector_assignment_count.get(code, 0)})")
             else:
                 # スキル1がいない場合、バランスを最優先に2人選択（固定検査員を優先）
-                all_candidates.sort(key=lambda x: x[0])
+                all_candidates.sort(key=self._priority_sort_key)
                 for i in range(min(2, len(all_candidates))):
                     selected.append(all_candidates[i][1])
                     code = all_candidates[i][1]['コード']
@@ -3883,7 +3883,7 @@ class InspectorAssignmentManager:
                 # スキル1の候補から最適な1人を選択（固定検査員 > 未使用・時間バランスを優先）
                 skill1_candidates = [(p, i, sl) for p, i, sl in all_candidates if sl == 1]
                 if skill1_candidates:
-                    skill1_candidates.sort(key=lambda x: x[0])
+                    skill1_candidates.sort(key=self._priority_sort_key)
                     best_skill1 = skill1_candidates[0][1]
                     selected.append(best_skill1)
                     code = best_skill1['コード']
@@ -3897,7 +3897,7 @@ class InspectorAssignmentManager:
                         fixed_candidates = [(p, i, sl) for p, i, sl in remaining_candidates if i.get('__is_fixed', False)]
                         if fixed_candidates:
                             # 固定検査員がいる場合、優先的に選択（バランスを考慮してソート）
-                            fixed_candidates.sort(key=lambda x: x[0])
+                            fixed_candidates.sort(key=self._priority_sort_key)
                             selected.append(fixed_candidates[0][1])
                             code = fixed_candidates[0][1]['コード']
                             self.log_message(f"  固定検査員選択（登録済み品番の特別処置）: {fixed_candidates[0][1]['氏名']} (総勤務時間: {self.inspector_work_hours.get(code, 0.0):.1f}h, 割当回数: {self.inspector_assignment_count.get(code, 0)})")
@@ -3908,7 +3908,7 @@ class InspectorAssignmentManager:
                                 # 残りの固定検査員を優先的に探す
                                 remaining_fixed = [(p, i, sl) for p, i, sl in remaining_after_fixed if i.get('__is_fixed', False)]
                                 if remaining_fixed:
-                                    remaining_fixed.sort(key=lambda x: x[0])
+                                    remaining_fixed.sort(key=self._priority_sort_key)
                                     selected.append(remaining_fixed[0][1])
                                     code = remaining_fixed[0][1]['コード']
                                     self.log_message(f"  固定検査員選択（登録済み品番の特別処置）: {remaining_fixed[0][1]['氏名']} (総勤務時間: {self.inspector_work_hours.get(code, 0.0):.1f}h, 割当回数: {self.inspector_assignment_count.get(code, 0)})")
@@ -3916,12 +3916,12 @@ class InspectorAssignmentManager:
                                     # スキル3の候補を優先的に探す
                                     skill3_candidates = [(p, i, sl) for p, i, sl in remaining_after_fixed if sl == 3]
                                     if skill3_candidates:
-                                        skill3_candidates.sort(key=lambda x: x[0])
+                                        skill3_candidates.sort(key=self._priority_sort_key)
                                         selected.append(skill3_candidates[0][1])
                                         code = skill3_candidates[0][1]['コード']
                                         self.log_message(f"  スキル3選択（教育のため）: {skill3_candidates[0][1]['氏名']} (総勤務時間: {self.inspector_work_hours.get(code, 0.0):.1f}h, 割当回数: {self.inspector_assignment_count.get(code, 0)})")
                                     else:
-                                        remaining_after_fixed.sort(key=lambda x: x[0])
+                                        remaining_after_fixed.sort(key=self._priority_sort_key)
                                         selected.append(remaining_after_fixed[0][1])
                                         code = remaining_after_fixed[0][1]['コード']
                                         skill_info = f"スキル{remaining_after_fixed[0][2]}" if remaining_after_fixed[0][2] != 'new' else "新製品"
@@ -3931,7 +3931,7 @@ class InspectorAssignmentManager:
                             skill3_candidates = [(p, i, sl) for p, i, sl in remaining_candidates if sl == 3]
                             if skill3_candidates:
                                 # スキル3がいる場合、優先的に1人選択（バランスを考慮してソート）
-                                skill3_candidates.sort(key=lambda x: x[0])
+                                skill3_candidates.sort(key=self._priority_sort_key)
                                 selected.append(skill3_candidates[0][1])
                                 code = skill3_candidates[0][1]['コード']
                                 self.log_message(f"  スキル3選択（教育のため）: {skill3_candidates[0][1]['氏名']} (総勤務時間: {self.inspector_work_hours.get(code, 0.0):.1f}h, 割当回数: {self.inspector_assignment_count.get(code, 0)})")
@@ -3942,19 +3942,19 @@ class InspectorAssignmentManager:
                                     # 固定検査員を優先的に探す
                                     remaining_fixed = [(p, i, sl) for p, i, sl in remaining_after_skill3 if i.get('__is_fixed', False)]
                                     if remaining_fixed:
-                                        remaining_fixed.sort(key=lambda x: x[0])
+                                        remaining_fixed.sort(key=self._priority_sort_key)
                                         selected.append(remaining_fixed[0][1])
                                         code = remaining_fixed[0][1]['コード']
                                         self.log_message(f"  固定検査員選択（登録済み品番の特別処置）: {remaining_fixed[0][1]['氏名']} (総勤務時間: {self.inspector_work_hours.get(code, 0.0):.1f}h, 割当回数: {self.inspector_assignment_count.get(code, 0)})")
                                     else:
-                                        remaining_after_skill3.sort(key=lambda x: x[0])
+                                        remaining_after_skill3.sort(key=self._priority_sort_key)
                                         selected.append(remaining_after_skill3[0][1])
                                         code = remaining_after_skill3[0][1]['コード']
                                         skill_info = f"スキル{remaining_after_skill3[0][2]}" if remaining_after_skill3[0][2] != 'new' else "新製品"
                                         self.log_message(f"  3人目選択: {remaining_after_skill3[0][1]['氏名']} ({skill_info}, 総勤務時間: {self.inspector_work_hours.get(code, 0.0):.1f}h, 割当回数: {self.inspector_assignment_count.get(code, 0)})")
                             else:
                                 # スキル3がいない場合、バランスを考慮して2人選択（固定検査員を優先）
-                                remaining_candidates.sort(key=lambda x: x[0])
+                                remaining_candidates.sort(key=self._priority_sort_key)
                                 for i in range(min(2, len(remaining_candidates))):
                                     selected.append(remaining_candidates[i][1])
                                     code = remaining_candidates[i][1]['コード']
@@ -3963,7 +3963,7 @@ class InspectorAssignmentManager:
                                     self.log_message(f"  選択{i+2}: {remaining_candidates[i][1]['氏名']}{fixed_mark} ({skill_info}, 総勤務時間: {self.inspector_work_hours.get(code, 0.0):.1f}h, 割当回数: {self.inspector_assignment_count.get(code, 0)})")
             else:
                 # スキル1がいない場合、バランスを最優先に3人選択（固定検査員を優先）
-                all_candidates.sort(key=lambda x: x[0])
+                all_candidates.sort(key=self._priority_sort_key)
                 for i in range(min(3, len(all_candidates))):
                     selected.append(all_candidates[i][1])
                     code = all_candidates[i][1]['コード']
@@ -3976,7 +3976,18 @@ class InspectorAssignmentManager:
         except Exception as e:
             self.log_message(f"3人選択中にエラーが発生しました: {str(e)}")
             return []
-    
+
+    def _priority_sort_key(self, candidate_tuple: Tuple[object, Dict[str, Any], Any]) -> Tuple:
+        priority = candidate_tuple[0]
+        if isinstance(priority, tuple):
+            return priority
+        if isinstance(priority, list):
+            return tuple(priority)
+        if isinstance(priority, dict):
+            # Fallback: sort by string representation if stuck
+            return (repr(priority),)
+        return (priority,)
+
     def filter_available_inspectors(
         self,
         available_inspectors: List[Dict[str, Any]],
@@ -5838,7 +5849,7 @@ class InspectorAssignmentManager:
                                     # 違反件数をカウント
                                     self.violation_count += 1
                                     
-                                    replacement_candidates.sort(key=lambda x: x[0])
+                                    replacement_candidates.sort(key=self._priority_sort_key)
                                     _, new_code, replacement_inspector = replacement_candidates[0]
                                     
                                     # 再割当てを実行
@@ -8624,7 +8635,7 @@ class InspectorAssignmentManager:
                                 scored_candidates.append((score, insp, violations))
                         
                         # スコアが低い順（違反が少ない順）にソート
-                        scored_candidates.sort(key=lambda x: x[0])
+                        scored_candidates.sort(key=self._priority_sort_key)
                         
                         # 最も違反が少ない候補を選択（許容可能な範囲内）
                         if scored_candidates:
@@ -8665,7 +8676,7 @@ class InspectorAssignmentManager:
                     
                     if replacement_candidates:
                         # 最も総勤務時間が少ない人を選択
-                        replacement_candidates.sort(key=lambda x: x[0])
+                        replacement_candidates.sort(key=self._priority_sort_key)
                         replacement_inspector = replacement_candidates[0][1]
                         
                         # 置き換えを実行
@@ -8893,7 +8904,7 @@ class InspectorAssignmentManager:
                                 scored_candidates.append((score, insp, violations))
                         
                         # スコアが低い順（違反が少ない順）にソート
-                        scored_candidates.sort(key=lambda x: x[0])
+                        scored_candidates.sort(key=self._priority_sort_key)
                         
                         # 最も違反が少ない候補を選択（許容可能な範囲内）
                         if scored_candidates:
@@ -8935,7 +8946,7 @@ class InspectorAssignmentManager:
                     
                     if replacement_candidates:
                         # 最も総勤務時間が少ない人に置き換え
-                        replacement_candidates.sort(key=lambda x: x[0])
+                        replacement_candidates.sort(key=self._priority_sort_key)
                         replacement_inspector = replacement_candidates[0][1]
                         
                         if show_skill_values:
@@ -9081,7 +9092,7 @@ class InspectorAssignmentManager:
                     
                     if replacement_candidates:
                         # 最も総勤務時間が少ない人に置き換え
-                        replacement_candidates.sort(key=lambda x: x[0])
+                        replacement_candidates.sort(key=self._priority_sort_key)
                         replacement_inspector = replacement_candidates[0][1]
                         
                         if show_skill_values:
@@ -9219,7 +9230,7 @@ class InspectorAssignmentManager:
                     
                     if addition_candidates and len(current_inspectors) < 5:
                         # 最も総勤務時間が少ない人を追加
-                        addition_candidates.sort(key=lambda x: x[0])
+                        addition_candidates.sort(key=self._priority_sort_key)
                         addition_inspector = addition_candidates[0][1]
                         new_count = len(current_inspectors) + 1
                         
