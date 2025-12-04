@@ -1122,6 +1122,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           lot.split_group || lot.lot_id || `split-${Date.now().toString(36)}`;
         const uniqueSuffix = Date.now().toString(36);
         const sanitizedIdBase = `${splitGroupLabel}-${uniqueSuffix}`.replace(/[^A-Za-z0-9_-]/g, "-");
+        const baseLotKey = (lot.lot_key || lot.lot_id || splitGroupLabel)
+          .toString()
+          .replace(/[^A-Za-z0-9_-]/g, "-");
         const inspectionHours = Number(lot.inspection_time) || 0;
         const inspectionValues =
           inspectionHours > 0
@@ -1142,6 +1145,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           clone.split_index = sequence;
           clone.split_total = normalizedCount;
           clone.lot_id = `${sanitizedIdBase}-S${sequence}`;
+          clone.lot_key = `${baseLotKey}-S${sequence}`;
           if (inspectionHours > 0) {
             clone.inspection_time = inspectionValues[index];
           }
@@ -1478,6 +1482,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           updateEditorPanel();
           closeInspectorDropdown();
         }
+        setInstructionContent();
         renderSeats();
       };
 
@@ -1680,11 +1685,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
       const setInstructionContent = () => {
         const instruction = document.querySelector(".edit-instruction");
-        if (instruction) {
-          instruction.textContent =
-            `アプリから起動された座席表は保存ボタンで自動的にネットワーク共有に保存されます。
-割当を整えたらアプリに戻って「ロット振分変更反映」を押してください。`;
+        if (!instruction) {
+          return;
         }
+        instruction.textContent = editingMode
+          ? "座席位置を変更をしたら【変更を保存】ボタンで自動的にネットワーク共有に保存されます。"
+          : `アプリから起動された座席表は【変更を保存】ボタンで自動的にネットワーク共有に保存されます。
+割当を整えたらアプリに戻って「ロット振分変更反映」を押してください。`;
       };
 
       document.addEventListener("DOMContentLoaded", () => {
