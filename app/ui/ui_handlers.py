@@ -1,4 +1,4 @@
-﻿"""
+"""
 外観検査振分支援システム - メインUI
 近未来的なデザインで出荷予定日を指定してデータを抽出する
 """
@@ -54,9 +54,6 @@ from app.seat_ui import (
     generate_html,
 )
 from app.seat_ui_server import SeatChartServer
-import matplotlib.pyplot as plt
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-import matplotlib.font_manager as fm
 from PIL import Image
 
 
@@ -161,12 +158,7 @@ class ModernDataExtractorUI:
         self._seat_chart_server = SeatChartServer()
         
         # スキル表示状態管理
-        self.show_skill_values = False
         self.original_inspector_data = None  # 元のデータを保持
-        
-        # グラフ表示状態管理
-        self.show_graph = False
-        self.graph_frame = None
         
         # 品番予測検索用の変数
         self.product_code_autocomplete_list = []  # 重複除去済み品番リスト
@@ -4656,17 +4648,13 @@ class ModernDataExtractorUI:
                 inspection_target_keywords=inspection_target_keywords
             )
             
-            # 現在の表示状態に応じてデータを設定
-            if self.show_skill_values:
-                inspector_df = inspector_df_with_skills
-            else:
-                # スキル値を非表示にする場合、氏名のみのデータを作成
-                inspector_df = inspector_df_with_skills.copy()
-                for col in inspector_df.columns:
-                    if col.startswith('検査員'):
-                        inspector_df[col] = inspector_df[col].astype(str).apply(
-                            lambda x: x.split('(')[0].strip() if '(' in x and ')' in x else x
-                        )
+            # 表示用のデータは氏名のみ
+            inspector_df = inspector_df_with_skills.copy()
+            for col in inspector_df.columns:
+                if col.startswith('検査員'):
+                    inspector_df[col] = inspector_df[col].astype(str).apply(
+                        lambda x: x.split('(')[0].strip() if '(' in x and ')' in x else x
+                    )
             
             # 検査員割振りデータを保存（エクスポート用）
             self.current_inspector_data = inspector_df
@@ -4675,11 +4663,25 @@ class ModernDataExtractorUI:
             self.update_progress(1.0, "検査員割振り処理が完了しました")
             self.log_message(f"検査員割振り処理が完了しました: {len(inspector_df)}件")
             
-            # データ抽出完了後に自動で検査員割振りテーブルを表示
-            self.root.after(0, lambda: self.show_table("inspector"))
+            # メインスレッドでテーブル表示を指示
+            self.root.after(0, self._refresh_inspector_table_post_assignment)
             
         except Exception as e:
             self.log_message(f"検査員割振り処理中にエラーが発生しました: {str(e)}")
+
+    def _refresh_inspector_table_post_assignment(self):
+        """検査員割振り後にメインスレッドでテーブルを表示"""
+        try:
+            if self.current_inspector_data is None or self.current_inspector_data.empty:
+                return
+
+            self.display_inspector_assignment_table(self.current_inspector_data)
+            self.current_display_table = "inspector"
+            if hasattr(self, "inspector_button"):
+                self.update_button_states("inspector")
+        except Exception as e:
+            self.log_message(f"検査員テーブル表示中にエラーが発生しました: {str(e)}")
+            logger.error(f"検査員テーブル表示中にエラーが発生しました: {str(e)}")
     
     def calculate_cumulative_shortage(self, assignment_df):
         """同一品番の連続行で不足数を累積計算"""
@@ -6088,34 +6090,6 @@ class ModernDataExtractorUI:
             button_frame = ctk.CTkFrame(title_frame, fg_color="transparent")
             button_frame.pack(side="right")
             
-            # スキル表示切り替えボタン
-            button_text = "スキル非表示" if self.show_skill_values else "スキル表示"
-            self.skill_toggle_button = ctk.CTkButton(
-                button_frame,
-                text=button_text,
-                command=self.toggle_skill_display,
-                width=100,
-                height=30,
-                font=ctk.CTkFont(family="Yu Gothic", size=12, weight="bold"),
-                fg_color="#6B7280",
-                hover_color="#4B5563"
-            )
-            self.skill_toggle_button.pack(side="right")
-            
-            # 詳細表示切り替えボタン
-            detail_button_text = "詳細非表示" if self.show_graph else "詳細表示"
-            self.graph_toggle_button = ctk.CTkButton(
-                button_frame,
-                text=detail_button_text,
-                command=self.toggle_detail_display,
-                width=100,
-                height=30,
-                font=ctk.CTkFont(family="Yu Gothic", size=12, weight="bold"),
-                fg_color="#6B7280",
-                hover_color="#4B5563"
-            )
-            self.graph_toggle_button.pack(side="right", padx=(0, 25))
-
             seating_buttons_frame = ctk.CTkFrame(button_frame, fg_color="transparent")
             seating_buttons_frame.pack(side="right", padx=(0, 25))
 
@@ -6236,24 +6210,7 @@ class ModernDataExtractorUI:
                         except:
                             values.append(str(col_value) if pd.notna(col_value) else '')
                     elif col.startswith('検査員'):
-                        # 検査員名の表示制御
-                        inspector_name = str(col_value) if pd.notna(col_value) else ''
-                        if not self.show_skill_values:
-                            # スキル値を非表示にする場合、括弧内を削除
-                            if '(' in inspector_name and ')' in inspector_name:
-                                inspector_name = inspector_name.split('(')[0].strip()
-                        else:
-                            # スキル値を表示する場合、元のデータから再構築
-                            if '(' not in inspector_name and ')' not in inspector_name:
-                                # 元のデータからスキル値を取得
-                                if self.original_inspector_data is not None:
-                                    try:
-                                        original_row = self.original_inspector_data.iloc[row.name]
-                                        original_name = str(original_row[col])
-                                        if '(' in original_name and ')' in original_name:
-                                            inspector_name = original_name
-                                    except:
-                                        pass
+                        inspector_name = self._strip_skill_annotation(col_value if pd.notna(col_value) else None)
                         values.append(inspector_name)
                     else:
                         values.append(str(col_value) if pd.notna(col_value) else '')
@@ -6455,6 +6412,9 @@ class ModernDataExtractorUI:
             # テーブルとデータフレームを保持（後で更新するため）
             self.current_inspector_tree = inspector_tree
             self.current_inspector_df = inspector_df
+            self.current_display_table = "inspector"
+            if hasattr(self, "inspector_button"):
+                self.update_button_states("inspector")
             
             self.log_message(f"検査員割振りテーブルを表示しました: {len(inspector_df)}件")
             
@@ -6495,6 +6455,19 @@ class ModernDataExtractorUI:
             return normalized if normalized else text
         except (ValueError, TypeError):
             return text
+
+    @staticmethod
+    def _strip_skill_annotation(inspector_name: Optional[str]) -> str:
+        """括弧付きスキル表記を取り除いて検査員名のみを返す"""
+        if not inspector_name:
+            return ""
+        name = str(inspector_name).strip()
+        if not name:
+            return ""
+        if "(" in name and ")" in name:
+            open_idx = name.find("(")
+            return name[:open_idx].strip()
+        return name
     
     def open_seating_chart(self):
         """Export current lot assignments to the seating UI."""
@@ -6673,7 +6646,6 @@ class ModernDataExtractorUI:
             self.root.update_idletasks()
         except Exception:
             pass
-        self.update_detail_popup_if_open()
         self.original_inspector_data = df.copy()
         self._set_seating_flow_prompt("変更が反映されました。次に「Googleスプレッドシートへ出力」を押してください。")
         self.log_message(f"Applied seating results to {updated} lots.")
@@ -7090,9 +7062,6 @@ class ModernDataExtractorUI:
                 # テーブルを再描画（スクロール位置と選択行を保持）
                 self.display_inspector_assignment_table(df, preserve_scroll_position=True, target_row_index=original_index)
                 
-                # 詳細表示ポップアップが開いている場合は更新
-                self.update_detail_popup_if_open()
-                
                 self.log_message(
                     f"検査員を削除しました: {old_inspector_name} → 未割当 "
                     f"(品番: {product_number}, {col_name})"
@@ -7170,13 +7139,8 @@ class ModernDataExtractorUI:
                 self.inspector_manager.inspector_product_hours[new_inspector_code].get(product_number, 0.0) + divided_time
             )
             
-            # データフレームを更新
-            # スキル表示の設定に応じて検査員名を設定
-            if self.show_skill_values:
-                # スキル値を取得（簡易版：スキルマスタから取得する必要がある）
-                new_inspector_display = new_inspector_name
-            else:
-                new_inspector_display = new_inspector_name
+            # データフレームを更新（氏名のみ）
+            new_inspector_display = new_inspector_name
             
             df.at[original_index, col_name] = new_inspector_display
             
@@ -7206,9 +7170,6 @@ class ModernDataExtractorUI:
             
             # テーブルを再描画（スクロール位置と選択行を保持）
             self.display_inspector_assignment_table(df, preserve_scroll_position=True, target_row_index=original_index)
-            
-            # 詳細表示ポップアップが開いている場合は更新
-            self.update_detail_popup_if_open()
             
             self.log_message(
                 f"検査員を変更しました: {old_inspector_name if old_inspector_name else '未割当'} → {new_inspector_name} "
@@ -7358,9 +7319,6 @@ class ModernDataExtractorUI:
             # テーブルを再描画（スクロール位置と選択行を保持）
             self.display_inspector_assignment_table(df, preserve_scroll_position=True, target_row_index=original_index)
             
-            # 詳細表示ポップアップが開いている場合は更新
-            self.update_detail_popup_if_open()
-            
             selected_names_str = ', '.join(selected_names)
             self.log_message(
                 f"検査員を変更しました: {old_inspector_name if old_inspector_name else '未割当'} → {selected_names_str} "
@@ -7440,732 +7398,6 @@ class ModernDataExtractorUI:
         except Exception as e:
             self.log_message(f"検査員の削除に失敗しました: {str(e)}")
             logger.error(f"検査員の削除に失敗しました: {str(e)}", exc_info=True)
-    
-    def toggle_skill_display(self):
-        """スキル表示の切り替え"""
-        try:
-            self.show_skill_values = not self.show_skill_values
-            
-            # ボタンテキストを更新
-            if self.show_skill_values:
-                self.skill_toggle_button.configure(text="スキル非表示")
-            else:
-                self.skill_toggle_button.configure(text="スキル表示")
-            
-            # データを現在の表示状態に応じて切り替え
-            if self.original_inspector_data is not None:
-                if self.show_skill_values:
-                    # スキル値付きのデータを表示
-                    self.current_inspector_data = self.original_inspector_data.copy()
-                else:
-                    # 氏名のみのデータを作成
-                    self.current_inspector_data = self.original_inspector_data.copy()
-                    for col in self.current_inspector_data.columns:
-                        if col.startswith('検査員'):
-                            self.current_inspector_data[col] = self.current_inspector_data[col].astype(str).apply(
-                                lambda x: x.split('(')[0].strip() if '(' in x and ')' in x else x
-                            )
-                
-                # テーブルを再表示
-                self.display_inspector_assignment_table(self.current_inspector_data)
-                
-        except Exception as e:
-            error_msg = f"スキル表示切り替え中にエラーが発生しました: {str(e)}"
-            self.log_message(error_msg)
-            logger.error(error_msg)
-            messagebox.showerror("エラー", error_msg)
-    
-    def toggle_detail_display(self):
-        """詳細表示の切り替え（ポップアップ表示）"""
-        try:
-            if not hasattr(self, 'current_inspector_data') or self.current_inspector_data is None:
-                messagebox.showwarning("警告", "検査員割当てデータがありません。先に検査員割当てを実行してください。")
-                return
-            
-            # 詳細表示ポップアップを表示
-            self.show_detail_popup()
-                
-        except Exception as e:
-            error_msg = f"詳細表示切り替え中にエラーが発生しました: {str(e)}"
-            self.log_message(error_msg)
-            logger.error(error_msg)
-            messagebox.showerror("エラー", error_msg)
-    
-    def create_inspector_graph(self):
-        """検査員の検査時間集計グラフを作成"""
-        try:
-            if self.current_inspector_data is None:
-                self.log_message("グラフ表示するデータがありません")
-                return
-            
-            # 既存のグラフを削除
-            self.hide_inspector_graph()
-            
-            # 検査員の検査時間を集計
-            inspector_hours = {}
-            
-            # 列名から列インデックスへのマッピングを作成（高速化：itertuples()を使用）
-            inspector_col_indices = {f'検査員{i}': self.current_inspector_data.columns.get_loc(f'検査員{i}') for i in range(1, 6) if f'検査員{i}' in self.current_inspector_data.columns}
-            divided_time_col_idx = self.current_inspector_data.columns.get_loc('分割検査時間') if '分割検査時間' in self.current_inspector_data.columns else None
-            
-            for row_tuple in self.current_inspector_data.itertuples(index=True):
-                row_idx = row_tuple[0]  # インデックス
-                row = self.current_inspector_data.loc[row_idx]  # Seriesとして扱うために元の行を取得
-                
-                for i in range(1, 6):  # 検査員1〜5
-                    inspector_col = f'検査員{i}'
-                    if inspector_col in inspector_col_indices:
-                        inspector_col_idx = inspector_col_indices[inspector_col]
-                        inspector_value = row_tuple[inspector_col_idx + 1] if inspector_col_idx < len(row_tuple) - 1 else None  # itertuplesはインデックスを含むため+1
-                        if pd.notna(inspector_value) and str(inspector_value).strip() != '':
-                            inspector_name = str(inspector_value)
-                            # スキル値や(新)を除去して氏名のみを取得
-                            if '(' in inspector_name:
-                                inspector_name = inspector_name.split('(')[0].strip()
-                            
-                            # 分割検査時間を取得
-                            if divided_time_col_idx is not None:
-                                divided_time = row_tuple[divided_time_col_idx + 1] if divided_time_col_idx < len(row_tuple) - 1 else 0
-                            else:
-                                divided_time = row.get('分割検査時間', 0)
-                            if pd.notna(divided_time):
-                                if inspector_name in inspector_hours:
-                                    inspector_hours[inspector_name] += float(divided_time)
-                                else:
-                                    inspector_hours[inspector_name] = float(divided_time)
-            
-            if not inspector_hours:
-                self.log_message("グラフ表示するデータがありません")
-                return
-            
-            # グラフフレームを作成
-            self.graph_frame = ctk.CTkFrame(self.main_scroll_frame, fg_color="#EFF6FF", corner_radius=12)
-            self.graph_frame.pack(fill="x", padx=20, pady=(0, 20))
-            
-            # グラフタイトル
-            graph_title = ctk.CTkLabel(
-                self.graph_frame,
-                text="検査員別検査時間集計",
-                font=ctk.CTkFont(family="Yu Gothic", size=16, weight="bold"),
-                text_color="#1E3A8A"
-            )
-            graph_title.pack(pady=(15, 10))
-            
-            # matplotlibの設定
-            plt.rcParams['font.family'] = 'Yu Gothic'
-            plt.rcParams['axes.unicode_minus'] = False
-            
-            # グラフを作成
-            fig, ax = plt.subplots(figsize=(12, 6))
-            
-            # データをソート（検査時間の降順）
-            sorted_inspectors = sorted(inspector_hours.items(), key=lambda x: x[1], reverse=True)
-            names = [item[0] for item in sorted_inspectors]
-            hours = [item[1] for item in sorted_inspectors]
-            
-            # バーチャートを作成
-            bars = ax.bar(range(len(names)), hours, color='#3B82F6', alpha=0.8)
-            
-            # グラフの設定
-            ax.set_xlabel('検査員', fontsize=12)
-            ax.set_ylabel('検査時間 (時間)', fontsize=12)
-            ax.set_title('検査員別検査時間集計', fontsize=14, fontweight='bold')
-            ax.set_xticks(range(len(names)))
-            ax.set_xticklabels(names, rotation=45, ha='right')
-            
-            # グリッドを追加
-            ax.grid(True, alpha=0.3)
-            
-            # 各バーの上に値を表示
-            for i, (bar, hour) in enumerate(zip(bars, hours)):
-                ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.1,
-                       f'{hour:.1f}h', ha='center', va='bottom', fontsize=10)
-            
-            # レイアウトを調整
-            plt.tight_layout()
-            
-            # Tkinterに埋め込み
-            canvas = FigureCanvasTkAgg(fig, self.graph_frame)
-            canvas.draw()
-            canvas.get_tk_widget().pack(fill="both", expand=True, padx=15, pady=(0, 15))
-            
-            self.log_message(f"検査員別検査時間集計グラフを表示しました: {len(inspector_hours)}人")
-            
-        except Exception as e:
-            error_msg = f"グラフ作成中にエラーが発生しました: {str(e)}"
-            self.log_message(error_msg)
-            logger.error(error_msg)
-            messagebox.showerror("エラー", error_msg)
-    
-    def hide_inspector_graph(self):
-        """検査員グラフを非表示にする"""
-        try:
-            if self.graph_frame is not None:
-                self.graph_frame.destroy()
-                self.graph_frame = None
-        except Exception as e:
-            logger.error(f"グラフ非表示中にエラーが発生しました: {str(e)}")
-    
-    def show_detail_popup(self):
-        """詳細表示ポップアップを表示"""
-        try:
-            # 既存のポップアップがあれば閉じる
-            if hasattr(self, 'detail_popup') and self.detail_popup is not None:
-                self.detail_popup.destroy()
-            
-            # ポップアップウィンドウを作成
-            self.detail_popup = ctk.CTkToplevel(self.root)
-            self.detail_popup.title("検査員詳細表示")
-            self.detail_popup.geometry("1400x900")
-            self.detail_popup.resizable(True, True)
-            
-            # メインフレーム
-            main_frame = ctk.CTkFrame(self.detail_popup)
-            main_frame.pack(fill="both", expand=True, padx=10, pady=10)
-            
-            # タイトル
-            title_label = ctk.CTkLabel(
-                main_frame,
-                text="検査員詳細表示",
-                font=ctk.CTkFont(family="Yu Gothic", size=20, weight="bold")
-            )
-            title_label.pack(pady=(10, 20))
-            
-            # タブビューを作成
-            tabview = ctk.CTkTabview(main_frame)
-            tabview.pack(fill="both", expand=True, padx=10, pady=(0, 10))
-            
-            # グラフタブ
-            tabview.add("グラフ表示")
-            graph_frame = tabview.tab("グラフ表示")
-            self.create_detail_graph(graph_frame)
-            
-            # ロット一覧タブ
-            tabview.add("ロット一覧")
-            lot_frame = tabview.tab("ロット一覧")
-            self.create_inspector_lot_list(lot_frame)
-            
-            # 閉じるボタン
-            close_button = ctk.CTkButton(
-                main_frame,
-                text="閉じる",
-                command=self.close_detail_popup,
-                width=100,
-                height=35,
-                font=ctk.CTkFont(family="Yu Gothic", size=12, weight="bold"),
-                fg_color="#6B7280",
-                hover_color="#4B5563"
-            )
-            close_button.pack(pady=(10, 10))
-            
-        except Exception as e:
-            logger.error(f"詳細表示ポップアップ作成中にエラーが発生しました: {str(e)}")
-            messagebox.showerror("エラー", f"詳細表示ポップアップ作成中にエラーが発生しました: {str(e)}")
-    
-    def close_detail_popup(self):
-        """詳細表示ポップアップを閉じる"""
-        try:
-            if hasattr(self, 'detail_popup') and self.detail_popup is not None:
-                self.detail_popup.destroy()
-                self.detail_popup = None
-        except Exception as e:
-            logger.error(f"詳細表示ポップアップ閉じる中にエラーが発生しました: {str(e)}")
-    
-    def update_detail_popup_if_open(self):
-        """詳細表示ポップアップが開いている場合は更新"""
-        try:
-            if hasattr(self, 'detail_popup') and self.detail_popup is not None:
-                try:
-                    # ポップアップが存在し、破棄されていないか確認
-                    if self.detail_popup.winfo_exists():
-                        # 現在のタブを取得
-                        tabview = None
-                        for widget in self.detail_popup.winfo_children():
-                            if isinstance(widget, ctk.CTkFrame):
-                                for child in widget.winfo_children():
-                                    if isinstance(child, ctk.CTkTabview):
-                                        tabview = child
-                                        break
-                                if tabview:
-                                    break
-                        
-                        if tabview:
-                            current_tab = tabview.get()
-                            
-                            # タブの内容を再描画
-                            # グラフタブの場合
-                            if current_tab == "グラフ表示":
-                                graph_frame = tabview.tab("グラフ表示")
-                                # 既存のグラフを削除
-                                for widget in graph_frame.winfo_children():
-                                    widget.destroy()
-                                # グラフを再作成
-                                self.create_detail_graph(graph_frame)
-                            
-                            # ロット一覧タブの場合
-                            elif current_tab == "ロット一覧":
-                                lot_frame = tabview.tab("ロット一覧")
-                                # 既存のリストを削除
-                                for widget in lot_frame.winfo_children():
-                                    widget.destroy()
-                                # リストを再作成
-                                self.create_inspector_lot_list(lot_frame)
-                except Exception as e:
-                    logger.debug(f"詳細表示ポップアップの更新に失敗: {str(e)}")
-        except Exception as e:
-            logger.debug(f"詳細表示ポップアップ更新チェックに失敗: {str(e)}")
-    
-    def create_detail_graph(self, parent):
-        """詳細表示用のグラフを作成"""
-        try:
-            if self.current_inspector_data is None:
-                return
-            
-            # 検査員の検査時間集計を取得（実際に割り当てられた検査員のみ）
-            inspector_hours = {}
-            # 列名から列インデックスへのマッピングを作成（高速化：itertuples()を使用）
-            inspector_col_indices = {f'検査員{i}': self.current_inspector_data.columns.get_loc(f'検査員{i}') for i in range(1, 6) if f'検査員{i}' in self.current_inspector_data.columns}
-            divided_time_col_idx = self.current_inspector_data.columns.get_loc('分割検査時間') if '分割検査時間' in self.current_inspector_data.columns else None
-            
-            for row_tuple in self.current_inspector_data.itertuples(index=True):
-                row_idx = row_tuple[0]  # インデックス
-                row = self.current_inspector_data.loc[row_idx]  # Seriesとして扱うために元の行を取得
-                
-                # 検査員1～5を確認
-                for i in range(1, 6):
-                    inspector_col = f'検査員{i}'
-                    if inspector_col in inspector_col_indices:
-                        inspector_col_idx = inspector_col_indices[inspector_col]
-                        inspector_value = row_tuple[inspector_col_idx + 1] if inspector_col_idx < len(row_tuple) - 1 else None  # itertuplesはインデックスを含むため+1
-                        if pd.notna(inspector_value):
-                            inspector_name = str(inspector_value).strip()
-                            
-                            # 空文字列をスキップ
-                            if not inspector_name:
-                                continue
-                            
-                            # スキル値や(新)を除去して名前のみ取得
-                            if '(' in inspector_name:
-                                inspector_name = inspector_name.split('(')[0].strip()
-                            
-                            # 名前が空の場合はスキップ
-                            if not inspector_name:
-                                continue
-                            
-                            if inspector_name not in inspector_hours:
-                                inspector_hours[inspector_name] = 0.0
-                            
-                            # 分割検査時間を加算
-                            if divided_time_col_idx is not None:
-                                divided_time_value = row_tuple[divided_time_col_idx + 1] if divided_time_col_idx < len(row_tuple) - 1 else None
-                            else:
-                                divided_time_value = row.get('分割検査時間', None)
-                            if pd.notna(divided_time_value):
-                                inspector_hours[inspector_name] += float(divided_time_value)
-            
-            if not inspector_hours:
-                no_data_label = ctk.CTkLabel(
-                    parent,
-                    text="検査員データがありません",
-                    font=ctk.CTkFont(family="Yu Gothic", size=14, weight="bold")
-                )
-                no_data_label.pack(expand=True)
-                return
-            
-            # グラフ用のフレーム
-            graph_frame = ctk.CTkFrame(parent)
-            graph_frame.pack(fill="both", expand=True, padx=10, pady=10)
-            
-            # matplotlibの設定
-            plt.rcParams['font.family'] = 'Yu Gothic'
-            plt.rcParams['axes.unicode_minus'] = False
-            
-            # グラフを作成
-            fig, ax = plt.subplots(figsize=(12, 8))
-            
-            # データをソート（時間の降順）
-            sorted_inspectors = sorted(inspector_hours.items(), key=lambda x: x[1], reverse=True)
-            names = [item[0] for item in sorted_inspectors]
-            hours = [item[1] for item in sorted_inspectors]
-            
-            # バーチャートを作成
-            bars = ax.bar(range(len(names)), hours, color='#10B981', alpha=0.8)
-            
-            # グラフの設定
-            ax.set_xlabel('検査員', fontsize=12)
-            ax.set_ylabel('検査時間 (時間)', fontsize=12)
-            ax.set_title('検査員別検査時間集計', fontsize=14, fontweight='bold')
-            ax.set_xticks(range(len(names)))
-            ax.set_xticklabels(names, rotation=45, ha='right')
-            
-            # グリッドを追加
-            ax.grid(True, alpha=0.3)
-            
-            # 数値をバーの上に表示
-            for i, (bar, hour) in enumerate(zip(bars, hours)):
-                ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.1,
-                       f'{hour:.1f}h', ha='center', va='bottom', fontsize=10)
-            
-            plt.tight_layout()
-            
-            # Tkinterに埋め込み
-            canvas = FigureCanvasTkAgg(fig, graph_frame)
-            canvas.draw()
-            canvas.get_tk_widget().pack(fill="both", expand=True)
-            
-        except Exception as e:
-            logger.error(f"詳細グラフ作成中にエラーが発生しました: {str(e)}")
-            error_label = ctk.CTkLabel(
-                parent,
-                text=f"グラフ作成中にエラーが発生しました: {str(e)}",
-                font=ctk.CTkFont(family="Yu Gothic", size=12, weight="bold"),
-                text_color="red"
-            )
-            error_label.pack(expand=True)
-    
-    def create_inspector_lot_list(self, parent):
-        """検査員ごとのロット一覧を作成"""
-        try:
-            if self.current_inspector_data is None:
-                no_data_label = ctk.CTkLabel(
-                    parent,
-                    text="検査員データがありません",
-                    font=ctk.CTkFont(family="Yu Gothic", size=14)
-                )
-                no_data_label.pack(expand=True)
-                return
-            
-            # 検査員ごとのロットデータを整理（実際に割り当てられた検査員のみ）
-            inspector_lots = {}
-            # 列名から列インデックスへのマッピングを作成（高速化：itertuples()を使用）
-            inspector_col_indices = {f'検査員{i}': self.current_inspector_data.columns.get_loc(f'検査員{i}') for i in range(1, 6) if f'検査員{i}' in self.current_inspector_data.columns}
-            lot_info_cols = ['生産ロットID', '指示日', '出荷予定日', 'ロット数量', '分割検査時間', '品番', '品名', 'チーム情報']
-            lot_info_col_indices = {col: self.current_inspector_data.columns.get_loc(col) for col in lot_info_cols if col in self.current_inspector_data.columns}
-            
-            for row_tuple in self.current_inspector_data.itertuples(index=True):
-                row_idx = row_tuple[0]  # インデックス
-                row = self.current_inspector_data.loc[row_idx]  # Seriesとして扱うために元の行を取得
-                
-                # 検査員1～5を確認
-                for i in range(1, 6):
-                    inspector_col = f'検査員{i}'
-                    if inspector_col in inspector_col_indices:
-                        inspector_col_idx = inspector_col_indices[inspector_col]
-                        inspector_value = row_tuple[inspector_col_idx + 1] if inspector_col_idx < len(row_tuple) - 1 else None  # itertuplesはインデックスを含むため+1
-                        if pd.notna(inspector_value):
-                            inspector_name = str(inspector_value).strip()
-                            
-                            # 空文字列をスキップ
-                            if not inspector_name:
-                                continue
-                            
-                            # スキル値や(新)を除去して名前のみ取得
-                            if '(' in inspector_name:
-                                inspector_name = inspector_name.split('(')[0].strip()
-                            
-                            # 名前が空の場合はスキップ
-                            if not inspector_name:
-                                continue
-                            
-                            if inspector_name not in inspector_lots:
-                                inspector_lots[inspector_name] = []
-                            
-                            # ロット情報を追加
-                            lot_info = {}
-                            for col in lot_info_cols:
-                                if col in lot_info_col_indices:
-                                    col_idx = lot_info_col_indices[col]
-                                    col_value = row_tuple[col_idx + 1] if col_idx < len(row_tuple) - 1 else None  # itertuplesはインデックスを含むため+1
-                                    lot_info[col] = col_value if pd.notna(col_value) else ''
-                                else:
-                                    lot_info[col] = row.get(col, '')
-                            inspector_lots[inspector_name].append(lot_info)
-            
-            if not inspector_lots:
-                no_data_label = ctk.CTkLabel(
-                    parent,
-                    text="ロットデータがありません",
-                    font=ctk.CTkFont(family="Yu Gothic", size=14)
-                )
-                no_data_label.pack(expand=True)
-                return
-            
-            # 日付フォーマット関数（全データ処理の前に定義）
-            def format_date(date_value):
-                """日付をyyyy/mm/dd形式に変換"""
-                if pd.isna(date_value) or date_value == '' or date_value is None:
-                    return ''
-                try:
-                    # pandasのTimestamp型または文字列を処理
-                    if isinstance(date_value, pd.Timestamp):
-                        return date_value.strftime('%Y/%m/%d')
-                    elif isinstance(date_value, str):
-                        # 文字列の場合、まずパースを試みる
-                        parsed_date = pd.to_datetime(date_value, errors='coerce')
-                        if pd.notna(parsed_date):
-                            return parsed_date.strftime('%Y/%m/%d')
-                        return str(date_value)
-                    else:
-                        # その他の型（datetime等）を処理
-                        from datetime import datetime
-                        if isinstance(date_value, datetime):
-                            return date_value.strftime('%Y/%m/%d')
-                        return str(date_value)
-                except Exception:
-                    return str(date_value)
-            
-            # すべてのロットデータを収集して列幅を計算
-            headers = ['生産ロットID', '指示日', '出荷予定日', '品番', '品名', 'ロット数量', '検査時間', 'チーム情報']
-            
-            # フォントメトリクスで実際の幅を測定するためのフォントオブジェクト
-            font_data = tk.font.Font(family="Yu Gothic", size=11)
-            font_header = tk.font.Font(family="Yu Gothic", size=12, weight="bold")
-            
-            # 各列の最大幅を計算
-            column_widths = {}
-            for header in headers:
-                # ヘッダーの幅を測定（フォントメトリクスを使用）
-                header_width = font_header.measure(header)
-                max_width = header_width
-                
-                # すべてのロットデータから最大幅を計算
-                for inspector_name, lots in inspector_lots.items():
-                    for lot in lots:
-                        if header == '生産ロットID':
-                            value = str(lot.get('生産ロットID', ''))
-                        elif header == '指示日':
-                            value = format_date(lot.get('指示日', ''))
-                        elif header == '出荷予定日':
-                            value = format_date(lot.get('出荷予定日', ''))
-                        elif header == '品番':
-                            value = str(lot.get('品番', ''))
-                        elif header == '品名':
-                            value = str(lot.get('品名', ''))
-                        elif header == 'ロット数量':
-                            value = str(lot.get('ロット数量', ''))
-                        elif header == '検査時間':
-                            value = f"{lot.get('分割検査時間', 0):.1f}h" if pd.notna(lot.get('分割検査時間', 0)) else "0h"
-                        elif header == 'チーム情報':
-                            value = str(lot.get('チーム情報', ''))
-                        else:
-                            value = ''
-                        
-                        # 実際の文字列幅を測定（フォントメトリクスを使用）
-                        if value:
-                            value_width = font_data.measure(value)
-                            # パディングを追加（左右10ピクセルずつ）
-                            value_width += 20
-                            
-                            if value_width > max_width:
-                                max_width = value_width
-                
-                # 最小幅と最大幅の制限
-                min_width = header_width + 20  # ヘッダー文字列より小さくしない
-                max_width = max(min_width, max_width)
-                max_width = min(max_width, 500)  # 最大500ピクセルまで（ただし品名とチーム情報はもう少し長く）
-                
-                if header in ['品名', 'チーム情報']:
-                    max_width = min(max_width, 600)  # 長いテキスト列は600ピクセルまで
-                
-                column_widths[header] = max(int(max_width), 60)  # 最小60ピクセル
-            
-            # スクロール可能なフレーム（スクロールバーのスタイルを改善）
-            # CustomTkinterのバージョンによっては、scrollbar_button_colorなどのパラメータが
-            # 存在しない場合があるため、try-exceptで対応
-            try:
-                scroll_frame = ctk.CTkScrollableFrame(
-                    parent,
-                    scrollbar_button_color="#9CA3AF",
-                    scrollbar_button_hover_color="#6B7280",
-                    corner_radius=8
-                )
-            except TypeError:
-                # パラメータが存在しない場合はデフォルトで作成
-                scroll_frame = ctk.CTkScrollableFrame(
-                    parent,
-                    corner_radius=8
-                )
-            scroll_frame.pack(fill="both", expand=True, padx=10, pady=10)
-            
-            # マウスホイールイベントのバインド（詳細結果テーブル用）
-            def on_detail_mousewheel(event):
-                # CTkScrollableFrameのスクロール速度を他のテーブルと同等にするため、スクロール量を13倍に設定
-                scroll_amount = int(-1 * (event.delta / 120)) * 13
-                # CTkScrollableFrameの正しいスクロールメソッドを使用
-                if hasattr(scroll_frame, 'yview_scroll'):
-                    scroll_frame.yview_scroll(scroll_amount, "units")
-                else:
-                    # CTkScrollableFrameの場合は内部のCanvasを直接操作
-                    canvas = scroll_frame._parent_canvas
-                    if canvas:
-                        canvas.yview_scroll(scroll_amount, "units")
-                return "break"
-            
-            scroll_frame.bind("<MouseWheel>", on_detail_mousewheel)
-            
-            # ポップアップウィンドウ全体にもバインド（全画面でスクロール可能にする）
-            if hasattr(self, 'detail_popup') and self.detail_popup is not None:
-                self.detail_popup.bind("<MouseWheel>", on_detail_mousewheel)
-                # ポップアップ内のすべてのウィジェットにもバインド
-                def bind_detail_scroll_to_children(widget):
-                    """再帰的に子ウィジェットにマウスホイールイベントをバインド"""
-                    try:
-                        widget.bind("<MouseWheel>", on_detail_mousewheel)
-                        for child in widget.winfo_children():
-                            bind_detail_scroll_to_children(child)
-                    except:
-                        pass
-                
-                # ポップアップウィンドウの子ウィジェットにバインド
-                bind_detail_scroll_to_children(self.detail_popup)
-            
-            # 検査員ごとにセクションを作成
-            for inspector_name, lots in inspector_lots.items():
-                # 検査員セクション
-                inspector_section = ctk.CTkFrame(scroll_frame)
-                inspector_section.pack(fill="x", padx=10, pady=8)
-                
-                # 検査員名とロット数
-                total_hours = sum(lot.get('分割検査時間', 0) for lot in lots if pd.notna(lot.get('分割検査時間', 0)))
-                header_text = f"{inspector_name} ({len(lots)}ロット, 合計: {total_hours:.1f}時間)"
-                header_label = ctk.CTkLabel(
-                    inspector_section,
-                    text=header_text,
-                    font=ctk.CTkFont(family="Yu Gothic", size=16, weight="bold"),
-                    fg_color="#E5E7EB"
-                )
-                header_label.pack(fill="x", padx=8, pady=8)
-                
-                # ロット一覧テーブル（スクロール不要、全体のスクロールを使用）
-                lot_frame = tk.Frame(inspector_section, bg="white")
-                lot_frame.pack(fill="x", padx=8, pady=(0, 8))
-                
-                # テーブルヘッダー（計算済みの列幅を使用）
-                for j, header in enumerate(headers):
-                    header_label = tk.Label(
-                        lot_frame,
-                        text=header,
-                        font=ctk.CTkFont(family="Yu Gothic", size=12, weight="bold"),
-                        bg="#E5E7EB",
-                        fg="#1F2937",
-                        relief="solid",
-                        borderwidth=2,
-                        anchor="center"
-                    )
-                    header_label.grid(row=0, column=j, sticky="ew", padx=2, pady=3, ipadx=5, ipady=5)
-                
-                # ロットデータ行（ホバー効果と選択行のハイライトを追加）
-                selected_row_ref = {'value': None}  # この検査員セクションの選択された行を追跡
-                row_labels = {}  # 行ごとのラベルを保持 {row_idx: [label1, label2, ...]}
-                
-                for i, lot in enumerate(lots):
-                    row_data = [
-                        str(lot.get('生産ロットID', '')),
-                        format_date(lot.get('指示日', '')),
-                        format_date(lot.get('出荷予定日', '')),
-                        str(lot.get('品番', '')),
-                        str(lot.get('品名', '')),
-                        str(lot.get('ロット数量', '')),
-                        f"{lot.get('分割検査時間', 0):.1f}h" if pd.notna(lot.get('分割検査時間', 0)) else "0h",
-                        str(lot.get('チーム情報', ''))
-                    ]
-                    
-                    # 行全体の背景色を決定
-                    base_bg = "white" if i % 2 == 0 else "#F3F4F6"
-                    row_labels[i] = []  # この行のラベルを保持
-                    
-                    for j, data in enumerate(row_data):
-                        header = headers[j]
-                        anchor_pos = "e" if header in ['ロット数量', '検査時間'] else "w"
-                        data_label = tk.Label(
-                            lot_frame,
-                            text=data,
-                            font=ctk.CTkFont(family="Yu Gothic", size=11),
-                            bg=base_bg,
-                            fg="#111827",
-                            relief="solid",
-                            borderwidth=1,
-                            anchor=anchor_pos,
-                            wraplength=column_widths.get(header, 100) * 8  # 折り返し対応
-                        )
-                        data_label.grid(row=i+1, column=j, sticky="ew", padx=2, pady=2, ipadx=5, ipady=4)
-                        row_labels[i].append(data_label)  # ラベルを保存
-                        
-                        # ホバー効果とクリックイベントを追加
-                        def make_handlers(row_idx, bg_color, labels_list):
-                            """行ごとのイベントハンドラを作成"""
-                            def on_enter(event):
-                                """マウスが行に入った時の処理"""
-                                if selected_row_ref['value'] != row_idx:
-                                    # 選択されていない行の場合のみホバー色を適用
-                                    for label in labels_list:
-                                        label.config(bg="#E0E7FF")  # 薄い青
-                            
-                            def on_leave(event):
-                                """マウスが行から出た時の処理"""
-                                if selected_row_ref['value'] != row_idx:
-                                    # 選択されていない行の場合のみ元の色に戻す
-                                    for label in labels_list:
-                                        label.config(bg=bg_color)
-                            
-                            def on_click(event):
-                                """行がクリックされた時の処理"""
-                                # 前の選択行を元の色に戻す
-                                if selected_row_ref['value'] is not None:
-                                    prev_bg = "white" if selected_row_ref['value'] % 2 == 0 else "#F3F4F6"
-                                    if selected_row_ref['value'] in row_labels:
-                                        for label in row_labels[selected_row_ref['value']]:
-                                            label.config(bg=prev_bg)
-                                
-                                # 新しい選択行をハイライト
-                                selected_row_ref['value'] = row_idx
-                                for label in labels_list:
-                                    label.config(bg="#DBEAFE")  # 選択時の青
-                            
-                            return on_enter, on_leave, on_click
-                        
-                        on_enter, on_leave, on_click = make_handlers(i, base_bg, row_labels[i])
-                        data_label.bind("<Enter>", on_enter)
-                        data_label.bind("<Leave>", on_leave)
-                        data_label.bind("<Button-1>", on_click)
-                        # カーソルをポインターに変更
-                        data_label.config(cursor="hand2")
-                
-                # 列の重みと最小幅を設定（計算された最大幅を使用）
-                for j, header in enumerate(headers):
-                    lot_frame.grid_columnconfigure(j, weight=0, minsize=column_widths.get(header, 100))
-                
-                # テーブルにマウスホイールイベントをバインド（メインテーブル用）
-                def on_lot_table_mousewheel(event, scroll_frame_ref=scroll_frame):
-                    # CTkScrollableFrameのスクロール速度を他のテーブルと同等にするため、スクロール量を13倍に設定
-                    scroll_amount = int(-1 * (event.delta / 120)) * 13
-                    # CTkScrollableFrameの正しいスクロールメソッドを使用
-                    if hasattr(scroll_frame_ref, 'yview_scroll'):
-                        scroll_frame_ref.yview_scroll(scroll_amount, "units")
-                    else:
-                        # CTkScrollableFrameの場合は内部のCanvasを直接操作
-                        canvas = scroll_frame_ref._parent_canvas
-                        if canvas:
-                            canvas.yview_scroll(scroll_amount, "units")
-                    return "break"
-                
-                # lot_frameとその中のすべてのウィジェットにマウスホイールイベントをバインド
-                lot_frame.bind("<MouseWheel>", on_lot_table_mousewheel)
-                inspector_section.bind("<MouseWheel>", on_lot_table_mousewheel)
-                
-                # テーブル内のすべてのラベルにもバインド
-                for widget in lot_frame.winfo_children():
-                    widget.bind("<MouseWheel>", on_lot_table_mousewheel)
-                
-        except Exception as e:
-            logger.error(f"ロット一覧作成中にエラーが発生しました: {str(e)}")
-            error_label = ctk.CTkLabel(
-                parent,
-                text=f"ロット一覧作成中にエラーが発生しました: {str(e)}",
-                font=ctk.CTkFont(family="Yu Gothic", size=12),
-                text_color="red"
-            )
-            error_label.pack(expand=True)
     
     def export_to_google_sheets(self):
         """Googleスプレッドシートに手動で出力"""
@@ -8248,21 +7480,6 @@ class ModernDataExtractorUI:
                     logger.debug(f"カレンダーウィンドウの破棄でエラー（無視）: {e}")
                 self.calendar_window = None
             
-            # グラフフレームを破棄
-            if hasattr(self, 'graph_frame') and self.graph_frame is not None:
-                try:
-                    self.graph_frame.destroy()
-                except (AttributeError, tk.TclError) as e:
-                    logger.debug(f"グラフフレームの破棄でエラー（無視）: {e}")
-                self.graph_frame = None
-              
-            # matplotlibのリソースをクリーンアップ
-            try:
-                import matplotlib.pyplot as plt
-                plt.close('all')
-            except Exception as e:
-                logger.debug(f"matplotlibのクリーンアップでエラー（無視）: {e}")
-
             # Seat chart server を停止（起動していれば）
             try:
                 self._seat_chart_server.stop()
@@ -8343,11 +7560,9 @@ class ModernDataExtractorUI:
             if inspector_df is None:
                 return
             
-            # 検査員割振りテーブルを表示
-            self.display_inspector_assignment_table(inspector_df)
-            
             # データを保存（エクスポート用）
             self.current_inspector_data = inspector_df
+            self._refresh_inspector_table_post_assignment()
             
         except Exception as e:
             error_msg = f"検査員割振りの開始に失敗しました: {str(e)}"
