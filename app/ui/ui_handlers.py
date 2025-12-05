@@ -815,9 +815,14 @@ class ModernDataExtractorUI:
             highlight_row_color = "#FEE2E2"
             item_frame = ctk.CTkFrame(self.registered_list_container, fg_color=default_row_color, corner_radius=6)
             item_frame.pack(fill="x", pady=(0, 4), padx=5)
-            
-            row_container = ctk.CTkFrame(item_frame, fg_color="transparent")
-            row_container.pack(side="left", fill="x", expand=True, padx=0, pady=6)
+
+            item_frame.grid_columnconfigure(0, weight=1)
+            item_frame.grid_columnconfigure(1, weight=0)
+            item_frame.grid_rowconfigure(0, weight=1)
+
+            info_column = ctk.CTkFrame(item_frame, fg_color="transparent")
+            info_column.grid(row=0, column=0, sticky="nsew", padx=(2, 0), pady=6)
+            info_column.grid_columnconfigure(0, weight=1)
             
             checkbox_var = tk.BooleanVar(value=bool(item.get('same_day_priority', False)))
             
@@ -833,23 +838,23 @@ class ModernDataExtractorUI:
             checkbox_var.trace_add('write', lambda *args, frame=item_frame, var=checkbox_var: refresh_row_background(frame, var))
             
             checkbox = ctk.CTkCheckBox(
-                row_container,
+                info_column,
                 text="",
                 variable=checkbox_var,
                 command=lambda var=checkbox_var, entry=item: on_priority_toggle(var, entry),
                 font=ctk.CTkFont(family="Yu Gothic", size=12, weight="bold"),
                 text_color="#111827"
             )
-            checkbox.pack(side="left", padx=(10, 4), pady=0)
+            checkbox.pack(side="left", padx=(0, 2), pady=0)
             refresh_row_background(item_frame, checkbox_var)
             
             # 情報表示フレーム（一行で表示）
-            info_frame = ctk.CTkFrame(row_container, fg_color="transparent")
-            info_frame.pack(side="left", fill="x", expand=True, padx=(0, 10), pady=0)
+            info_frame = ctk.CTkFrame(info_column, fg_color="transparent")
+            info_frame.pack(side="left", fill="x", expand=True, padx=0, pady=0)
             
             # 一行で表示するフレーム
             single_row = ctk.CTkFrame(info_frame, fg_color="transparent")
-            single_row.pack(fill="x")
+            single_row.pack(fill="x", anchor="w")
             
             # 品番ラベル
             product_label = ctk.CTkLabel(
@@ -859,7 +864,7 @@ class ModernDataExtractorUI:
                 text_color="#374151",
                 anchor="w"
             )
-            product_label.pack(side="left")
+            product_label.pack(side="left", padx=(0, 2))
             
             # 品番の値（固定幅で位置を揃える）
             product_value = ctk.CTkLabel(
@@ -870,7 +875,7 @@ class ModernDataExtractorUI:
                 width=150,
                 anchor="w"
             )
-            product_value.pack(side="left")
+            product_value.pack(side="left", padx=(0, 2))
             
             # 検査可能ロット数／日のラベル
             lots_label = ctk.CTkLabel(
@@ -880,7 +885,7 @@ class ModernDataExtractorUI:
                 text_color="#374151",
                 anchor="w"
             )
-            lots_label.pack(side="left")
+            lots_label.pack(side="left", padx=(0, 2))
             
             # ロット数の値
             lots_value = ctk.CTkLabel(
@@ -890,7 +895,7 @@ class ModernDataExtractorUI:
                 text_color="#374151",
                 anchor="w"
             )
-            lots_value.pack(side="left")
+            lots_value.pack(side="left", padx=(0, 2))
             # 工程名
             process_label = ctk.CTkLabel(
                 single_row,
@@ -899,7 +904,7 @@ class ModernDataExtractorUI:
                 text_color="#374151",
                 anchor="w"
             )
-            process_label.pack(side="left", padx=(20, 5))
+            process_label.pack(side="left", padx=(20, 2))
 
             process_value = ctk.CTkLabel(
                 single_row,
@@ -908,7 +913,7 @@ class ModernDataExtractorUI:
                 text_color="#374151",
                 anchor="w"
             )
-            process_value.pack(side="left")
+            process_value.pack(side="left", padx=(0, 2))
 
             
             # 固定検査員の表示
@@ -919,46 +924,17 @@ class ModernDataExtractorUI:
                 text_color="#374151",
                 anchor="w"
             )
-            fixed_inspectors_label.pack(side="left", padx=(20, 5))
+            fixed_inspectors_label.pack(side="left", padx=(20, 2))
             
-            # 固定検査員の値（テーブルに入りきるまで表示）
-            # 表示可能な幅を計算（より広い幅を確保、日本語1文字あたり約12pxを想定）
-            max_display_width = 900  # ピクセル単位の最大表示幅（拡大）
-            char_width = 12  # 日本語1文字あたりの幅（概算、より小さめに設定）
-            max_chars = max_display_width // char_width  # 約75文字分
-            
-            if item['固定検査員']:
-                # 表示可能な検査員名を動的に計算
-                displayed_names = []
-                current_length = 0
-                ellipsis_length = len(" ... (+99)")  # 省略記号の長さ（最大件数を考慮）
-                
-                for inspector_name in item['固定検査員']:
-                    # 検査員名の長さ（カンマとスペースを含む）
-                    name_length = len(inspector_name) + 2 if displayed_names else len(inspector_name)
-                    
-                    # 省略記号を含めた場合の長さ
-                    if displayed_names:
-                        total_length_with_ellipsis = current_length + name_length + ellipsis_length
-                    else:
-                        total_length_with_ellipsis = name_length + ellipsis_length
-                    
-                    # 表示可能な範囲内かチェック（より寛容に）
-                    if total_length_with_ellipsis <= max_chars:
-                        displayed_names.append(inspector_name)
-                        current_length += name_length
-                    else:
-                        # これ以上表示できない場合は省略
-                        break
-                
-                if displayed_names:
-                    fixed_inspectors_text = ", ".join(displayed_names)
-                    remaining_count = len(item['固定検査員']) - len(displayed_names)
-                    if remaining_count > 0:
-                        fixed_inspectors_text += f" ... (+{remaining_count})"
-                else:
-                    # 最初の1名も表示できない場合は件数のみ表示
-                    fixed_inspectors_text = f"... (+{len(item['固定検査員'])})"
+            # 固定検査員の値（3件まで表示し、残りは+N人で省略）
+            visible_limit = 6
+            inspectors = item['固定検査員']
+            if inspectors:
+                displayed_names = inspectors[:visible_limit]
+                fixed_inspectors_text = ", ".join(displayed_names)
+                remaining_count = len(inspectors) - len(displayed_names)
+                if remaining_count > 0:
+                    fixed_inspectors_text += f" +{remaining_count}人"
             else:
                 fixed_inspectors_text = "未設定"
             
@@ -969,17 +945,20 @@ class ModernDataExtractorUI:
                 text_color="#059669" if item['固定検査員'] else "#6B7280",
                 anchor="w"
             )
-            fixed_inspectors_value.pack(side="left", fill="x", expand=True)
+            fixed_inspectors_value.pack(side="left", fill="x", expand=True, padx=(0, 2))
+            if len(inspectors) > visible_limit:
+                fixed_inspectors_value.configure(cursor="hand2")
+                fixed_inspectors_value.bind("<Button-1>", lambda event, names=inspectors: self.show_fixed_inspector_list(names))
             
-            # ボタン行（幅が狭い環境でも折り返ししやすいよう段落を分離）
-            button_row = ctk.CTkFrame(item_frame, fg_color="transparent")
-            button_row.pack(fill="x", padx=10, pady=(6, 8))
-            button_frame = ctk.CTkFrame(button_row, fg_color="transparent")
-            button_frame.pack(fill="x")
+            button_column = ctk.CTkFrame(item_frame, fg_color="transparent", width=220)
+            button_column.grid(row=0, column=1, sticky="ne", padx=(8, 5), pady=6)
+            button_column.grid_propagate(False)
+
+            button_frame = ctk.CTkFrame(button_column, fg_color="transparent")
+            button_frame.pack(anchor="e")
             button_frame.grid_columnconfigure(0, weight=1)
             button_frame.grid_columnconfigure(1, weight=1)
 
-            # 検査員固定ボタン
             inspector_button = ctk.CTkButton(
                 button_frame,
                 text="検査員固定",
@@ -993,7 +972,6 @@ class ModernDataExtractorUI:
             )
             inspector_button.grid(row=0, column=0, sticky="ew", padx=(0, 5))
             
-            # 登録変更ボタン
             modify_button = ctk.CTkButton(
                 button_frame,
                 text="登録変更",
@@ -1007,6 +985,36 @@ class ModernDataExtractorUI:
             )
             modify_button.grid(row=0, column=1, sticky="ew")
     
+    def show_fixed_inspector_list(self, inspector_names):
+        """固定検査員一覧をモーダル表示"""
+        if not inspector_names:
+            return
+
+        dialog = ctk.CTkToplevel(self.root)
+        dialog.title("固定検査員一覧")
+        dialog.geometry("320x360")
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        label = ctk.CTkLabel(
+            dialog,
+            text="\n".join(inspector_names),
+            font=ctk.CTkFont(family="Yu Gothic", size=12),
+            text_color="#111827",
+            justify="left",
+            anchor="w"
+        )
+        label.pack(fill="both", expand=True, padx=20, pady=(20, 10))
+
+        close_button = ctk.CTkButton(
+            dialog,
+            text="閉じる",
+            command=dialog.destroy,
+            width=100,
+            height=32
+        )
+        close_button.pack(pady=(0, 20))
+
     def delete_registered_product(self, index):
         """登録された品番を削除（後方互換性のため残す）"""
         if 0 <= index < len(self.registered_products):
