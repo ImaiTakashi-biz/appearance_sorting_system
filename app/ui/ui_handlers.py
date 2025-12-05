@@ -834,13 +834,13 @@ class ModernDataExtractorUI:
             
             checkbox = ctk.CTkCheckBox(
                 row_container,
-                text="当日",
+                text="",
                 variable=checkbox_var,
                 command=lambda var=checkbox_var, entry=item: on_priority_toggle(var, entry),
                 font=ctk.CTkFont(family="Yu Gothic", size=12, weight="bold"),
                 text_color="#111827"
             )
-            checkbox.pack(side="left", padx=(10, 8), pady=0)
+            checkbox.pack(side="left", padx=(10, 4), pady=0)
             refresh_row_background(item_frame, checkbox_var)
             
             # 情報表示フレーム（一行で表示）
@@ -986,6 +986,7 @@ class ModernDataExtractorUI:
                 command=lambda idx=idx: self.fix_inspectors_for_product(idx),
                 font=ctk.CTkFont(family="Yu Gothic", size=12, weight="bold"),
                 height=32,
+                width=90,
                 fg_color="#10B981" if item['固定検査員'] else "#6B7280",
                 hover_color="#059669" if item['固定検査員'] else "#4B5563",
                 text_color="white"
@@ -999,6 +1000,7 @@ class ModernDataExtractorUI:
                 command=lambda idx=idx: self.modify_registered_product(idx),
                 font=ctk.CTkFont(family="Yu Gothic", size=12, weight="bold"),
                 height=32,
+                width=90,
                 fg_color="#3B82F6",
                 hover_color="#2563EB",
                 text_color="white"
