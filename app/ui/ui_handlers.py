@@ -2062,18 +2062,13 @@ class ModernDataExtractorUI:
         button_frame = ctk.CTkFrame(parent, fg_color="white", corner_radius=0)
         button_frame.pack(fill="x", pady=(5, 5), padx=20)
         
-        # ボタンフレーム（左右配置用）
         buttons_frame = ctk.CTkFrame(button_frame, fg_color="transparent")
         buttons_frame.pack(expand=True, fill="x", pady=5)
-        
+
         # 左側のボタングループ（主要操作）
         left_buttons_frame = ctk.CTkFrame(buttons_frame, fg_color="transparent")
         left_buttons_frame.pack(side="left", expand=True, fill="x")
-        
-        # 右側のボタングループ（出力・終了）
-        right_buttons_frame = ctk.CTkFrame(buttons_frame, fg_color="transparent")
-        right_buttons_frame.pack(side="right", expand=True, fill="x")
-        
+
         # データ抽出ボタン（左側）
         self.extract_button = ctk.CTkButton(
             left_buttons_frame,
@@ -2105,37 +2100,6 @@ class ModernDataExtractorUI:
             text_color="white"
         )
         self.reload_button.pack(side="left", padx=(0, 15))
-        
-        self.exit_button = ctk.CTkButton(
-            right_buttons_frame,
-            text="アプリ終了",
-            command=self.quit_application,
-            font=ctk.CTkFont(family="Yu Gothic", size=15, weight="bold"),
-            height=45,
-            width=120,
-            fg_color="#EF4444",
-            hover_color="#DC2626",
-            corner_radius=10,
-            border_width=0,
-            text_color="white"
-        )
-        self.exit_button.pack(side="right", padx=(15, 0))
-        
-        # Googleスプレッドシート出力ボタン（右側）
-        self.google_sheets_button = ctk.CTkButton(
-            right_buttons_frame,
-            text="Googleスプレッドシートへ出力",
-            command=self.export_to_google_sheets,
-            font=ctk.CTkFont(family="Yu Gothic", size=15, weight="bold"),
-            height=45,
-            width=240,
-            fg_color="#10B981",
-            hover_color="#059669",
-            corner_radius=10,
-            border_width=0,
-            text_color="white"
-        )
-        self.google_sheets_button.pack(side="right", padx=(0, 0))
     
     def create_progress_section(self, parent):
         """進捗セクションの作成"""
@@ -6090,26 +6054,20 @@ class ModernDataExtractorUI:
             button_frame = ctk.CTkFrame(title_frame, fg_color="transparent")
             button_frame.pack(side="right")
             
-            seating_buttons_frame = ctk.CTkFrame(button_frame, fg_color="transparent")
-            seating_buttons_frame.pack(side="right", padx=(0, 25))
+            action_flow_frame = ctk.CTkFrame(button_frame, fg_color="transparent")
+            action_flow_frame.pack(side="right", padx=(0, 25))
 
-            self.seating_reflect_button = ctk.CTkButton(
-                seating_buttons_frame,
-                text="ロット振分変更反映",
-                command=self.apply_seating_chart_results,
-                width=160,
-                height=30,
-                font=ctk.CTkFont(family="Yu Gothic", size=12, weight="bold"),
-                fg_color="#F97316",
-                hover_color="#EA580C",
-                corner_radius=10,
-                border_width=0,
-                text_color="white"
-            )
-            self.seating_reflect_button.pack(side="right", padx=(12, 0))
+            def append_arrow():
+                arrow_label = ctk.CTkLabel(
+                    action_flow_frame,
+                    text="→",
+                    font=ctk.CTkFont(family="Yu Gothic", size=16, weight="bold"),
+                    text_color="#1F2937"
+                )
+                arrow_label.pack(side="left", padx=6)
 
             self.seating_view_button = ctk.CTkButton(
-                seating_buttons_frame,
+                action_flow_frame,
                 text="座席表",
                 command=self.open_seating_chart,
                 width=110,
@@ -6121,7 +6079,58 @@ class ModernDataExtractorUI:
                 border_width=0,
                 text_color="white"
             )
-            self.seating_view_button.pack(side="right", padx=(0, 25))
+            self.seating_view_button.pack(side="left")
+
+            append_arrow()
+
+            self.seating_reflect_button = ctk.CTkButton(
+                action_flow_frame,
+                text="ロット振分変更反映",
+                command=self.apply_seating_chart_results,
+                width=160,
+                height=30,
+                font=ctk.CTkFont(family="Yu Gothic", size=12, weight="bold"),
+                fg_color="#F97316",
+                hover_color="#EA580C",
+                corner_radius=10,
+                border_width=0,
+                text_color="white"
+            )
+            self.seating_reflect_button.pack(side="left")
+
+            append_arrow()
+
+            self.google_sheets_button = ctk.CTkButton(
+                action_flow_frame,
+                text="Googleスプレッドシートへ出力",
+                command=self.export_to_google_sheets,
+                width=220,
+                height=30,
+                font=ctk.CTkFont(family="Yu Gothic", size=12, weight="bold"),
+                fg_color="#10B981",
+                hover_color="#059669",
+                corner_radius=10,
+                border_width=0,
+                text_color="white"
+            )
+            self.google_sheets_button.pack(side="left")
+
+            append_arrow()
+
+            self.app_exit_button = ctk.CTkButton(
+                action_flow_frame,
+                text="アプリ終了",
+                command=self.quit_application,
+                width=130,
+                height=30,
+                font=ctk.CTkFont(family="Yu Gothic", size=12, weight="bold"),
+                fg_color="#EF4444",
+                hover_color="#DC2626",
+                corner_radius=10,
+                border_width=0,
+                text_color="white"
+            )
+            self.app_exit_button.pack(side="left")
             
             self.seating_flow_prompt_label = ctk.CTkLabel(
                 inspector_frame,
