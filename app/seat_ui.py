@@ -236,6 +236,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         gap: 0.6rem;
         padding: 1rem 1.5rem 1.5rem;
         min-height: 100vh;
+        width: min(1480px, 100%);
+        margin: 0 auto;
       }
       .grid-area {
         background: #fff;
@@ -243,7 +245,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         padding: 1rem 1.25rem 1.5rem;
         box-shadow: 0 18px 40px rgba(0, 0, 0, 0.08);
         position: relative;
-        overflow: hidden;
+        overflow: auto;
+        max-width: 100%;
+        min-height: 420px;
       }
       .grid-header {
         display: flex;
@@ -358,13 +362,14 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         align-items: center;
       }
       #seat-grid {
-        min-height: 500px;
+        min-height: 420px;
+        width: 100%;
         position: relative;
         margin-bottom: 2rem;
+        max-width: 100%;
       }
       .seat-card {
         position: absolute;
-        width: 180px;
         border-radius: 1rem;
         border: 1px solid #d6d6d6;
         background: #fff;
@@ -420,8 +425,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         gap: 0.25rem;
         width: 100%;
         flex: 1;
-        height: calc(5 * 20px + 0.25rem * 4);
-        max-height: calc(5 * 20px + 0.25rem * 4);
+        min-height: 110px;
+        max-height: clamp(140px, 22vh, 260px);
         overflow-y: auto;
         overflow-x: auto;
         scrollbar-width: thin;
@@ -650,9 +655,33 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         }
         .grid-area {
           border-radius: 0.8rem;
+          padding: 0.75rem 1rem 1.2rem;
+        }
+        .grid-header {
+          flex-direction: column;
+          align-items: flex-start;
+        }
+        .grid-actions {
+          flex-wrap: wrap;
+          justify-content: flex-end;
+          width: 100%;
+        }
+        .mode-toggle {
+          min-width: 120px;
         }
         .editor-panel {
           display: flex;
+        }
+      }
+      @media screen and (max-width: 700px) {
+        .grid-header h1 {
+          font-size: 1.6rem;
+        }
+        .grid-area {
+          padding: 0.6rem 0.75rem 1rem;
+        }
+        .editor-panel {
+          width: 100%;
         }
       }
     </style>
@@ -751,6 +780,17 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       let currentSlotWidth = modeSizes.view.width;
       let currentSlotHeight = modeSizes.view.height;
       let currentSlotGap = modeSizes.view.gap;
+      const getGridExtent = () => {
+        if (!seats.length) {
+          return { maxRow: 1, maxCol: 1 };
+        }
+        const rowValues = seats.map((seat) => Number(seat.row) || 0);
+        const colValues = seats.map((seat) => Number(seat.col) || 0);
+        return {
+          maxRow: Math.max(1, ...rowValues),
+          maxCol: Math.max(1, ...colValues),
+        };
+      };
       const boardTitle = document.getElementById("board-title");
       const gridArea = document.querySelector(".grid-area");
       let activeSplitTarget = null;
@@ -857,10 +897,23 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       };
 
       const applyModeSizes = () => {
-        const { width, height, gap } = editingMode ? modeSizes.editing : modeSizes.view;
-        currentSlotWidth = width;
-        currentSlotHeight = height;
-        currentSlotGap = gap;
+        const { width: baseWidth, height: baseHeight, gap: baseGap } = editingMode ? modeSizes.editing : modeSizes.view;
+        currentSlotGap = baseGap;
+        currentSlotWidth = baseWidth;
+        currentSlotHeight = baseHeight;
+        if (!gridArea) {
+          return;
+        }
+        const { maxCol } = getGridExtent();
+        const safeCols = Math.max(1, Math.ceil(maxCol || 1));
+        const horizontalPadding = 32;
+        const availableWidth = Math.max(gridArea.clientWidth - horizontalPadding, 0);
+        const computedWidth = Math.floor((availableWidth - (safeCols - 1) * currentSlotGap) / safeCols);
+        const normalizedWidth = Number.isFinite(computedWidth) ? computedWidth : baseWidth;
+        const targetWidth = Math.max(110, Math.min(baseWidth * 1.4, normalizedWidth));
+        currentSlotWidth = targetWidth;
+        const aspectRatio = baseHeight / baseWidth;
+        currentSlotHeight = Math.max(90, Math.round(targetWidth * aspectRatio));
       };
 
       const uniqueInspectorNames = () =>
@@ -988,13 +1041,14 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       };
 
       const updateGridDimensions = () => {
-        if (!seats.length) {
+        if (!grid) {
           return;
         }
-        const maxRow = Math.max(...seats.map((seat) => seat.row || 0));
-        const maxCol = Math.max(...seats.map((seat) => seat.col || 0));
-        grid.style.height = `${maxRow * (currentSlotHeight + currentSlotGap)}px`;
-        grid.style.width = `${maxCol * (currentSlotWidth + currentSlotGap)}px`;
+        const { maxRow, maxCol } = getGridExtent();
+        const height = Math.max(maxRow * (currentSlotHeight + currentSlotGap), currentSlotHeight + currentSlotGap);
+        const width = Math.max(maxCol * (currentSlotWidth + currentSlotGap), currentSlotWidth + currentSlotGap);
+        grid.style.height = `${height}px`;
+        grid.style.width = `${width}px`;
       };
 
       const calculateTotalSecondsForSeat = (seat) => {
@@ -1701,6 +1755,26 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         setInstructionContent();
         loadLatestSeatingData();
       });
+
+      let resizeAnimationFrame = 0;
+      const scheduleResizeRender = () => {
+        if (resizeAnimationFrame) {
+          cancelAnimationFrame(resizeAnimationFrame);
+        }
+        if (typeof window.requestAnimationFrame !== "function") {
+          renderSeats();
+          return;
+        }
+        resizeAnimationFrame = requestAnimationFrame(() => {
+          resizeAnimationFrame = 0;
+          renderSeats();
+        });
+      };
+      window.addEventListener("resize", scheduleResizeRender);
+      if (typeof ResizeObserver === "function" && gridArea) {
+        const layoutObserver = new ResizeObserver(scheduleResizeRender);
+        layoutObserver.observe(gridArea);
+      }
     </script>
   </body>
 </html>

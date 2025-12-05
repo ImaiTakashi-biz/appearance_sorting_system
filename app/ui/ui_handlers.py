@@ -68,10 +68,9 @@ class ModernDataExtractorUI:
     MASTER_CACHE_TTL_MINUTES = 5  # 5分
     ACCESS_LOTS_CACHE_TTL_SECONDS = 300  # 5分（秒）
     
-    # UI設定定数
-    DEFAULT_WINDOW_SIZE = "1200x800"
-    MIN_WINDOW_WIDTH = 1000
-    MIN_WINDOW_HEIGHT = 700
+    # UI設定定数（最小サイズのみ指定して柔軟な拡張を許容）
+    MIN_WINDOW_WIDTH = 900
+    MIN_WINDOW_HEIGHT = 600
     
     # シート出力用の未割当ロットキー
     UNASSIGNED_LOTS_KEY = "__UNASSIGNED_LOTS__"
@@ -99,7 +98,6 @@ class ModernDataExtractorUI:
         # メインウィンドウの作成
         self.root = ctk.CTk()
         self.root.title("外観検査振分支援システム")
-        self.root.geometry(self.DEFAULT_WINDOW_SIZE)
         self.root.minsize(self.MIN_WINDOW_WIDTH, self.MIN_WINDOW_HEIGHT)
         
         # ウィンドウの背景色を白に設定
