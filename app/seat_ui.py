@@ -105,6 +105,7 @@ def attach_dummy_lots(chart: Dict[str, List[Dict[str, object]]]) -> Dict[str, Li
             lots.append(
                 {
                     "lot_id": lot_id,
+                    "product_code": product,
                     "product_name": f"品番{product}",
                     "process_name": process,
                     "quantity": qty_options[(seat_idx + slot) % len(qty_options)],
@@ -1331,14 +1332,17 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
       const generateLotTooltipContent = (lot) => {
         const shippingDate = normalizeShippingDateValue(lot.shipping_date) || "未設定";
-        const productName = (lot.product_name || lot.lot_id || "未設定").replace(/^品番/, "").trim();
+        const productNameRaw = (lot.product_name || "").trim();
+        const productCode = ((lot.product_code || lot.lot_id || "").replace(/^品番/, "").trim()) || "";
+        const productLabel = productNameRaw || productCode || "未設定";
         const processName = (lot.process_name || "").replace(/^工程名?/, "").trim();
         const inspectionHours = Number(lot.inspection_time) || 0;
         const inspectionText = inspectionHours > 0 ? `${inspectionHours.toFixed(2)}h` : "未設定";
         const lines = [
           `出荷予定日：${shippingDate}`,
-          processName ? `工程：${processName}` : `品番：${productName}`,
+          processName ? `工程：${processName}` : "工程：未設定",
           `検査時間：${inspectionText}`,
+          `品名：${productLabel}`,
         ];
         return lines.join("<br />");
       };
@@ -1358,7 +1362,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         } else if (hasTodayShipping) {
           lotCard.classList.add("lot-card--today");
         }
-        const product = (lot.product_name || lot.lot_id || "未設定").replace(/^品番/, "").trim();
+        const product = (lot.product_code || lot.product_name || lot.lot_id || "未設定").replace(/^品番/, "").trim();
         const process = (lot.process_name || "工程未設定").replace(/^工程名?/, "").trim();
         const line = document.createElement("div");
         line.className = "lot-line";

@@ -1,4 +1,4 @@
-"""
+﻿"""
 外観検査振分支援システム - メインUI
 近未来的なデザインで出荷予定日を指定してデータを抽出する
 """
@@ -1465,7 +1465,7 @@ class ModernDataExtractorUI:
         
         self.start_date_entry = ctk.CTkEntry(
             start_date_frame,
-            placeholder_text="YYYY/MM/DD",
+            placeholder_text="YYYY/MM/DD　検査日当日を入力のこと（休暇情報取得のため）",
             font=ctk.CTkFont(family="Yu Gothic", size=14),
             height=40,
             border_width=1,
@@ -6592,7 +6592,7 @@ class ModernDataExtractorUI:
                 seen_norms.add(normalized_col)
 
         rowcol_to_inspector: Dict[Tuple[str, str], str] = {}
-        product_column_candidates = ["品番", "製品番号", "製品名", "品名"]
+        product_code_candidates = ["品番", "製品番号", "製品コード", "製品CD", "品目コード"]
         lot_key_to_inspector: Dict[str, Deque[str]] = {}
         seen_rowcol_keys = set()
         seen_lot_keys = set()
@@ -6635,7 +6635,7 @@ class ModernDataExtractorUI:
             row_key = self._normalize_seating_row_key(row_index)
             if not row_key:
                 continue
-            lot_key = self._derive_lot_key(row, row_index, product_column_candidates)
+            lot_key = self._derive_lot_key(row, row_index, product_code_candidates)
             row_modified = False
             for normalized_col, actual_col in normalized_columns:
                 assigned = rowcol_to_inspector.get((row_key, normalized_col))
@@ -6683,7 +6683,8 @@ class ModernDataExtractorUI:
         ]
         inspector_column_map: Dict[str, str] = {}
         lot_id_candidates = ["生産ロットID", "ロットID", "LotID"]
-        product_column_candidates = ["品番", "製品番号", "製品名", "品名"]
+        product_code_candidates = ["品番", "製品番号", "製品コード", "製品CD", "品目コード"]
+        product_name_candidates = ["品名", "製品名", "製品名称", "品目名", "品目名称"]
         lots = defaultdict(list)
         unassigned_lots = []
         def format_shipping_date(value):
@@ -6722,7 +6723,7 @@ class ModernDataExtractorUI:
 
         for row_index, row in df.iterrows():
             lot_id = ""
-            lot_key = self._derive_lot_key(row, row_index, product_column_candidates)
+            lot_key = self._derive_lot_key(row, row_index, product_code_candidates)
             for candidate in lot_id_candidates:
                 if candidate in df.columns:
                     value = row.get(candidate)
@@ -6732,11 +6733,20 @@ class ModernDataExtractorUI:
                             lot_id = candidate_id
                             break
             if not lot_id:
-                lot_id = self._derive_lot_key(row, row_index, product_column_candidates)
+                lot_id = self._derive_lot_key(row, row_index, product_code_candidates)
             if not lot_id:
                 lot_id = f"lot-{row_index}"
+            product_code = ""
+            for candidate in product_code_candidates:
+                if candidate in df.columns:
+                    value = row.get(candidate)
+                    if pd.notna(value):
+                        cleaned = str(value).strip()
+                        if cleaned:
+                            product_code = cleaned
+                            break
             product_name = ""
-            for candidate in product_column_candidates:
+            for candidate in product_name_candidates:
                 if candidate in df.columns:
                     value = row.get(candidate)
                     if pd.notna(value):
@@ -6759,6 +6769,7 @@ class ModernDataExtractorUI:
             lot_base = {
                 "lot_id": lot_id,
                 "product_name": product_name,
+                "product_code": product_code,
                 "sec_per_piece": 0.0,
                 "inspection_time": 0.0,
                 "source_row_index": str(row_index),
@@ -6793,10 +6804,10 @@ class ModernDataExtractorUI:
         self.inspector_column_map_for_seating = inspector_column_map.copy()
         return dict(lots)
 
-    def _derive_lot_key(self, row, row_index, product_column_candidates):
+    def _derive_lot_key(self, row, row_index, product_code_candidates):
         """品番・ロット数量・指示日から代替の lot_id を構築"""
         parts: List[str] = []
-        for candidate in product_column_candidates:
+        for candidate in product_code_candidates:
             value = row.get(candidate)
             if pd.notna(value):
                 clean = str(value).strip()
