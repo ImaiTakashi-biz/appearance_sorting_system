@@ -1412,13 +1412,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         });
 
         lotCard.addEventListener("mouseenter", function (event) {
-          if (editingMode) {
+          if (editingMode || draggingLot) {
             return;
           }
           showFloatingTooltip(event, lot);
         });
         lotCard.addEventListener("mousemove", function (event) {
-          if (!floatingTooltip || !floatingTooltip.classList.contains("visible")) {
+          if (!floatingTooltip || !floatingTooltip.classList.contains("visible") || draggingLot) {
             return;
           }
           updateFloatingTooltipPosition(event.currentTarget.getBoundingClientRect());
@@ -1431,6 +1431,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             return;
           }
           event.stopPropagation();
+          // ドラッグ開始時にツールチップを非表示にする
+          hideFloatingTooltip();
           draggingLot = { seatId, lotId: lot.lot_id };
           lotCard.classList.add("dragging-lot");
           event.dataTransfer?.setData("text/plain", lot.lot_id);
@@ -1440,6 +1442,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           draggingLot = null;
           lotCard.classList.remove("dragging-lot");
           clearDropStyles();
+          // ドラッグ終了時にツールチップを非表示にする（マウスが離れた状態なので）
+          hideFloatingTooltip();
         });
 
         return lotCard;
