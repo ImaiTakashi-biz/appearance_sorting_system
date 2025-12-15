@@ -6596,11 +6596,15 @@ class ModernDataExtractorUI:
         lot_key_to_inspector: Dict[str, Deque[str]] = {}
         seen_rowcol_keys = set()
         seen_lot_keys = set()
+        # 座席表のロット順番を保持するためのマッピング
+        # {lot_key: (inspector_name, order_index)} の形式
+        lot_key_to_order: Dict[str, Tuple[str, int]] = {}
         for seat in chart.get("seats", []):
             inspector_name = (seat.get("name") or "").strip()
             if not inspector_name:
                 continue
-            for lot in seat.get("lots", []):
+            lots = seat.get("lots", [])
+            for order_index, lot in enumerate(lots):
                 source_row = lot.get("source_row_index")
                 source_row_key = lot.get("source_row_key")
                 source_col = lot.get("source_inspector_col")
@@ -6618,6 +6622,8 @@ class ModernDataExtractorUI:
                     if lot_key not in seen_lot_keys:
                         lot_key_to_inspector.setdefault(lot_key, deque()).append(inspector_name)
                         seen_lot_keys.add(lot_key)
+                    # ロット順番を記録
+                    lot_key_to_order[lot_key] = (inspector_name, order_index)
 
         if not rowcol_to_inspector and not lot_key_to_inspector:
             logger.info("Seat chart sync: rowcol_to_inspector is empty")
@@ -6666,6 +6672,8 @@ class ModernDataExtractorUI:
         except Exception:
             pass
         self.original_inspector_data = df.copy()
+        # 座席表のロット順番を保存（Googleスプレッドシート出力時に使用）
+        self.seating_chart_lot_order = lot_key_to_order.copy()
         self._set_seating_flow_prompt("変更が反映されました。次に「Googleスプレッドシートへ出力」を押してください。")
         self.log_message(f"Applied seating results to {updated} lots.")
 
@@ -6827,6 +6835,54 @@ class ModernDataExtractorUI:
         if parts:
             key_components.extend(parts)
         return "_".join(key_components)
+    
+    def _sort_dataframe_by_seating_order(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        座席表のロット順番に基づいてDataFrameを並び替える
+        
+        Args:
+            df: 並び替えるDataFrame
+            
+        Returns:
+            並び替えられたDataFrame
+        """
+        if not hasattr(self, 'seating_chart_lot_order') or not self.seating_chart_lot_order:
+            return df
+        
+        product_code_candidates = ["品番", "製品番号", "製品コード", "製品CD", "品目コード"]
+        inspector_cols = [col for col in df.columns if col.startswith("検査員")]
+        
+        # 各行のロットキーを計算し、座席表の順番を取得
+        def get_sort_key(row):
+            row_index = row.name
+            lot_key = self._derive_lot_key(row, row_index, product_code_candidates)
+            
+            # 割り当てられている検査員を取得
+            assigned_inspector = None
+            for col in inspector_cols:
+                value = row.get(col)
+                if pd.notna(value) and str(value).strip():
+                    assigned_inspector = str(value).strip().split('(')[0].strip()
+                    break
+            
+            if lot_key in self.seating_chart_lot_order:
+                inspector_name, order_index = self.seating_chart_lot_order[lot_key]
+                # 座席表の検査員名と一致する場合は順番を使用
+                if assigned_inspector == inspector_name:
+                    # 検査員名でグループ化し、その中で順番でソート
+                    return (0, inspector_name or "", order_index)
+                else:
+                    # 座席表の検査員名と一致しない場合は、割り当てられている検査員でグループ化
+                    return (1, assigned_inspector or "", 999999)
+            else:
+                # 座席表にないロットは最後に配置（割り当てられている検査員でグループ化）
+                return (2, assigned_inspector or "", 999999)
+        
+        # ソートキーを計算
+        sort_keys = df.apply(get_sort_key, axis=1)
+        df_sorted = df.iloc[sort_keys.argsort()].copy()
+        
+        return df_sorted
     def _resolve_inspector_names_for_seating(self):
         """Return inspector names derived from the master or current table."""
         names = []
@@ -7462,6 +7518,10 @@ class ModernDataExtractorUI:
             
             # スキル値付きのデータを使用（検査員名のみを抽出して出力）
             inspector_df = self.original_inspector_data if hasattr(self, 'original_inspector_data') and self.original_inspector_data is not None else self.current_inspector_data
+            
+            # 座席表のロット順番に基づいてDataFrameを並び替え
+            if hasattr(self, 'seating_chart_lot_order') and self.seating_chart_lot_order:
+                inspector_df = self._sort_dataframe_by_seating_order(inspector_df)
             
             self.log_message("Googleスプレッドシートへの出力を開始します")
             success = self.google_sheets_exporter.export_inspector_assignment_to_sheets(

@@ -1087,6 +1087,22 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         });
       };
 
+      const getDragAfterElement = (container, y) => {
+        const draggableElements = [...container.querySelectorAll(".lot-card:not(.dragging-lot)")];
+        return draggableElements.reduce(
+          (closest, child) => {
+            const box = child.getBoundingClientRect();
+            const offset = y - box.top - box.height / 2;
+            if (offset < 0 && offset > closest.offset) {
+              return { offset: offset, element: child };
+            } else {
+              return closest;
+            }
+          },
+          { offset: Number.NEGATIVE_INFINITY, element: null }
+        ).element;
+      };
+
       const removeLotFromSource = (sourceId, lotId) => {
         if (sourceId === "unassigned") {
           const idx = unassignedLots.findIndex((lot) => lot.lot_id === lotId);
@@ -1106,8 +1122,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         return sourceSeat.lots.splice(index, 1)[0];
       };
 
-      const moveLot = (fromSeatId, toSeatId, lotId) => {
-        if (!fromSeatId || !toSeatId || !lotId || fromSeatId === toSeatId) {
+      const moveLot = (fromSeatId, toSeatId, lotId, insertIndex = null) => {
+        if (!fromSeatId || !toSeatId || !lotId) {
           return;
         }
         const lot = removeLotFromSource(fromSeatId, lotId);
@@ -1115,7 +1131,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           return;
         }
         if (toSeatId === "unassigned") {
-          unassignedLots.push(lot);
+          if (insertIndex !== null && insertIndex >= 0 && insertIndex <= unassignedLots.length) {
+            unassignedLots.splice(insertIndex, 0, lot);
+          } else {
+            unassignedLots.push(lot);
+          }
           lot.source_inspector_col = "";
           renderUnassignedLots();
         } else {
@@ -1127,7 +1147,21 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           if (typeof inspectorColumn === "string" && inspectorColumn.trim()) {
             lot.source_inspector_col = inspectorColumn;
           }
-          targetSeat.lots.push(lot);
+          if (fromSeatId === toSeatId) {
+            // 同じ座席内での移動：順番を入れ替え
+            if (insertIndex !== null && insertIndex >= 0 && insertIndex <= targetSeat.lots.length) {
+              targetSeat.lots.splice(insertIndex, 0, lot);
+            } else {
+              targetSeat.lots.push(lot);
+            }
+          } else {
+            // 別の座席への移動
+            if (insertIndex !== null && insertIndex >= 0 && insertIndex <= targetSeat.lots.length) {
+              targetSeat.lots.splice(insertIndex, 0, lot);
+            } else {
+              targetSeat.lots.push(lot);
+            }
+          }
         }
         renderSeats();
       };
@@ -1456,12 +1490,65 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           }
 
           card.appendChild(header);
+        } else if (!editingMode && seatLots.length > 0) {
+          // 空席でもロットがある場合はヘッダーを表示（空席表示）
+          const header = document.createElement("div");
+          header.className = "seat-header";
+          const nameLabel = document.createElement("span");
+          nameLabel.className = "seat-name";
+          nameLabel.textContent = "空席";
+          nameLabel.style.color = "#999";
+          header.appendChild(nameLabel);
+          card.appendChild(header);
         }
 
-        if (!editingMode && hasName) {
+        if (!editingMode) {
           const lotList = document.createElement("div");
           lotList.className = "lot-list";
+          lotList.dataset.seatId = seat.id;
           seatLots.forEach((lot) => lotList.appendChild(createLotCard(seat.id, lot)));
+          
+          // 同じ座席内でのロットカードの順番入れ替えを可能にする
+          lotList.addEventListener("dragover", (event) => {
+            if (!draggingLot || editingMode) {
+              return;
+            }
+            event.preventDefault();
+            const afterElement = getDragAfterElement(lotList, event.clientY);
+            const draggingElement = lotList.querySelector(`[data-lot-id="${draggingLot.lotId}"]`);
+            if (afterElement == null) {
+              lotList.appendChild(draggingElement);
+            } else {
+              lotList.insertBefore(draggingElement, afterElement);
+            }
+          });
+          
+          lotList.addEventListener("drop", (event) => {
+            event.preventDefault();
+            if (!draggingLot || editingMode) {
+              return;
+            }
+            const targetSeatId = lotList.dataset.seatId;
+            if (!targetSeatId) {
+              return;
+            }
+            const afterElement = getDragAfterElement(lotList, event.clientY);
+            const targetSeat = seats.find((s) => s.id === targetSeatId);
+            if (!targetSeat || !Array.isArray(targetSeat.lots)) {
+              return;
+            }
+            let insertIndex = null;
+            if (afterElement) {
+              const afterLotId = afterElement.dataset.lotId;
+              insertIndex = targetSeat.lots.findIndex((lot) => lot.lot_id === afterLotId);
+            } else {
+              insertIndex = targetSeat.lots.length;
+            }
+            moveLot(draggingLot.seatId, targetSeatId, draggingLot.lotId, insertIndex);
+            draggingLot = null;
+            clearDropStyles();
+          });
+          
           card.appendChild(lotList);
         }
 
@@ -1496,8 +1583,17 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           event.preventDefault();
           const targetId = event.currentTarget.dataset.seatId;
           if (!targetId) return;
+          // ロットリストへのドロップはlotListのdropイベントで処理されるため、ここでは処理しない
+          if (event.target.closest(".lot-list")) {
+            return;
+          }
           if (!editingMode && draggingLot) {
-            moveLot(draggingLot.seatId, targetId, draggingLot.lotId);
+            const targetSeat = seats.find((seat) => seat.id === targetId);
+            if (targetSeat && Array.isArray(targetSeat.lots)) {
+              moveLot(draggingLot.seatId, targetId, draggingLot.lotId, targetSeat.lots.length);
+            } else {
+              moveLot(draggingLot.seatId, targetId, draggingLot.lotId);
+            }
             draggingLot = null;
             renderSeats();
             clearDropStyles();
