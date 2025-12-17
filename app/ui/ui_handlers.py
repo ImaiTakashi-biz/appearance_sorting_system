@@ -1,4 +1,4 @@
-﻿"""
+"""
 外観検査振分支援システム - メインUI
 近未来的なデザインで出荷予定日を指定してデータを抽出する
 """
@@ -6594,6 +6594,8 @@ class ModernDataExtractorUI:
         rowcol_to_inspector: Dict[Tuple[str, str], str] = {}
         product_code_candidates = ["品番", "製品番号", "製品コード", "製品CD", "品目コード"]
         lot_key_to_inspector: Dict[str, Deque[str]] = {}
+        # lot_keyからsource_inspector_colを取得するマッピング
+        lot_key_to_source_col: Dict[str, str] = {}
         seen_rowcol_keys = set()
         seen_lot_keys = set()
         # 座席表のロット順番を保持するためのマッピング
@@ -6622,41 +6624,247 @@ class ModernDataExtractorUI:
                     if lot_key not in seen_lot_keys:
                         lot_key_to_inspector.setdefault(lot_key, deque()).append(inspector_name)
                         seen_lot_keys.add(lot_key)
+                    # lot_keyからsource_inspector_colを取得できるようにする
+                    if source_col:
+                        lot_key_to_source_col[lot_key] = source_col
                     # ロット順番を記録
                     lot_key_to_order[lot_key] = (inspector_name, order_index)
+        
+        # 未割当ロットの処理: 未割当ロットに対応する行の検査員列をクリア
+        unassigned_lots = chart.get("unassigned_lots", [])
+        unassigned_lot_keys = set()
+        unassigned_rowcol_keys = set()
+        unassigned_row_keys = set()  # source_inspector_colが空の場合、行全体をクリア
+        for lot in unassigned_lots:
+            lot_key = lot.get("lot_key")
+            if lot_key:
+                unassigned_lot_keys.add(lot_key)
+            source_row = lot.get("source_row_index")
+            source_row_key = lot.get("source_row_key")
+            source_col = lot.get("source_inspector_col")
+            normalized_row = (
+                source_row_key if source_row_key else self._normalize_seating_row_key(source_row)
+            )
+            if normalized_row:
+                if source_col and source_col.strip():
+                    # source_inspector_colが指定されている場合、特定の列をクリア
+                    normalized_col = self._normalize_inspector_column_name(source_col)
+                    if normalized_col:
+                        unassigned_rowcol_keys.add((normalized_row, normalized_col))
+                else:
+                    # source_inspector_colが空の場合、行全体をクリア対象とする
+                    unassigned_row_keys.add(normalized_row)
 
-        if not rowcol_to_inspector and not lot_key_to_inspector:
+        if not rowcol_to_inspector and not lot_key_to_inspector and not unassigned_lot_keys and not unassigned_rowcol_keys:
             logger.info("Seat chart sync: rowcol_to_inspector is empty")
             messagebox.showinfo("Seat chart sync", "Seating chart has no lot assignments.")
             return
         logger.info(
-            "Seat chart sync: rowcol_to_inspector entries={}, lot_key entries={}",
+            "Seat chart sync: rowcol_to_inspector entries={}, lot_key entries={}, unassigned_lots={}",
             len(rowcol_to_inspector),
             len(lot_key_to_inspector),
+            len(unassigned_lots),
         )
 
         df = self.current_inspector_data.copy()
         updated = 0
+        matched_by_rowcol = 0
+        matched_by_lot_key = 0
+        matched_by_lot_key_no_col = 0
         for row_index, row in df.iterrows():
             row_key = self._normalize_seating_row_key(row_index)
             if not row_key:
                 continue
             lot_key = self._derive_lot_key(row, row_index, product_code_candidates)
             row_modified = False
+            assigned = None
+            target_col = None
+            # まずrowcolでマッチングを試みる
             for normalized_col, actual_col in normalized_columns:
                 assigned = rowcol_to_inspector.get((row_key, normalized_col))
-                if not assigned and lot_key:
-                    inspectors_queue = lot_key_to_inspector.get(lot_key)
-                    if inspectors_queue:
-                        assigned = inspectors_queue.popleft()
-                        if not inspectors_queue:
-                            lot_key_to_inspector.pop(lot_key, None)
-                if assigned and df.at[row_index, actual_col] != assigned:
-                    df.at[row_index, actual_col] = assigned
-                    updated += 1
-                    row_modified = True
+                if assigned:
+                    target_col = actual_col
+                    matched_by_rowcol += 1
+                    break
+            # rowcolでマッチングできなかった場合、lot_keyでマッチングを試みる
+            if not assigned and lot_key:
+                inspectors_queue = lot_key_to_inspector.get(lot_key)
+                if inspectors_queue:
+                    assigned = inspectors_queue.popleft()
+                    if not inspectors_queue:
+                        lot_key_to_inspector.pop(lot_key, None)
+                    # lot_keyでマッチングした場合、source_inspector_colから対応する列を特定
+                    source_col = lot_key_to_source_col.get(lot_key)
+                    if source_col:
+                        normalized_source_col = self._normalize_inspector_column_name(source_col)
+                        for norm_col, act_col in normalized_columns:
+                            if norm_col == normalized_source_col:
+                                target_col = act_col
+                                matched_by_lot_key += 1
+                                break
+                        if not target_col:
+                            matched_by_lot_key_no_col += 1
+                            logger.debug(
+                                "lot_key matched but target_col not found: lot_key={}, source_col={}, normalized_source_col={}, available_normalized_columns={}",
+                                lot_key,
+                                source_col,
+                                normalized_source_col,
+                                [nc for nc, _ in normalized_columns],
+                            )
+                    else:
+                        matched_by_lot_key_no_col += 1
+                        logger.debug(
+                            "lot_key matched but source_col not found: lot_key={}",
+                            lot_key,
+                        )
+            # マッチングできた場合、対応する検査員列を更新
+            if assigned:
+                if target_col:
+                    # 特定の列が特定されている場合、その列のみを更新
+                    current_value = df.at[row_index, target_col]
+                    current_value_str = str(current_value).strip() if pd.notna(current_value) else ""
+                    assigned_str = str(assigned).strip()
+                    # デバッグ: 最初の10件のみ詳細ログを出力
+                    if matched_by_rowcol <= 10:
+                        will_update = pd.isna(current_value) or current_value_str != assigned_str
+                        logger.info(
+                            "Seat chart sync update check: row_index={}, target_col={}, current_value='{}', assigned='{}', will_update={}",
+                            row_index,
+                            target_col,
+                            current_value_str,
+                            assigned_str,
+                            will_update,
+                        )
+                    if pd.isna(current_value) or current_value_str != assigned_str:
+                        # 他の列から同じ検査員を削除
+                        for norm_col, act_col in normalized_columns:
+                            if act_col != target_col:
+                                other_value = df.at[row_index, act_col]
+                                if pd.notna(other_value) and str(other_value).strip() == assigned_str:
+                                    df.at[row_index, act_col] = ""
+                        # 新しい検査員を設定
+                        df.at[row_index, target_col] = assigned_str
+                        updated += 1
+                        row_modified = True
+                    else:
+                        # 既に同じ値が設定されている場合でも、他の列に同じ検査員がいる場合は削除
+                        for norm_col, act_col in normalized_columns:
+                            if act_col != target_col:
+                                other_value = df.at[row_index, act_col]
+                                if pd.notna(other_value) and str(other_value).strip() == assigned_str:
+                                    df.at[row_index, act_col] = ""
+                                    updated += 1
+                                    row_modified = True
+                else:
+                    # 列が特定できない場合、最初の空いている列に設定
+                    for normalized_col, actual_col in normalized_columns:
+                        current_value = df.at[row_index, actual_col]
+                        if pd.isna(current_value) or not str(current_value).strip():
+                            df.at[row_index, actual_col] = assigned
+                            updated += 1
+                            row_modified = True
+                            break
+                    # すべての列が埋まっている場合、最初の列を上書き
+                    if not row_modified and normalized_columns:
+                        first_col = normalized_columns[0][1]
+                        current_value = df.at[row_index, first_col]
+                        if pd.isna(current_value) or str(current_value).strip() != assigned:
+                            df.at[row_index, first_col] = assigned
+                            updated += 1
+                            row_modified = True
             if row_modified:
                 self._recalculate_inspector_count_and_divided_time(df, row_index)
+        
+        # 未割当ロットの処理: 対応する行の検査員列をクリア
+        unassigned_cleared = 0
+        unassigned_matched_by_lot_key = 0
+        unassigned_matched_by_rowcol = 0
+        unassigned_matched_by_row = 0
+        for row_index, row in df.iterrows():
+            row_key = self._normalize_seating_row_key(row_index)
+            if not row_key:
+                continue
+            lot_key = self._derive_lot_key(row, row_index, product_code_candidates)
+            row_modified = False
+            
+            # lot_keyで未割当かどうかを確認（最優先）
+            if lot_key and lot_key in unassigned_lot_keys:
+                # 未割当ロットの場合、すべての検査員列をクリア
+                for normalized_col, actual_col in normalized_columns:
+                    current_value = df.at[row_index, actual_col]
+                    if pd.notna(current_value) and str(current_value).strip():
+                        logger.debug(
+                            "Unassigned lot cleared by lot_key: row_index={}, lot_key={}, col={}, value='{}'",
+                            row_index,
+                            lot_key,
+                            actual_col,
+                            str(current_value).strip(),
+                        )
+                        df.at[row_index, actual_col] = ""
+                        unassigned_cleared += 1
+                        row_modified = True
+                if row_modified:
+                    unassigned_matched_by_lot_key += 1
+            # rowcolで未割当かどうかを確認
+            elif row_key:
+                matched_by_rowcol = False
+                for normalized_col, actual_col in normalized_columns:
+                    rowcol_key = (row_key, normalized_col)
+                    if rowcol_key in unassigned_rowcol_keys:
+                        # 未割当ロットの場合、該当する検査員列をクリア
+                        current_value = df.at[row_index, actual_col]
+                        if pd.notna(current_value) and str(current_value).strip():
+                            logger.debug(
+                                "Unassigned lot cleared by rowcol: row_index={}, rowcol_key={}, col={}, value='{}'",
+                                row_index,
+                                rowcol_key,
+                                actual_col,
+                                str(current_value).strip(),
+                            )
+                            df.at[row_index, actual_col] = ""
+                            unassigned_cleared += 1
+                            row_modified = True
+                            matched_by_rowcol = True
+                if matched_by_rowcol:
+                    unassigned_matched_by_rowcol += 1
+                # row_keyで未割当かどうかを確認（source_inspector_colが空の場合）
+                elif row_key in unassigned_row_keys:
+                    # 未割当ロットの場合、すべての検査員列をクリア
+                    for normalized_col, actual_col in normalized_columns:
+                        current_value = df.at[row_index, actual_col]
+                        if pd.notna(current_value) and str(current_value).strip():
+                            logger.debug(
+                                "Unassigned lot cleared by row_key: row_index={}, row_key={}, col={}, value='{}'",
+                                row_index,
+                                row_key,
+                                actual_col,
+                                str(current_value).strip(),
+                            )
+                            df.at[row_index, actual_col] = ""
+                            unassigned_cleared += 1
+                            row_modified = True
+                    if row_modified:
+                        unassigned_matched_by_row += 1
+            
+            if row_modified:
+                self._recalculate_inspector_count_and_divided_time(df, row_index)
+        
+        logger.info(
+            "Seat chart sync: updated={}, matched_by_rowcol={}, matched_by_lot_key={}, matched_by_lot_key_no_col={}, unassigned_cleared={} (matched_by_lot_key={}, matched_by_rowcol={}, matched_by_row={})",
+            updated,
+            matched_by_rowcol,
+            matched_by_lot_key,
+            matched_by_lot_key_no_col,
+            unassigned_cleared,
+            unassigned_matched_by_lot_key,
+            unassigned_matched_by_rowcol,
+            unassigned_matched_by_row,
+        )
+        if matched_by_rowcol > 0 and updated == 0:
+            logger.warning(
+                "Seat chart sync: matched_by_rowcol={} but updated=0. This may indicate that values are already correct or comparison logic has issues.",
+                matched_by_rowcol,
+            )
         if updated == 0:
             messagebox.showinfo("Seat chart sync", "No matching lots were updated.")
             return

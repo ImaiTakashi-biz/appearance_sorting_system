@@ -1690,127 +1690,27 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
       toggleEditButton.addEventListener("click", () => setEditingMode(!editingMode));
 
-      const fileSystemAvailable = () => typeof window.showSaveFilePicker === "function";
-      const craftJsonPayload = () => ({ seats });
-      const HANDLE_DB_NAME = "AppearanceSortingFileHandles";
-      const HANDLE_STORE_NAME = "handles";
-      const HANDLE_KEY = "seating-chart-json";
-      let savedFileHandle = null;
-
-      const openHandleDatabase = () =>
-        new Promise((resolve, reject) => {
-          const request = window.indexedDB.open(HANDLE_DB_NAME, 1);
-          request.onupgradeneeded = () => {
-            const db = request.result;
-            if (!db.objectStoreNames.contains(HANDLE_STORE_NAME)) {
-              db.createObjectStore(HANDLE_STORE_NAME);
-            }
-          };
-          request.onsuccess = () => resolve(request.result);
-          request.onerror = () => reject(request.error);
-        });
-
-      const getPersistedHandle = async () => {
-        try {
-          const db = await openHandleDatabase();
-          const tx = db.transaction(HANDLE_STORE_NAME, "readonly");
-          const store = tx.objectStore(HANDLE_STORE_NAME);
-          return await new Promise((resolve) => {
-            const request = store.get(HANDLE_KEY);
-            request.onsuccess = () => resolve(request.result || null);
-            request.onerror = () => resolve(null);
-          });
-        } catch (error) {
-          console.warn("IndexedDB handle read failed", error);
-          return null;
-        }
-      };
-
-      const persistHandle = async (handle) => {
-        try {
-          const db = await openHandleDatabase();
-          return await new Promise((resolve) => {
-            const tx = db.transaction(HANDLE_STORE_NAME, "readwrite");
-            const store = tx.objectStore(HANDLE_STORE_NAME);
-            if (handle) {
-              store.put(handle, HANDLE_KEY);
-            } else {
-              store.delete(HANDLE_KEY);
-            }
-            tx.oncomplete = () => resolve();
-            tx.onerror = () => resolve();
-          });
-        } catch (error) {
-          console.warn("IndexedDB handle write failed", error);
-        }
-      };
-
-      const loadPersistedFileHandle = async () => {
-        if (!fileSystemAvailable()) {
-          return;
-        }
-        const handle = await getPersistedHandle();
-        if (!handle) {
-          return;
-        }
-        const permission =
-          (await handle.queryPermission?.({ mode: "readwrite" })) ||
-          (await handle.requestPermission?.({ mode: "readwrite" }));
-        if (permission === "denied") {
-          return;
-        }
-        savedFileHandle = handle;
-      };
-
-      const requestFileHandle = async () => {
-        if (!fileSystemAvailable()) {
-          return null;
-        }
-        if (savedFileHandle) {
-          return savedFileHandle;
-        }
-        const handle = await window.showSaveFilePicker({
-          suggestedName: SEATING_JSON_FILE_NAME,
-          types: [
-            {
-              description: "JSON Files",
-              accept: { "application/json": [".json"] },
-            },
-          ],
-          excludeAcceptAllOption: true,
-        });
-        savedFileHandle = handle;
-        await persistHandle(handle);
-        return handle;
-      };
+      const craftJsonPayload = () => ({
+        seats,
+        unassigned_lots: unassignedLots
+      });
 
       const saveJsonFileSystem = async () => {
-        if (!fileSystemAvailable()) {
-          alert("FileSystem Access API をサポートしていない環境では保存できません。ダウンロードで保存してください。");
-          return;
-        }
         try {
-          const hadPersistedHandle = !!savedFileHandle;
-          const handle = await requestFileHandle();
-          if (!handle) {
-            return;
-          }
           const payload = craftJsonPayload();
-          const writable = await handle.createWritable();
-          await writable.write(JSON.stringify(payload, null, 2));
-          await writable.close();
-          if (hadPersistedHandle) {
-            alert(`${SEATING_JSON_FILE_NAME} を上書き保存しました。\n次回以降はダイアログなしで同じファイルに書き込みます。`);
-          } else {
-            alert(`${SEATING_JSON_FILE_NAME} を保存しました。\n初回は保存先をダイアログで選択してください。以降はそのまま自動で上書きされます。`);
+          const response = await fetch("/save-seating-chart", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+          if (!response.ok) {
+            const errorText = await response.text();
+            throw new Error(`保存に失敗しました: ${response.status} ${response.statusText}${errorText ? ` - ${errorText}` : ""}`);
           }
+          alert(`${SEATING_JSON_FILE_NAME} をネットワーク共有に保存しました。`);
         } catch (error) {
-          if (error?.name === "AbortError") {
-            return;
-          }
-          savedFileHandle = null;
-          await persistHandle(null);
-          console.error("FileSystem Access API error", error);
+          console.error("保存エラー:", error);
+          alert(`保存に失敗しました: ${error.message}`);
         }
       };
 
@@ -1819,7 +1719,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     if (saveButton) {
       saveButton.addEventListener("click", saveJsonFileSystem);
     }
-    loadPersistedFileHandle();
 
     document.addEventListener("click", (event) => {
         hideFloatingTooltip();
