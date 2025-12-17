@@ -22,11 +22,9 @@ a = Analysis(
         'openpyxl',
         'loguru',
         'customtkinter',
-        'Pillow',
+        'PIL',
         'gspread',
         'google.auth',
-        'google.auth.oauthlib',
-        'google.auth.httplib2',
         'google.oauth2',
         'google.oauth2.service_account',
         'googleapiclient',
@@ -47,6 +45,21 @@ a = Analysis(
         'distutils',
         'tkinter.test',
         'unittest',
+        # pyarrow関連（pandasの依存だが実際には使用していない - 大幅なサイズ削減）
+        'pyarrow',
+        'pyarrow.dataset',
+        'pyarrow.parquet',
+        'pyarrow.flight',
+        'pyarrow.compute',
+        # pandas/numpyのテストモジュール（pandas.plottingとpandas.io.formats.styleはpandasの内部で使用される可能性があるため除外しない）
+        'pandas.tests',
+        'numpy.tests',
+        'numpy.f2py',
+        # PILの不要なモジュール（基本的な画像読み込みのみ使用）
+        'PIL.tests',
+        'PIL.ImageTk',
+        'PIL.ImageQt',
+        'PIL.ImageShow',
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
@@ -66,7 +79,7 @@ exe = EXE(
     name='外観検査振分支援システム',
     debug=False,
     bootloader_ignore_signals=False,
-    strip=False,
+    strip=False,  # Windowsではstripコマンドが利用できないためFalse
     upx=True,
     upx_exclude=[],
     runtime_tmpdir=None,
@@ -79,4 +92,3 @@ exe = EXE(
     icon=icon_path,  # ICOファイルを使用（絶対パス）
     onefile=True,  # onefileモード
 )
-

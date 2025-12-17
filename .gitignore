@@ -169,3 +169,4 @@ registered_products.json
 # ログファイル（NAS共有のログディレクトリ）
 # ローカルのログファイルのみ除外
 *.log
+build_log.txt
