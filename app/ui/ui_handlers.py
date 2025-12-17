@@ -6599,8 +6599,10 @@ class ModernDataExtractorUI:
         seen_rowcol_keys = set()
         seen_lot_keys = set()
         # 座席表のロット順番を保持するためのマッピング
-        # {lot_key: (inspector_name, order_index)} の形式
-        lot_key_to_order: Dict[str, Tuple[str, int]] = {}
+        # {lot_key: (inspector_name, order_index, global_order)} の形式
+        # global_order: 座席表全体での順序（全座席を通した順序）
+        lot_key_to_order: Dict[str, Tuple[str, int, int]] = {}
+        global_order_counter = 0
         for seat in chart.get("seats", []):
             inspector_name = (seat.get("name") or "").strip()
             if not inspector_name:
@@ -6627,8 +6629,10 @@ class ModernDataExtractorUI:
                     # lot_keyからsource_inspector_colを取得できるようにする
                     if source_col:
                         lot_key_to_source_col[lot_key] = source_col
-                    # ロット順番を記録
-                    lot_key_to_order[lot_key] = (inspector_name, order_index)
+                    # ロット順番を記録（座席表の検査員名、座席内での順序、全体での順序）
+                    # 同じlot_keyが複数回出現する場合、最後の出現位置を優先（座席表での最新の状態を反映）
+                    lot_key_to_order[lot_key] = (inspector_name, order_index, global_order_counter)
+                    global_order_counter += 1
         
         # 未割当ロットの処理: 未割当ロットに対応する行の検査員列をクリア
         unassigned_lots = chart.get("unassigned_lots", [])
@@ -7074,17 +7078,28 @@ class ModernDataExtractorUI:
                     break
             
             if lot_key in self.seating_chart_lot_order:
-                inspector_name, order_index = self.seating_chart_lot_order[lot_key]
-                # 座席表の検査員名と一致する場合は順番を使用
-                if assigned_inspector == inspector_name:
-                    # 検査員名でグループ化し、その中で順番でソート
-                    return (0, inspector_name or "", order_index)
+                # 座席表の順序情報を取得
+                # 形式: (inspector_name, order_index, global_order) または (inspector_name, order_index)
+                order_info = self.seating_chart_lot_order[lot_key]
+                if len(order_info) >= 3:
+                    inspector_name, order_index, global_order = order_info
                 else:
-                    # 座席表の検査員名と一致しない場合は、割り当てられている検査員でグループ化
-                    return (1, assigned_inspector or "", 999999)
+                    inspector_name, order_index = order_info
+                    global_order = 999999  # 後方互換性のため
+                
+                # 座席表の検査員名と一致する場合
+                if assigned_inspector == inspector_name:
+                    # 検査員名でグループ化し、その中で座席表の順番でソート
+                    return (0, inspector_name or "", order_index, global_order)
+                else:
+                    # 座席表の検査員名と一致しない場合でも、lot_keyが一致すれば順序を使用
+                    # これは、座席表でロットが移動された場合でも順序を保持するため
+                    # 割り当てられている検査員でグループ化し、座席表の順序を使用
+                    return (1, assigned_inspector or "", global_order, order_index)
             else:
                 # 座席表にないロットは最後に配置（割り当てられている検査員でグループ化）
-                return (2, assigned_inspector or "", 999999)
+                # 元の行インデックスで安定ソートを保証
+                return (2, assigned_inspector or "", 999999, row_index)
         
         # ソートキーを計算
         sort_keys = df.apply(get_sort_key, axis=1)
