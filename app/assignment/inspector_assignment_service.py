@@ -1,4 +1,4 @@
-﻿"""
+"""
 検査員割当てロジック
 検査員の割当て、スキルマッチング、新製品チーム対応などの機能を提供
 """
@@ -7280,107 +7280,63 @@ class InspectorAssignmentManager:
                         self.log_message(f"未割当ロット再処理: 当日洗浄上がり品 {product_number} の通常条件での割り当てに失敗。制約を大幅に緩和して再試行します")
                         
                         # 【改善】制約を緩和する前に、現在のresult_dfから実際に割り当てられている検査員を確認
-                        # 品番単位の制約を再構築
+                        # 品番単位の制約を再構築（高速化：事前にフィルタリング）
                         already_assigned_to_this_product = set()
-                        # 列インデックスを事前に取得（itertuples()で高速化）
-                        prod_num_col_idx_o = result_df.columns.get_loc('品番')
-                        shipping_date_col_idx_o = result_df.columns.get_loc('出荷予定日') if '出荷予定日' in result_df.columns else -1
-                        inspector_col_indices_o = {}
-                        for j in range(1, 6):
-                            col_name = f'検査員{j}'
-                            if col_name in result_df.columns:
-                                inspector_col_indices_o[j] = result_df.columns.get_loc(col_name)
-                        
-                        for other_row_tuple in result_df.itertuples(index=True):
-                            other_index = other_row_tuple[0]  # インデックス
-                            if other_index == original_index:  # 自分自身は除外
-                                continue
-                            
-                            other_prod_num = other_row_tuple[prod_num_col_idx_o + 1]  # +1はインデックス分
-                            if other_prod_num != product_number:
-                                continue
-                            
-                            other_shipping_date_raw = other_row_tuple[shipping_date_col_idx_o + 1] if shipping_date_col_idx_o >= 0 and shipping_date_col_idx_o + 1 < len(other_row_tuple) else None
-                            other_shipping_date_str = str(other_shipping_date_raw).strip() if pd.notna(other_shipping_date_raw) else ''
-                            is_other_same_day_cleaning = (
-                                other_shipping_date_str == "当日洗浄上がり品" or
-                                other_shipping_date_str == "当日洗浄品" or
-                                "当日洗浄" in other_shipping_date_str or
-                                other_shipping_date_str == "先行検査" or
-                                other_shipping_date_str == "当日先行検査"
+                        # 同じ品番のロットのみをフィルタリング（高速化）
+                        same_product_df = result_df[
+                            (result_df['品番'] == product_number) & 
+                            (result_df.index != original_index)
+                        ]
+                        if not same_product_df.empty and '出荷予定日' in same_product_df.columns:
+                            # 当日洗浄上がり品/先行検査品のみをフィルタリング
+                            same_day_mask = (
+                                same_product_df['出荷予定日'].astype(str).str.contains('当日洗浄|先行検査', na=False)
                             )
+                            same_day_df = same_product_df[same_day_mask]
                             
-                            if is_other_same_day_cleaning:
-                                # 他のロットに割り当てられている検査員を取得
-                                for j in range(1, 6):
-                                    if j not in inspector_col_indices_o:
-                                        continue
-                                    other_inspector_col_idx = inspector_col_indices_o[j]
-                                    other_inspector_value = other_row_tuple[other_inspector_col_idx + 1] if other_inspector_col_idx + 1 < len(other_row_tuple) else None
-                                    
-                                    if pd.notna(other_inspector_value) and str(other_inspector_value).strip() != '':
-                                        other_inspector_name = str(other_inspector_value).strip()
-                                        if '(' in other_inspector_name:
-                                            other_inspector_name = other_inspector_name.split('(')[0].strip()
-                                        if not other_inspector_name:
-                                            continue
-                                        
-                                        other_inspector_info = self._get_inspector_by_name(other_inspector_name, inspector_master_df)
-                                        if not other_inspector_info.empty:
-                                            other_inspector_code = other_inspector_info.iloc[0]['#ID']
-                                            already_assigned_to_this_product.add(other_inspector_code)
+                            # 検査員列から割り当て済み検査員を取得
+                            for j in range(1, 6):
+                                col_name = f'検査員{j}'
+                                if col_name in same_day_df.columns:
+                                    for inspector_value in same_day_df[col_name].dropna():
+                                        inspector_name = str(inspector_value).strip()
+                                        if inspector_name and '(' in inspector_name:
+                                            inspector_name = inspector_name.split('(')[0].strip()
+                                        if inspector_name:
+                                            inspector_info = self._get_inspector_by_name(inspector_name, inspector_master_df)
+                                            if not inspector_info.empty:
+                                                already_assigned_to_this_product.add(inspector_info.iloc[0]['#ID'])
                         
-                        # 品名単位の制約を再構築
+                        # 品名単位の制約を再構築（高速化：事前にフィルタリング）
                         product_name = row.get('品名', '')
                         product_name_str = str(product_name).strip() if pd.notna(product_name) else ''
                         already_assigned_to_same_product_name = set()
-                        if product_name_str:
-                            # 列インデックスを事前に取得（itertuples()で高速化）
-                            prod_name_col_idx = result_df.columns.get_loc('品名') if '品名' in result_df.columns else -1
-                            
-                            for other_row_tuple in result_df.itertuples(index=True):
-                                other_index = other_row_tuple[0]  # インデックス
-                                if other_index == original_index:  # 自分自身は除外
-                                    continue
-                                
-                                other_prod_num = other_row_tuple[prod_num_col_idx_o + 1]  # +1はインデックス分
-                                if other_prod_num == product_number:
-                                    continue  # 同じ品番は既にチェック済み
-                                
-                                other_product_name = other_row_tuple[prod_name_col_idx + 1] if prod_name_col_idx >= 0 and prod_name_col_idx + 1 < len(other_row_tuple) else ''
-                                other_product_name_str = str(other_product_name).strip() if pd.notna(other_product_name) else ''
-                                if other_product_name_str != product_name_str:
-                                    continue
-                                
-                                other_shipping_date_raw = other_row_tuple[shipping_date_col_idx_o + 1] if shipping_date_col_idx_o >= 0 and shipping_date_col_idx_o + 1 < len(other_row_tuple) else None
-                                other_shipping_date_str = str(other_shipping_date_raw).strip() if pd.notna(other_shipping_date_raw) else ''
-                                is_other_same_day_cleaning = (
-                                    other_shipping_date_str == "当日洗浄上がり品" or
-                                    other_shipping_date_str == "当日洗浄品" or
-                                    "当日洗浄" in other_shipping_date_str or
-                                    other_shipping_date_str == "先行検査" or
-                                    other_shipping_date_str == "当日先行検査"
+                        if product_name_str and '品名' in result_df.columns:
+                            # 同じ品名で異なる品番のロットのみをフィルタリング（高速化）
+                            same_name_df = result_df[
+                                (result_df['品名'].astype(str).str.strip() == product_name_str) &
+                                (result_df['品番'] != product_number) &
+                                (result_df.index != original_index)
+                            ]
+                            if not same_name_df.empty and '出荷予定日' in same_name_df.columns:
+                                # 当日洗浄上がり品/先行検査品のみをフィルタリング
+                                same_day_mask = (
+                                    same_name_df['出荷予定日'].astype(str).str.contains('当日洗浄|先行検査', na=False)
                                 )
+                                same_day_name_df = same_name_df[same_day_mask]
                                 
-                                if is_other_same_day_cleaning:
-                                    # 他の品番のロットに割り当てられている検査員を取得
-                                    for j in range(1, 6):
-                                        if j not in inspector_col_indices_o:
-                                            continue
-                                        other_inspector_col_idx = inspector_col_indices_o[j]
-                                        other_inspector_value = other_row_tuple[other_inspector_col_idx + 1] if other_inspector_col_idx + 1 < len(other_row_tuple) else None
-                                        
-                                        if pd.notna(other_inspector_value) and str(other_inspector_value).strip() != '':
-                                            other_inspector_name = str(other_inspector_value).strip()
-                                            if '(' in other_inspector_name:
-                                                other_inspector_name = other_inspector_name.split('(')[0].strip()
-                                            if not other_inspector_name:
-                                                continue
-                                            
-                                            other_inspector_info = self._get_inspector_by_name(other_inspector_name, inspector_master_df)
-                                            if not other_inspector_info.empty:
-                                                other_inspector_code = other_inspector_info.iloc[0]['#ID']
-                                                already_assigned_to_same_product_name.add(other_inspector_code)
+                                # 検査員列から割り当て済み検査員を取得
+                                for j in range(1, 6):
+                                    col_name = f'検査員{j}'
+                                    if col_name in same_day_name_df.columns:
+                                        for inspector_value in same_day_name_df[col_name].dropna():
+                                            inspector_name = str(inspector_value).strip()
+                                            if inspector_name and '(' in inspector_name:
+                                                inspector_name = inspector_name.split('(')[0].strip()
+                                            if inspector_name:
+                                                inspector_info = self._get_inspector_by_name(inspector_name, inspector_master_df)
+                                                if not inspector_info.empty:
+                                                    already_assigned_to_same_product_name.add(inspector_info.iloc[0]['#ID'])
                         
                         # 当日洗浄上がり品の場合は、制約を大幅に緩和して候補を取得
                         # 候補が0人の場合は、元の候補を再取得（当日洗浄上がり品全体の制約を緩和）

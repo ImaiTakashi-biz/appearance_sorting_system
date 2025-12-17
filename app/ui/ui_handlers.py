@@ -386,8 +386,8 @@ class ModernDataExtractorUI:
         
         # コンソール出力（重要なログのみ）
         def _safe_console_output(message: str) -> None:
-            # print文を削除してloguruのみを使用
-            pass
+            # print文を削除してloguruのみを使用（何もしない）
+            return
 
         # コンソール出力（WARNING以上のみ）
         logger.add(
@@ -519,10 +519,7 @@ class ModernDataExtractorUI:
         
         try:
             # 画像ファイルの存在確認（高速化のため）
-            if not Path(image_path).exists():
-                # 画像が存在しない場合は警告を出さずにスキップ（高速化）
-                pass
-            else:
+            if Path(image_path).exists():
                 # 画像を読み込んでリサイズ（サイズを大きく）
                 pil_image = Image.open(image_path)
                 # タイトルに合わせたサイズにリサイズ（高さ50pxに拡大）
@@ -538,7 +535,7 @@ class ModernDataExtractorUI:
                 image_label.pack(side="left", padx=(0, 12))  # 画像とテキストの間隔を調整
         except Exception:
             # 画像が読み込めない場合は警告を出さずに画像なしで続行（高速化）
-            pass
+            return
         
         # メインタイトル（サイズを大きく、中央配置）
         title_label = ctk.CTkLabel(
@@ -3888,11 +3885,11 @@ class ModernDataExtractorUI:
                                 self.log_message(f"【重複検出】当日洗浄品・先行検査品・通常品（{', '.join(check_cols)}）: {duplicate_count}件の組み合わせに重複があります")
                                 # 詳細ログを出力（最初の10件）
                             
-                            # 優先度を計算してソートキーを追加
-                            priority_tuples = target_df['出荷予定日'].apply(get_shipping_date_priority)
-                            target_df['_priority'] = priority_tuples.apply(
-                                lambda x: x[0] if isinstance(x, tuple) else 5
-                            )
+                            # 優先度を計算してソートキーを追加（高速化：一度のapplyで処理）
+                            def get_priority(x):
+                                result = get_shipping_date_priority(x)
+                                return result[0] if isinstance(result, tuple) else 5
+                            target_df['_priority'] = target_df['出荷予定日'].apply(get_priority)
                             
                             # 優先度でソート（優先度が小さい順 = 優先度の高いものが先に来る）
                             target_df = target_df.sort_values('_priority', na_position='last')
@@ -5122,50 +5119,49 @@ class ModernDataExtractorUI:
                 'inspection_target': None
             }
     
-    def load_product_master_cached(self):
-        """キャッシュ付き製品マスタ読み込み（ファイル更新時刻チェック対応）"""
-        cache_key = 'product_master'
-        
+    def _load_master_cached(self, cache_key: str, file_path_attr: str, load_func: callable, log_name: str):
+        """共通キャッシュ付きマスタ読み込み（ファイル更新時刻チェック対応）"""
         # ファイルパスを取得
-        file_path = None
-        if self.config and self.config.product_master_path:
-            file_path = self.config.product_master_path
+        file_path = getattr(self.config, file_path_attr, None) if self.config else None
         if not file_path or not os.path.exists(file_path):
-            # ファイルパスが取得できない場合は通常読み込み
-            return self.load_product_master()
+            return load_func()
         
         # キャッシュチェック（ファイル更新時刻も確認）
         try:
             if cache_key in self.master_cache:
-                # TTLチェック
                 if datetime.now() - self.cache_timestamps[cache_key] < self.cache_ttl:
-                    # ファイル更新時刻チェック
                     try:
                         current_mtime = os.path.getmtime(file_path)
                         cached_mtime = self.cache_file_mtimes.get(cache_key, 0)
                         if current_mtime == cached_mtime:
-                            logger.debug("製品マスタをキャッシュから読み込みました（ファイル未変更）")
+                            logger.debug(f"{log_name}をキャッシュから読み込みました（ファイル未変更）")
                             return self.master_cache[cache_key]
                     except (OSError, AttributeError):
-                        pass  # ファイル更新時刻取得に失敗した場合は再読み込み
+                        pass
         except Exception:
-            pass  # キャッシュチェックでエラーが発生した場合は通常読み込みに進む
+            pass
         
         # キャッシュミスの場合は通常読み込み
-        df = self.load_product_master()
-        if df is not None:
+        result = load_func()
+        if result is not None:
             try:
-                self.master_cache[cache_key] = df
+                self.master_cache[cache_key] = result
                 self.cache_timestamps[cache_key] = datetime.now()
-                # ファイル更新時刻を保存
                 try:
                     self.cache_file_mtimes[cache_key] = os.path.getmtime(file_path)
                 except (OSError, AttributeError):
                     pass
             except Exception:
-                pass  # キャッシュ保存でエラーが発生しても続行
+                pass
         
-        return df
+        return result
+    
+    def load_product_master_cached(self):
+        """キャッシュ付き製品マスタ読み込み（ファイル更新時刻チェック対応）"""
+        return self._load_master_cached(
+            'product_master', 'product_master_path', 
+            self.load_product_master, '製品マスタ'
+        )
     
     def initialize_product_code_list(self):
         """製品マスタから重複除去済み品番リストを初期化（バックグラウンド処理）"""
@@ -5613,138 +5609,24 @@ class ModernDataExtractorUI:
     
     def load_inspector_master_cached(self):
         """キャッシュ付き検査員マスタ読み込み（ファイル更新時刻チェック対応）"""
-        cache_key = 'inspector_master'
-        
-        # ファイルパスを取得
-        file_path = None
-        if self.config and self.config.inspector_master_path:
-            file_path = self.config.inspector_master_path
-        if not file_path or not os.path.exists(file_path):
-            # ファイルパスが取得できない場合は通常読み込み
-            return self.load_inspector_master()
-        
-        # キャッシュチェック（ファイル更新時刻も確認）
-        try:
-            if cache_key in self.master_cache:
-                # TTLチェック
-                if datetime.now() - self.cache_timestamps[cache_key] < self.cache_ttl:
-                    # ファイル更新時刻チェック
-                    try:
-                        current_mtime = os.path.getmtime(file_path)
-                        cached_mtime = self.cache_file_mtimes.get(cache_key, 0)
-                        if current_mtime == cached_mtime:
-                            logger.debug("検査員マスタをキャッシュから読み込みました（ファイル未変更）")
-                            return self.master_cache[cache_key]
-                    except (OSError, AttributeError):
-                        pass  # ファイル更新時刻取得に失敗した場合は再読み込み
-        except Exception:
-            pass  # キャッシュチェックでエラーが発生した場合は通常読み込みに進む
-        
-        # キャッシュミスの場合は通常読み込み
-        df = self.load_inspector_master()
-        if df is not None:
-            try:
-                self.master_cache[cache_key] = df
-                self.cache_timestamps[cache_key] = datetime.now()
-                # ファイル更新時刻を保存
-                try:
-                    self.cache_file_mtimes[cache_key] = os.path.getmtime(file_path)
-                except (OSError, AttributeError):
-                    pass
-            except Exception:
-                pass  # キャッシュ保存でエラーが発生しても続行
-        
-        return df
+        return self._load_master_cached(
+            'inspector_master', 'inspector_master_path',
+            self.load_inspector_master, '検査員マスタ'
+        )
     
     def load_skill_master_cached(self):
         """キャッシュ付きスキルマスタ読み込み（ファイル更新時刻チェック対応）"""
-        cache_key = 'skill_master'
-        
-        # ファイルパスを取得
-        file_path = None
-        if self.config and self.config.skill_master_path:
-            file_path = self.config.skill_master_path
-        if not file_path or not os.path.exists(file_path):
-            # ファイルパスが取得できない場合は通常読み込み
-            return self.load_skill_master()
-        
-        # キャッシュチェック（ファイル更新時刻も確認）
-        try:
-            if cache_key in self.master_cache:
-                # TTLチェック
-                if datetime.now() - self.cache_timestamps[cache_key] < self.cache_ttl:
-                    # ファイル更新時刻チェック
-                    try:
-                        current_mtime = os.path.getmtime(file_path)
-                        cached_mtime = self.cache_file_mtimes.get(cache_key, 0)
-                        if current_mtime == cached_mtime:
-                            logger.debug("スキルマスタをキャッシュから読み込みました（ファイル未変更）")
-                            return self.master_cache[cache_key]
-                    except (OSError, AttributeError):
-                        pass  # ファイル更新時刻取得に失敗した場合は再読み込み
-        except Exception:
-            pass  # キャッシュチェックでエラーが発生した場合は通常読み込みに進む
-        
-        # キャッシュミスの場合は通常読み込み
-        df = self.load_skill_master()
-        if df is not None:
-            try:
-                self.master_cache[cache_key] = df
-                self.cache_timestamps[cache_key] = datetime.now()
-                # ファイル更新時刻を保存
-                try:
-                    self.cache_file_mtimes[cache_key] = os.path.getmtime(file_path)
-                except (OSError, AttributeError):
-                    pass
-            except Exception:
-                pass  # キャッシュ保存でエラーが発生しても続行
-        
-        return df
+        return self._load_master_cached(
+            'skill_master', 'skill_master_path',
+            self.load_skill_master, 'スキルマスタ'
+        )
     
     def load_inspection_target_csv_cached(self):
         """キャッシュ付き検査対象CSV読み込み（ファイル更新時刻チェック対応）"""
-        cache_key = 'inspection_target_csv'
-        
-        # ファイルパスを取得
-        file_path = None
-        if self.config and self.config.inspection_target_csv_path:
-            file_path = self.config.inspection_target_csv_path
-        if not file_path or not os.path.exists(file_path):
-            # ファイルパスが取得できない場合は通常読み込み
-            return self.load_inspection_target_csv()
-        
-        # キャッシュチェック（ファイル更新時刻も確認）
-        try:
-            if cache_key in self.master_cache:
-                # TTLチェック
-                if datetime.now() - self.cache_timestamps[cache_key] < self.cache_ttl:
-                    # ファイル更新時刻チェック
-                    try:
-                        current_mtime = os.path.getmtime(file_path)
-                        cached_mtime = self.cache_file_mtimes.get(cache_key, 0)
-                        if current_mtime == cached_mtime:
-                            logger.debug("検査対象CSVをキャッシュから読み込みました（ファイル未変更）")
-                            return self.master_cache[cache_key]
-                    except (OSError, AttributeError):
-                        pass  # ファイル更新時刻取得に失敗した場合は再読み込み
-        except Exception:
-            pass  # キャッシュチェックでエラーが発生した場合は通常読み込みに進む
-        
-        # キャッシュミスの場合は通常読み込み
-        keywords = self.load_inspection_target_csv()
-        if keywords:
-            try:
-                self.master_cache[cache_key] = keywords
-                self.cache_timestamps[cache_key] = datetime.now()
-                # ファイル更新時刻を保存
-                try:
-                    self.cache_file_mtimes[cache_key] = os.path.getmtime(file_path)
-                except (OSError, AttributeError):
-                    pass
-            except Exception:
-                pass  # キャッシュ保存でエラーが発生しても続行
-        
-        return keywords
+        return self._load_master_cached(
+            'inspection_target_csv', 'inspection_target_csv_path',
+            self.load_inspection_target_csv, '検査対象CSV'
+        )
     
     def load_product_master(self):
         """製品マスタファイルを読み込む"""

@@ -1789,26 +1789,16 @@ def generate_html(
     output_path: str,
     inspector_candidates: Optional[List[str]] = None,
 ) -> None:
-    """
-    HTML_TEMPLATE にシートを埋め込み、座席UIを生成する共通関数。
-    inspector_candidates を指定すれば autocomplete 候補を制御できます。
-    """
+    """HTML_TEMPLATEにシートを埋め込み、座席UIを生成する共通関数。inspector_candidatesを指定すればautocomplete候補を制御できます。"""
     candidates = inspector_candidates or DEFAULT_INSPECTOR_NAMES
     sorted_names = sorted({name for name in candidates if name and name.strip()})
-    inspector_json = json.dumps(sorted_names, ensure_ascii=False)
-    column_map = chart.get("inspector_column_map", {})
-    if not isinstance(column_map, dict):
-        column_map = {}
-    column_map_json = json.dumps(column_map, ensure_ascii=False)
+    column_map = chart.get("inspector_column_map", {}) or {}
     html = (
         HTML_TEMPLATE.replace("SEATING_DATA_PLACEHOLDER", json.dumps(chart, ensure_ascii=False))
-        .replace("INSPECTOR_CANDIDATES_PLACEHOLDER", inspector_json)
-        .replace("INSPECTOR_COLUMN_MAP_PLACEHOLDER", column_map_json)
+        .replace("INSPECTOR_CANDIDATES_PLACEHOLDER", json.dumps(sorted_names, ensure_ascii=False))
+        .replace("INSPECTOR_COLUMN_MAP_PLACEHOLDER", json.dumps(column_map, ensure_ascii=False))
         .replace("SEATING_JSON_PATH_PLACEHOLDER", json.dumps(SEATING_JSON_PATH, ensure_ascii=False))
-        .replace(
-            "SEATING_JSON_FILE_NAME_PLACEHOLDER",
-            json.dumps(SEATING_JSON_FILE_NAME, ensure_ascii=False),
-        )
+        .replace("SEATING_JSON_FILE_NAME_PLACEHOLDER", json.dumps(SEATING_JSON_FILE_NAME, ensure_ascii=False))
     )
     directory = os.path.dirname(output_path)
     if directory:
