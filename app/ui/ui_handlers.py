@@ -753,15 +753,14 @@ class ModernDataExtractorUI:
         
         # 登録済みか確認（工程名が異なれば別項目）
         for item in self.registered_products:
-            existing_code = item.get('品番') or item.get('�i��', '')
+            existing_code = item.get('品番', '')
             existing_process = item.get('工程名', '').strip()
             if existing_code == product_code and existing_process == process_name:
                 item['品番'] = product_code
-                item['���b�g��'] = lots
                 item['ロット数'] = lots
                 item['工程名'] = process_name
-                if '�Œ茟����' not in item:
-                    item['�Œ茟����'] = []
+                if '固定検査員' not in item:
+                    item['固定検査員'] = []
                 self.update_registered_list()
                 self.save_registered_products()
                 self.product_code_entry.delete(0, "end")
@@ -775,8 +774,7 @@ class ModernDataExtractorUI:
             '品番': product_code,
             'ロット数': lots,
             '工程名': process_name,
-            'same_day_priority': False,
-            '�Œ茟����': []
+            '固定検査員': []
         })
         
         # リストとファイル更新
@@ -806,10 +804,8 @@ class ModernDataExtractorUI:
             # 検査員情報がない場合は初期化
             if '固定検査員' not in item:
                 item['固定検査員'] = []
-            item.setdefault('same_day_priority', False)
             
             default_row_color = "#F3F4F6"
-            highlight_row_color = "#FEE2E2"
             item_frame = ctk.CTkFrame(self.registered_list_container, fg_color=default_row_color, corner_radius=6)
             item_frame.pack(fill="x", pady=(0, 4), padx=5)
 
@@ -820,30 +816,6 @@ class ModernDataExtractorUI:
             info_column = ctk.CTkFrame(item_frame, fg_color="transparent")
             info_column.grid(row=0, column=0, sticky="nsew", padx=(2, 0), pady=6)
             info_column.grid_columnconfigure(0, weight=1)
-            
-            checkbox_var = tk.BooleanVar(value=bool(item.get('same_day_priority', False)))
-            
-            def refresh_row_background(frame, var):
-                new_color = highlight_row_color if var.get() else default_row_color
-                frame.configure(fg_color=new_color)
-
-            def on_priority_toggle(var, entry):
-                entry['same_day_priority'] = var.get()
-                self.save_registered_products()
-                state_label = "ON" if var.get() else "OFF"
-                self.log_message(f"登録済み品番 '{entry['品番']}' の当日優先を{state_label}に設定しました")
-            checkbox_var.trace_add('write', lambda *args, frame=item_frame, var=checkbox_var: refresh_row_background(frame, var))
-            
-            checkbox = ctk.CTkCheckBox(
-                info_column,
-                text="",
-                variable=checkbox_var,
-                command=lambda var=checkbox_var, entry=item: on_priority_toggle(var, entry),
-                font=ctk.CTkFont(family="Yu Gothic", size=12, weight="bold"),
-                text_color="#111827"
-            )
-            checkbox.pack(side="left", padx=(0, 2), pady=0)
-            refresh_row_background(item_frame, checkbox_var)
             
             # 情報表示フレーム（一行で表示）
             info_frame = ctk.CTkFrame(info_column, fg_color="transparent")
@@ -1405,22 +1377,39 @@ class ModernDataExtractorUI:
         """登録済み品番リストをファイルから読み込む"""
         try:
             if self.registered_products_file.exists():
-                with open(self.registered_products_file, 'r', encoding='utf-8') as f:
-                    self.registered_products = json.load(f)
+                raw_bytes = self.registered_products_file.read_bytes()
+                last_error: Optional[Exception] = None
+                for enc in ("utf-8-sig", "utf-8", "cp932", "shift_jis"):
+                    try:
+                        self.registered_products = json.loads(raw_bytes.decode(enc))
+                        last_error = None
+                        break
+                    except Exception as e:
+                        last_error = e
+                if last_error is not None:
+                    raise last_error
+
+                # 旧データのキー名救済（文字化け/旧バージョン互換）
+                legacy_key_map = {
+                    "?i??": "品番",
+                    "???b?g??": "ロット数",
+                    "???????": "固定検査員",
+                }
                 # 後方互換性: 検査員情報がない場合は初期化
                 for item in self.registered_products:
                     if '固定検査員' not in item:
                         item['固定検査員'] = []
-                    if '�i��' in item and '品番' not in item:
-                        item['品番'] = item['�i��']
-                    if '品番' in item and '�i��' not in item:
-                        item['�i��'] = item['品番']
-                    if '���b�g��' in item and 'ロット数' not in item:
-                        item['ロット数'] = item['���b�g��']
-                    if 'ロット数' in item and '���b�g��' not in item:
-                        item['���b�g��'] = item['ロット数']
+
+                    # 旧キーを正規キーへ移し替え
+                    for legacy_key, normalized_key in legacy_key_map.items():
+                        if normalized_key not in item and legacy_key in item:
+                            item[normalized_key] = item[legacy_key]
                     item.setdefault('工程名', '')
-                    item.setdefault('same_day_priority', False)
+
+                    # 廃止キー/旧キーを削除（保存時に共有マスター側もクリーンにする）
+                    item.pop('same_day_priority', None)
+                    for legacy_key in legacy_key_map.keys():
+                        item.pop(legacy_key, None)
                 # UIが構築されている場合はリストを更新
                 if self.registered_list_container is not None:
                     self.update_registered_list()
@@ -1432,8 +1421,17 @@ class ModernDataExtractorUI:
     def save_registered_products(self):
         """登録済み品番リストをファイルに保存"""
         try:
-            with open(self.registered_products_file, 'w', encoding='utf-8') as f:
+            legacy_keys_to_remove = {"?i??", "???b?g??", "???????"}
+            for item in self.registered_products:
+                if isinstance(item, dict):
+                    item.pop('same_day_priority', None)
+                    for legacy_key in legacy_keys_to_remove:
+                        item.pop(legacy_key, None)
+            # 共有パスも含めてUTF-8(BOM)で統一して文字化けを防ぐ（Excel/メモ帳でも崩れにくい）
+            tmp_path = self.registered_products_file.with_suffix(self.registered_products_file.suffix + ".tmp")
+            with open(tmp_path, 'w', encoding='utf-8-sig') as f:
                 json.dump(self.registered_products, f, ensure_ascii=False, indent=2)
+            tmp_path.replace(self.registered_products_file)
             logger.debug(f"登録済み品番リストを保存しました: {len(self.registered_products)}件")
         except Exception as e:
             logger.error(f"登録済み品番リストの保存に失敗しました: {str(e)}")
@@ -3207,8 +3205,9 @@ class ModernDataExtractorUI:
             params = list(shortage_products)
 
             if "現在工程名" in available_columns:
-                where_conditions.append("現在工程名 NOT LIKE '%完了%'")
-                where_conditions.append("現在工程名 NOT LIKE '%梱包%'")
+                # NULL の場合に NOT LIKE が NULL となり除外されてしまうため、NULL は許容して後段で扱う
+                where_conditions.append("(現在工程名 IS NULL OR 現在工程名 NOT LIKE '%完了%')")
+                where_conditions.append("(現在工程名 IS NULL OR 現在工程名 NOT LIKE '%梱包%')")
                 if self.inspection_target_keywords:
                     keyword_conditions = []
                     for keyword in self.inspection_target_keywords:
@@ -3265,10 +3264,11 @@ class ModernDataExtractorUI:
             
             self.log_message(f"登録済み品番のロットを取得中: {len(registered_product_numbers)}件の品番")
 
+            # 登録済み品番は「設定した品番・工程」で取り置きする用途のため、
+            # 検査対象キーワード（inspection_target_keywords）では絞り込まない。
             cache_key = self._build_access_cache_key(
                 "registered",
-                registered_product_numbers,
-                self.inspection_target_keywords
+                registered_product_numbers
             )
             cached_lots = self._try_get_access_cache(cache_key)
             if cached_lots is not None:
@@ -3294,17 +3294,9 @@ class ModernDataExtractorUI:
             params = list(registered_product_numbers)
 
             if "現在工程名" in available_columns:
-                where_conditions.append("現在工程名 NOT LIKE '%完了%'")
-                where_conditions.append("現在工程名 NOT LIKE '%梱包%'")
-                if self.inspection_target_keywords:
-                    keyword_conditions = []
-                    for keyword in self.inspection_target_keywords:
-                        escaped_keyword = keyword.replace("%", "[%]").replace("_", "[_]")
-                        keyword_conditions.append("現在工程名 LIKE ?")
-                        params.append(f"%{escaped_keyword}%")
-                    if keyword_conditions:
-                        where_conditions.append("(" + " OR ".join(keyword_conditions) + ")")
-                        self.log_message(f"検査対象キーワードでフィルタリング: {len(keyword_conditions)}件のキーワード")
+                # NULL の場合に NOT LIKE が NULL となり除外されてしまうため、NULL は許容して後段で扱う
+                where_conditions.append("(現在工程名 IS NULL OR 現在工程名 NOT LIKE '%完了%')")
+                where_conditions.append("(現在工程名 IS NULL OR 現在工程名 NOT LIKE '%梱包%')")
             where_clause = " AND ".join(where_conditions)
             order_conditions = ["品番"]
             if "指示日" in available_columns:
@@ -3359,6 +3351,8 @@ class ModernDataExtractorUI:
                 
                 if product_lots.empty:
                     continue
+
+                lots_before_filter = len(product_lots)
                 
                 # 指示日順でソート（生産日の古い順）
                 process_filter = registered_item.get('工程名', '').strip()
@@ -3370,7 +3364,7 @@ class ModernDataExtractorUI:
                     ]
                     if not process_keywords:
                         process_keywords = [process_filter]
-                    process_columns = [col for col in ['現在工程名', '工程名'] if col in product_lots.columns]
+                    process_columns = [col for col in ['現在工程名', '現在工程二次処理', '工程名'] if col in product_lots.columns]
                     if process_columns:
                         has_process_data = any(
                             product_lots[col].astype(str).str.strip().ne('').any()
@@ -3392,14 +3386,20 @@ class ModernDataExtractorUI:
                             product_lots = product_lots[mask].copy()
                         else:
                             self.log_message(
-                                f"工程名「{process_filter}」に該当する現在工程名が未記載のためフィルターを省略します: {product_number}"
+                                f"工程名「{process_filter}」を指定しましたが、現在工程名が未記載のため割当をスキップします: {product_number}"
                             )
+                            continue
                     else:
                         self.log_message(
-                            f"工程名「{process_filter}」を指定しましたが、照合可能な工程名列がありません: {product_number}"
+                            f"工程名「{process_filter}」を指定しましたが、照合可能な工程名列がありません（割当をスキップ）: {product_number}"
                         )
+                        continue
                 if product_lots.empty:
                     continue
+                if process_filter:
+                    self.log_message(
+                        f"登録済み品番 {product_number}: 工程フィルタ適用 {lots_before_filter}件 → {len(product_lots)}件（工程名: {process_filter}）"
+                    )
 
                 if '指示日' in product_lots.columns:
                     product_lots = product_lots.copy()
@@ -3456,8 +3456,7 @@ class ModernDataExtractorUI:
                         '現在工程番号': lot[lot_cols.get('現在工程番号', -1)] if '現在工程番号' in lot_cols and pd.notna(lot[lot_cols['現在工程番号']]) else '',
                         '現在工程名': lot[lot_cols.get('現在工程名', -1)] if '現在工程名' in lot_cols and pd.notna(lot[lot_cols['現在工程名']]) else '',
                         '現在工程二次処理': lot[lot_cols.get('現在工程二次処理', -1)] if '現在工程二次処理' in lot_cols and pd.notna(lot[lot_cols['現在工程二次処理']]) else '',
-                        '生産ロットID': lot[lot_cols.get('生産ロットID', -1)] if '生産ロットID' in lot_cols and pd.notna(lot[lot_cols['生産ロットID']]) else '',
-                        '_force_same_day_priority': bool(registered_item.get('same_day_priority', False))
+                        '生産ロットID': lot[lot_cols.get('生産ロットID', -1)] if '生産ロットID' in lot_cols and pd.notna(lot[lot_cols['生産ロットID']]) else ''
                     }
                     
                     additional_assignments.append(assignment_result)
