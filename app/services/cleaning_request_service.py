@@ -617,7 +617,19 @@ def get_cleaning_lots(
             if not batch_lots_df.empty:
                 # 日付列を事前に変換してキャッシュ
                 if "指示日" in batch_lots_df.columns:
-                    batch_lots_df['_指示日_parsed'] = pd.to_datetime(batch_lots_df['指示日'], errors='coerce')
+                    # 日付文字列から不要な文字（「（完）」など）を除去
+                    def clean_date_string(date_val):
+                        if pd.isna(date_val):
+                            return date_val
+                        date_str = str(date_val)
+                        # 「（完）」「（完了）」などの文字を除去
+                        date_str = re.sub(r'[（(].*?[）)]', '', date_str)
+                        # 前後の空白を除去
+                        date_str = date_str.strip()
+                        return date_str
+                    
+                    batch_lots_df['_指示日_cleaned'] = batch_lots_df['指示日'].apply(clean_date_string)
+                    batch_lots_df['_指示日_parsed'] = pd.to_datetime(batch_lots_df['_指示日_cleaned'], errors='coerce')
                     batch_lots_df['_指示日_str'] = batch_lots_df['_指示日_parsed'].dt.strftime('%Y-%m-%d')
                 
                 # 各リクエストに対応するロットを分離
@@ -639,7 +651,7 @@ def get_cleaning_lots(
                         mask = mask & filtered_df['_指示日_str'].isin(date_set)
                     
                     filtered_df = filtered_df[mask].copy()
-                    filtered_df = filtered_df.drop(columns=['_指示日_parsed', '_指示日_str'], errors='ignore')
+                    filtered_df = filtered_df.drop(columns=['_指示日_parsed', '_指示日_str', '_指示日_cleaned'], errors='ignore')
                     
                     if not filtered_df.empty:
                         all_lots.append(filtered_df)

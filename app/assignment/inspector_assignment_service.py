@@ -3908,7 +3908,20 @@ class InspectorAssignmentManager:
                     # スキル別平均からの偏差を計算（小さい方が良い）
                     avg_hours = skill_avg_hours.get(skill_level, 0.0)
                     deviation_from_avg = abs(total_hours - avg_hours)
-                    product_hours = insp.get('__projected_product_hours', self.inspector_product_hours.get(code, 0.0))
+                    # product_hoursが辞書の場合は0.0にフォールバック
+                    projected_hours = insp.get('__projected_product_hours')
+                    if projected_hours is None:
+                        product_hours_dict = self.inspector_product_hours.get(code, {})
+                        if isinstance(product_hours_dict, dict):
+                            # 辞書の場合は、該当品番の時間を取得（品番が不明な場合は0.0）
+                            if product_number and product_number in product_hours_dict:
+                                product_hours = product_hours_dict[product_number]
+                            else:
+                                product_hours = 0.0
+                        else:
+                            product_hours = product_hours_dict if isinstance(product_hours_dict, (int, float)) else 0.0
+                    else:
+                        product_hours = projected_hours if isinstance(projected_hours, (int, float)) else 0.0
                     product_limit_penalty = 1 if insp.get('over_product_limit', False) else 0
                     near_limit_penalty = 1 if insp.get('__near_product_limit', False) else 0
                     product_assignment_count = insp.get('__product_assignment_count', 0)
@@ -4008,7 +4021,20 @@ class InspectorAssignmentManager:
                         is_fixed = insp.get('__is_fixed', False)  # 固定検査員フラグ
                         
                         # 固定検査員を最優先し、その他の公平性指標を考慮
-                        product_hours = insp.get('__projected_product_hours', self.inspector_product_hours.get(code, 0.0))
+                        # product_hoursが辞書の場合は0.0にフォールバック
+                        projected_hours = insp.get('__projected_product_hours')
+                        if projected_hours is None:
+                            product_hours_dict = self.inspector_product_hours.get(code, {})
+                            if isinstance(product_hours_dict, dict):
+                                # 辞書の場合は、該当品番の時間を取得（品番が不明な場合は0.0）
+                                if product_number and product_number in product_hours_dict:
+                                    product_hours = product_hours_dict[product_number]
+                                else:
+                                    product_hours = 0.0
+                            else:
+                                product_hours = product_hours_dict if isinstance(product_hours_dict, (int, float)) else 0.0
+                        else:
+                            product_hours = projected_hours if isinstance(projected_hours, (int, float)) else 0.0
                         product_limit_penalty = 1 if insp.get('over_product_limit', False) else 0
                         product_assignment_count = insp.get('__product_assignment_count', 0)
                         priority = (
@@ -4104,7 +4130,20 @@ class InspectorAssignmentManager:
                     
                     # 【追加】優先順位: 0)固定検査員を最優先（登録済み品番の特別処置）, 1)未使用検査員優先, 2)総勤務時間が少ない, 3)スキルレベル(1>2>3>new、1が最高スキル), 4)割り当て回数が少ない, 5)4時間上限に近い場合は優先度を下げる
                     near_limit = insp.get('__near_product_limit', False)  # 4時間上限に近い場合は優先度を下げる
-                    product_hours = insp.get('__projected_product_hours', self.inspector_product_hours.get(code, 0.0))
+                    # product_hoursが辞書の場合は0.0にフォールバック
+                    projected_hours = insp.get('__projected_product_hours')
+                    if projected_hours is None:
+                        product_hours_dict = self.inspector_product_hours.get(code, {})
+                        if isinstance(product_hours_dict, dict):
+                            # 辞書の場合は、該当品番の時間を取得（品番が不明な場合は0.0）
+                            if product_number and product_number in product_hours_dict:
+                                product_hours = product_hours_dict[product_number]
+                            else:
+                                product_hours = 0.0
+                        else:
+                            product_hours = product_hours_dict if isinstance(product_hours_dict, (int, float)) else 0.0
+                    else:
+                        product_hours = projected_hours if isinstance(projected_hours, (int, float)) else 0.0
                     product_limit_penalty = 1 if insp.get('over_product_limit', False) else 0
                     product_assignment_count = insp.get('__product_assignment_count', 0)
                     priority = (
@@ -4219,7 +4258,20 @@ class InspectorAssignmentManager:
                     
                     # 【追加】優先順位: 0)固定検査員を最優先（登録済み品番の特別処置）, 1)未使用検査員優先, 2)総勤務時間が少ない, 3)スキルレベル(1>2>3>new、1が最高スキル), 4)割り当て回数が少ない, 5)4時間上限に近い場合は優先度を下げる
                     near_limit = insp.get('__near_product_limit', False)  # 4時間上限に近い場合は優先度を下げる
-                    product_hours = insp.get('__projected_product_hours', self.inspector_product_hours.get(code, 0.0))
+                    # product_hoursが辞書の場合は0.0にフォールバック
+                    projected_hours = insp.get('__projected_product_hours')
+                    if projected_hours is None:
+                        product_hours_dict = self.inspector_product_hours.get(code, {})
+                        if isinstance(product_hours_dict, dict):
+                            # 辞書の場合は、該当品番の時間を取得（品番が不明な場合は0.0）
+                            if product_number and product_number in product_hours_dict:
+                                product_hours = product_hours_dict[product_number]
+                            else:
+                                product_hours = 0.0
+                        else:
+                            product_hours = product_hours_dict if isinstance(product_hours_dict, (int, float)) else 0.0
+                    else:
+                        product_hours = projected_hours if isinstance(projected_hours, (int, float)) else 0.0
                     product_limit_penalty = 1 if insp.get('over_product_limit', False) else 0
                     product_assignment_count = insp.get('__product_assignment_count', 0)
                     priority = (

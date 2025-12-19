@@ -397,6 +397,26 @@ class ModernDataExtractorUI:
             filter=console_filter
         )
         
+        # ログファイルの冒頭にPC名を記載（ファイル作成前に書き込む）
+        try:
+            import socket
+            # PC名を取得（Windows環境変数COMPUTERNAMEを優先、なければsocket.gethostname()を使用）
+            pc_name = os.getenv('COMPUTERNAME') or socket.gethostname()
+            # ログファイルが存在しない場合は作成し、PC名を書き込む
+            if not log_file.exists():
+                with open(log_file, 'w', encoding='utf-8') as f:
+                    f.write(f"user : {pc_name}\n")
+            else:
+                # 既存ファイルの場合は先頭にPC名を追加
+                with open(log_file, 'r+', encoding='utf-8') as f:
+                    content = f.read()
+                    f.seek(0, 0)
+                    f.write(f"user : {pc_name}\n")
+                    f.write(content)
+        except Exception as e:
+            # PC名の取得・書き込みに失敗した場合はエラーを無視（ログ機能は継続）
+            pass
+        
         # ファイル出力（すべてのログを1つのファイルに統一）
         # ERROR時はスタックトレースも含める
         logger.add(
