@@ -427,6 +427,22 @@ class ModernDataExtractorUI:
             # ユーザー名の取得・書き込みに失敗した場合はエラーを無視（ログ機能は継続）
             pass
         
+        # PERFログ出力（計測）は環境変数でOFF可能（デフォルトON）
+        perf_log_enabled = str(os.getenv("PERF_LOG_ENABLED", "1")).strip().lower() not in {
+            "0",
+            "false",
+            "off",
+            "no",
+        }
+
+        def _main_filter(record):
+            if perf_log_enabled:
+                return True
+            try:
+                return record.get("extra", {}).get("channel") != "PERF"
+            except Exception:
+                return True
+
         # ファイル出力（すべてのログを1つのファイルに統一）
         # ERROR時はスタックトレースも含める
         logger.add(
@@ -440,7 +456,8 @@ class ModernDataExtractorUI:
             backtrace=True,  # ERROR時はスタックトレースを出力
             diagnose=False,  # 容量が大きくなりやすい詳細診断は抑制
             enqueue=True,  # スレッドセーフな出力
-            catch=True  # ログ出力中のエラーをキャッチ
+            catch=True,  # ログ出力中のエラーをキャッチ
+            filter=_main_filter,
         )
 
         logger.bind(channel="SYS").info(f"ログファイル: {log_file.absolute()}")
@@ -450,28 +467,29 @@ class ModernDataExtractorUI:
             pass
 
         # パフォーマンス計測ログ（DEBUGのみ）を別ファイルへ出力
-        try:
-            perf_log_file = log_file.with_name(f"{log_file.stem}_perf.log")
+        if perf_log_enabled:
+            try:
+                perf_log_file = log_file.with_name(f"{log_file.stem}_perf.log")
 
-            def _perf_filter(record):
-                return record.get("extra", {}).get("channel") == "PERF"
+                def _perf_filter(record):
+                    return record.get("extra", {}).get("channel") == "PERF"
 
-            logger.add(
-                perf_log_file,
-                level="DEBUG",
-                format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {extra[channel]} | {name}:{line} | {message}",
-                rotation="1 MB",
-                retention="30 days",
-                compression="zip",
-                encoding="utf-8",
-                enqueue=True,
-                catch=True,
-                filter=_perf_filter,
-            )
-            logger.bind(channel="SYS").info(f"PERFログファイル: {perf_log_file.absolute()}")
-        except Exception:
-            # 計測ログの設定に失敗しても本処理は継続
-            pass
+                logger.add(
+                    perf_log_file,
+                    level="DEBUG",
+                    format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {extra[channel]} | {name}:{line} | {message}",
+                    rotation="1 MB",
+                    retention="30 days",
+                    compression="zip",
+                    encoding="utf-8",
+                    enqueue=True,
+                    catch=True,
+                    filter=_perf_filter,
+                )
+                logger.bind(channel="SYS").info(f"PERFログファイル: {perf_log_file.absolute()}")
+            except Exception:
+                # 計測ログの設定に失敗しても本処理は継続
+                pass
     
     def load_config(self):
         """設定の読み込み"""
@@ -3186,6 +3204,40 @@ class ModernDataExtractorUI:
             if cached_packaging is not None:
                 self.log_message("Accessの梱包工程データをキャッシュから再利用しました")
                 return cached_packaging
+
+            # ローカルディスクキャッシュ（実行を跨いで再利用）
+            # Accessファイルの更新状態（mtime/size）に紐づけているため、結果は不変のまま高速化できる。
+            disk_cache_path = None
+            try:
+                from app.config import DatabaseConfig
+                import hashlib
+                import os
+                import pickle
+                from pathlib import Path
+
+                effective_access_path = DatabaseConfig.get_last_effective_access_path() or ""
+                if effective_access_path:
+                    stat = os.stat(effective_access_path)
+                    sig = f"{int(getattr(stat, 'st_mtime', 0))}_{int(getattr(stat, 'st_size', 0))}"
+
+                    base_dir = os.getenv("LOCALAPPDATA", "").strip() or os.getenv("TEMP", "").strip()
+                    if base_dir:
+                        cache_dir = Path(base_dir) / "appearance_sorting_system" / "query_cache"
+                        cache_dir.mkdir(parents=True, exist_ok=True)
+
+                        key_material = effective_access_path + "|" + ",".join(product_numbers)
+                        key_hash = hashlib.sha1(key_material.encode("utf-8", errors="ignore")).hexdigest()[:12]
+                        disk_cache_path = cache_dir / f"packaging_{key_hash}_{sig}.pkl"
+
+                        if disk_cache_path.exists():
+                            with open(disk_cache_path, "rb") as f:
+                                cached_df = pickle.load(f)
+                            if isinstance(cached_df, pd.DataFrame):
+                                logger.bind(channel="PERF").debug("PERF {}: cache_hit", "access.packaging.disk_cache")
+                                self._store_access_cache(cache_key, cached_df)
+                                return cached_df.copy()
+            except Exception:
+                disk_cache_path = None
             
             # Accessに集計を任せて転送量を削減（高速化）
             placeholders = ", ".join("?" for _ in product_numbers)
@@ -3207,6 +3259,21 @@ class ModernDataExtractorUI:
 
             self.log_message(f"梱包工程データを取得しました: {len(packaging_df)}件")
             self._store_access_cache(cache_key, packaging_df)
+
+            # ディスクキャッシュへ保存（失敗しても無視）
+            if disk_cache_path is not None:
+                try:
+                    import pickle
+                    with open(disk_cache_path, "wb") as f:
+                        pickle.dump(packaging_df, f, protocol=4)
+
+                    # 古いキャッシュの間引き（失敗しても無視）
+                    try:
+                        self._prune_query_cache_files(disk_cache_path.parent, "packaging_", keep=30)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
             return packaging_df
             
         except Exception as e:
@@ -3371,6 +3438,38 @@ class ModernDataExtractorUI:
         self._access_lots_cache[key] = df.copy()
         self._access_lots_cache_timestamp[key] = datetime.now()
 
+    def _prune_query_cache_files(self, cache_dir: "Path", prefix: str, keep: int = 30) -> None:
+        """
+        ディスクキャッシュ肥大化防止用の間引き。
+        - prefix一致のpklのみ対象
+        - 新しいものから keep 個だけ残す
+        """
+        try:
+            from pathlib import Path
+
+            if not isinstance(cache_dir, Path):
+                cache_dir = Path(str(cache_dir))
+            if keep <= 0:
+                keep = 1
+            if not cache_dir.exists():
+                return
+
+            candidates = [
+                p for p in cache_dir.iterdir()
+                if p.is_file() and p.name.startswith(prefix) and p.suffix.lower() == ".pkl"
+            ]
+            if len(candidates) <= keep:
+                return
+
+            candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+            for p in candidates[keep:]:
+                try:
+                    p.unlink(missing_ok=True)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
     def get_available_lots_for_shortage(self, connection, shortage_df):
         """不足数がマイナスの品番に対して利用可能なロットを取得"""
         try:
@@ -3394,6 +3493,11 @@ class ModernDataExtractorUI:
                 self.log_message("Accessのロットデータをキャッシュから再利用しました")
                 return cached_lots
 
+            # ローカルディスクキャッシュ（実行を跨いで再利用）
+            # Accessファイルの更新状態（mtime/size）に紐づけているため、結果は不変のまま揺れを低減できる。
+            disk_cache_path = None
+            disk_cached_payload = None
+
             registered_product_numbers = []
             if self.registered_products:
                 registered_product_numbers = [
@@ -3414,6 +3518,61 @@ class ModernDataExtractorUI:
             if not available_columns:
                 self.log_message("必要な列が見つかりません。全列を取得します。")
                 available_columns = actual_columns
+
+            # ディスクキャッシュ読み込み（表構造確定後にキー生成）
+            try:
+                from app.config import DatabaseConfig
+                import hashlib
+                import os
+                import pickle
+                from pathlib import Path
+
+                effective_access_path = DatabaseConfig.get_last_effective_access_path() or ""
+                if effective_access_path:
+                    stat = os.stat(effective_access_path)
+                    sig = f"{int(getattr(stat, 'st_mtime', 0))}_{int(getattr(stat, 'st_size', 0))}"
+
+                    base_dir = os.getenv("LOCALAPPDATA", "").strip() or os.getenv("TEMP", "").strip()
+                    if base_dir:
+                        cache_dir = Path(base_dir) / "appearance_sorting_system" / "query_cache"
+                        cache_dir.mkdir(parents=True, exist_ok=True)
+
+                        key_material = (
+                            effective_access_path
+                            + "|cols=" + ",".join(available_columns)
+                            + "|shortage=" + ",".join(sorted(shortage_products))
+                            + "|registered=" + ",".join(sorted(registered_product_numbers))
+                            + "|keywords=" + ",".join([str(k).strip() for k in (self.inspection_target_keywords or []) if str(k).strip()])
+                        )
+                        key_hash = hashlib.sha1(key_material.encode("utf-8", errors="ignore")).hexdigest()[:12]
+                        disk_cache_path = cache_dir / f"lots_shortage_{key_hash}_{sig}.pkl"
+
+                        if disk_cache_path.exists():
+                            with open(disk_cache_path, "rb") as f:
+                                disk_cached_payload = pickle.load(f)
+            except Exception:
+                disk_cache_path = None
+                disk_cached_payload = None
+
+            if isinstance(disk_cached_payload, dict):
+                try:
+                    cached_shortage_df = disk_cached_payload.get("shortage_lots_df")
+                    cached_registered_df = disk_cached_payload.get("registered_lots_df")
+
+                    if isinstance(cached_shortage_df, pd.DataFrame):
+                        logger.bind(channel="PERF").debug("PERF {}: cache_hit", "access.lots_for_shortage.disk_cache")
+                        self._store_access_cache(cache_key, cached_shortage_df)
+
+                        if registered_product_numbers and isinstance(cached_registered_df, pd.DataFrame):
+                            registered_cache_key = self._build_access_cache_key(
+                                "registered",
+                                registered_product_numbers,
+                            )
+                            self._store_access_cache(registered_cache_key, cached_registered_df)
+
+                        return cached_shortage_df.copy()
+                except Exception:
+                    pass
 
             columns_str = ", ".join([f"[{col}]" for col in available_columns])
 
@@ -3503,6 +3662,25 @@ class ModernDataExtractorUI:
                 registered_lots_df = lots_df[ lots_df["品番"].isin(registered_product_numbers) ].copy()
                 if not registered_lots_df.empty:
                     self._store_access_cache(registered_cache_key, registered_lots_df)
+
+            # ディスクキャッシュへ保存（失敗しても無視）
+            if disk_cache_path is not None:
+                try:
+                    import pickle
+                    payload = {
+                        "shortage_lots_df": shortage_lots_df,
+                        "registered_lots_df": registered_lots_df if registered_product_numbers else pd.DataFrame(),
+                    }
+                    with open(disk_cache_path, "wb") as f:
+                        pickle.dump(payload, f, protocol=4)
+
+                    # 古いキャッシュの間引き（失敗しても無視）
+                    try:
+                        self._prune_query_cache_files(disk_cache_path.parent, "lots_shortage_", keep=30)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
 
             self.log_message(f"利用可能なロットを取得しました: {len(shortage_lots_df)}件")
             return shortage_lots_df

@@ -5,7 +5,11 @@
 
 from typing import Optional, List
 import os
+import re
+import shutil
 import sys
+import tempfile
+import hashlib
 from pathlib import Path
 from app.env_loader import load_env_file
 from app.utils.path_resolver import resolve_resource_path
@@ -26,6 +30,7 @@ class DatabaseConfig:
     _connection_cache = None
     _connection_cache_timestamp = None
     _connection_cache_ttl = CONNECTION_CACHE_TTL
+    _last_effective_access_path: Optional[str] = None
 
     def __init__(self, env_file_path: str = "config.env") -> None:
         """
@@ -219,8 +224,10 @@ class DatabaseConfig:
         Returns:
             接続文字列
         """
-        # Accessファイルのパスを正規化
-        normalized_path = str(Path(self.access_file_path).resolve())
+        # Accessファイルのパスを決定（UNCの場合はローカルにスナップショットコピーして参照）
+        effective_path = self._get_effective_access_file_path()
+        DatabaseConfig._last_effective_access_path = effective_path
+        normalized_path = str(Path(effective_path).resolve())
         
         # ドライバー名を決定
         driver = driver_name or self.db_driver
@@ -233,6 +240,91 @@ class DatabaseConfig:
         )
 
         return connection_string
+
+    @staticmethod
+    def get_last_effective_access_path() -> Optional[str]:
+        """直近に接続文字列生成で採用されたAccessファイルパス（ローカルコピー含む）を返す。"""
+        return DatabaseConfig._last_effective_access_path
+
+    def _get_effective_access_file_path(self) -> str:
+        """
+        接続に使用するAccessファイルパスを返す。
+        - UNCパス（\\\\server\\share\\...）の場合はローカルにコピーして利用（ネットワーク揺れの影響を低減）
+        - 失敗時は元のパスにフォールバック（既存動作維持）
+
+        環境変数:
+            ACCESS_LOCAL_COPY: 0/false/off/no の場合は無効化
+            ACCESS_LOCAL_COPY_DIR: コピー先ディレクトリを明示（任意）
+        """
+        src = str(self.access_file_path or "").strip()
+        if not src:
+            return src
+
+        enabled = os.getenv("ACCESS_LOCAL_COPY", "1").strip().lower() not in {"0", "false", "off", "no"}
+        if not enabled:
+            return src
+
+        if not src.startswith("\\\\"):
+            return src
+
+        try:
+            return self._copy_access_to_local_cache(src)
+        except Exception as e:
+            logger.debug(f"Accessローカルコピーに失敗したためUNCのまま接続します: {e}")
+            return src
+
+    def _copy_access_to_local_cache(self, src_path: str) -> str:
+        """
+        UNC上のAccessファイルをローカルへコピーして、そのパスを返す（ReadOnly接続想定）。
+        同一ファイル・同一更新状態は再利用し、古いスナップショットは最低限クリーンアップする。
+        """
+        try:
+            stat = os.stat(src_path)
+        except Exception:
+            return src_path
+
+        base_dir = os.getenv("ACCESS_LOCAL_COPY_DIR", "").strip()
+        if base_dir:
+            cache_root = Path(base_dir)
+        else:
+            local_appdata = os.getenv("LOCALAPPDATA", "").strip()
+            cache_root = Path(local_appdata) if local_appdata else Path(tempfile.gettempdir())
+            cache_root = cache_root / "appearance_sorting_system" / "access_cache"
+
+        try:
+            cache_root.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            return src_path
+
+        key = hashlib.sha1(src_path.lower().encode("utf-8", errors="ignore")).hexdigest()[:10]
+        mtime = int(getattr(stat, "st_mtime", 0))
+        size = int(getattr(stat, "st_size", 0))
+
+        suffix = Path(src_path).suffix.lower() or ".accdb"
+        local_path = cache_root / f"access_{key}_{mtime}_{size}{suffix}"
+
+        if not local_path.exists():
+            from time import perf_counter
+
+            t0 = perf_counter()
+            shutil.copy2(src_path, local_path)
+            ms = (perf_counter() - t0) * 1000.0
+            logger.bind(channel="PERF").debug("PERF {}: {:.1f} ms", "access.local_copy", ms)
+
+        # 古いスナップショットを軽く掃除（同一keyで最新2つだけ残す）
+        try:
+            pattern = re.compile(rf"^access_{re.escape(key)}_\\d+_\\d+\\{re.escape(suffix)}$", re.IGNORECASE)
+            candidates = [p for p in cache_root.iterdir() if p.is_file() and pattern.match(p.name)]
+            candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+            for p in candidates[2:]:
+                try:
+                    p.unlink(missing_ok=True)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        return str(local_path)
 
     def get_connection(self, timeout: int = 30) -> pyodbc.Connection:
         """
