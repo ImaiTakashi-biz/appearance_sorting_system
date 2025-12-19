@@ -1,4 +1,4 @@
-﻿"""
+"""
 設定管理モジュール
 環境変数からAccessデータベースの設定を読み込む
 """
@@ -75,6 +75,7 @@ class DatabaseConfig:
             # 設定値を取得
             self.access_file_path = os.getenv("ACCESS_FILE_PATH")
             self.access_table_name = os.getenv("ACCESS_TABLE_NAME")
+            self.shipping_stock_table_name = os.getenv("SHIPPING_STOCK_TABLE_NAME")
             self.db_driver = os.getenv("DB_DRIVER", "Microsoft Access Driver (*.mdb, *.accdb)")
             self.product_master_path = os.getenv("PRODUCT_MASTER_PATH")
             self.inspector_master_path = os.getenv("INSPECTOR_MASTER_PATH")
@@ -225,6 +226,7 @@ class DatabaseConfig:
             f"DRIVER={{{driver}}};"
             f"DBQ={normalized_path};"
             "ExtendedAnsiSQL=1;"
+            "ReadOnly=1;"
         )
 
         return connection_string

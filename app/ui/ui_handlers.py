@@ -397,24 +397,45 @@ class ModernDataExtractorUI:
             filter=console_filter
         )
         
-        # ログファイルの冒頭にPC名を記載（ファイル作成前に書き込む）
+        # ログファイルの冒頭にユーザーアカウント名を記載（ファイル作成前に書き込む）
         try:
-            import socket
-            # PC名を取得（Windows環境変数COMPUTERNAMEを優先、なければsocket.gethostname()を使用）
-            pc_name = os.getenv('COMPUTERNAME') or socket.gethostname()
-            # ログファイルが存在しない場合は作成し、PC名を書き込む
+            import getpass
+            # ユーザーアカウント名を取得（複数の方法を試行）
+            user_name = None
+            # 方法1: Windows環境変数USERNAME（最も確実）
+            user_name = os.getenv('USERNAME') or os.environ.get('USERNAME')
+            # 方法2: getpass.getuser()（Python標準ライブラリ）
+            if not user_name:
+                try:
+                    user_name = getpass.getuser()
+                except Exception:
+                    pass
+            # 方法3: USER環境変数（一部の環境で使用可能）
+            if not user_name:
+                user_name = os.getenv('USER') or os.environ.get('USER')
+            
+            # ユーザー名が取得できない場合はフォールバック
+            if not user_name:
+                user_name = "Unknown"
+            
+            # ログファイルが存在しない場合は作成し、ユーザー名を書き込む
             if not log_file.exists():
                 with open(log_file, 'w', encoding='utf-8') as f:
-                    f.write(f"user : {pc_name}\n")
+                    f.write(f"user : {user_name}\n")
             else:
-                # 既存ファイルの場合は先頭にPC名を追加
-                with open(log_file, 'r+', encoding='utf-8') as f:
-                    content = f.read()
-                    f.seek(0, 0)
-                    f.write(f"user : {pc_name}\n")
-                    f.write(content)
+                # 既存ファイルの場合は、既にユーザー名が記載されているかチェック
+                with open(log_file, 'r', encoding='utf-8') as f:
+                    first_line = f.readline().strip()
+                    # 既にユーザー名が記載されている場合は追加しない（重複を防ぐ）
+                    if not first_line.startswith('user :'):
+                        # ユーザー名が記載されていない場合のみ追加
+                        with open(log_file, 'r+', encoding='utf-8') as f2:
+                            content = f2.read()
+                            f2.seek(0, 0)
+                            f2.write(f"user : {user_name}\n")
+                            f2.write(content)
         except Exception as e:
-            # PC名の取得・書き込みに失敗した場合はエラーを無視（ログ機能は継続）
+            # ユーザー名の取得・書き込みに失敗した場合はエラーを無視（ログ機能は継続）
             pass
         
         # ファイル出力（すべてのログを1つのファイルに統一）
@@ -2617,8 +2638,11 @@ class ModernDataExtractorUI:
                 ModernDataExtractorUI._table_structure_cache = actual_columns
                 ModernDataExtractorUI._table_structure_cache_timestamp = time.time()
             
-            # 指定された列が存在するかチェック（梱包・完了は後で追加するため除外）
-            required_columns = ["品番", "品名", "客先", "出荷予定日", "出荷数", "在庫数", "不足数", "処理"]
+            # T_出荷予定集計テーブルから直接必要なデータを取得
+            # 必要な列: 品番, 品名, 客先, 出荷予定日, 出荷数量, 在庫数, 不足数
+            # 「処理」列と「注文ID」列は不要のため除外
+            # テーブルの列名は「出荷数量」「在庫数」のため、それを使用
+            required_columns = ["品番", "品名", "客先", "出荷予定日", "出荷数量", "在庫数", "不足数"]
             available_columns = [col for col in required_columns if col in actual_columns]
             
             if not available_columns:
@@ -2642,6 +2666,19 @@ class ModernDataExtractorUI:
             df = pd.read_sql(query, connection)
             self.log_message(f"データ抽出完了: {len(df)}件")
             
+            # 列名をリネーム（出荷数量→出荷数）
+            if '出荷数量' in df.columns:
+                df = df.rename(columns={'出荷数量': '出荷数'})
+            
+            # 出荷数・在庫数・不足数が存在しない場合は0を設定（後方互換性のため）
+            if '出荷数' not in df.columns:
+                df['出荷数'] = 0
+            if '在庫数' not in df.columns:
+                df['在庫数'] = 0
+            if '不足数' not in df.columns:
+                df['不足数'] = 0
+                self.log_message("不足数列が見つかりませんでした。0を設定しました。")
+            
             # t_現品票履歴から梱包工程の数量を取得
             self.update_progress(0.35, "梱包工程データを取得中...")
             packaging_data = self.get_packaging_quantities(connection, df)
@@ -2660,19 +2697,19 @@ class ModernDataExtractorUI:
             # 梱包・完了を数値型に変換してから整数に変換
             df['梱包・完了'] = pd.to_numeric(df['梱包・完了'], errors='coerce').fillna(0).astype(int)
             
-            # 不足数を計算: (在庫数+梱包・完了)-出荷数
-            self.update_progress(0.55, "不足数を計算中...")
-            if all(col in df.columns for col in ['出荷数', '在庫数', '梱包・完了']):
-                # 数値列を数値型に変換（梱包・完了は既に変換済み）
+            # 出荷数・在庫数・不足数を数値型に変換（不足数は直接取得した値を使用）
+            self.update_progress(0.55, "データを数値型に変換中...")
+            if '出荷数' in df.columns:
                 df['出荷数'] = pd.to_numeric(df['出荷数'], errors='coerce').fillna(0)
+            if '在庫数' in df.columns:
                 df['在庫数'] = pd.to_numeric(df['在庫数'], errors='coerce').fillna(0)
-                
-                # 不足数を計算: (在庫数+梱包・完了)-出荷数
-                df['不足数'] = (df['在庫数'] + df['梱包・完了']) - df['出荷数']
-                self.log_message("不足数を計算しました")
+            if '不足数' in df.columns:
+                # 不足数は直接取得した値を使用（計算しない）
+                df['不足数'] = pd.to_numeric(df['不足数'], errors='coerce').fillna(0)
+                self.log_message("不足数は直接取得した値を使用しました")
             else:
                 df['不足数'] = 0
-                self.log_message("不足数の計算に必要な列が見つかりませんでした")
+                self.log_message("不足数列が見つかりませんでした。0を設定しました。")
             
             # 出荷予定日をdatetime型に変換（既にSQL側でソート済み）
             if not df.empty and '出荷予定日' in df.columns:
@@ -3126,6 +3163,109 @@ class ModernDataExtractorUI:
             
         except Exception as e:
             self.log_message(f"梱包工程データの取得中にエラーが発生しました: {str(e)}")
+            return pd.DataFrame()
+
+    def get_shipping_stock_quantities(self, connection, main_df):
+        """別テーブルから出荷数・在庫数を取得（注文IDで結合）"""
+        try:
+            if not self.config.shipping_stock_table_name:
+                self.log_message("出荷数・在庫数テーブル名が設定されていません")
+                return pd.DataFrame()
+            
+            # メインデータから注文IDリストを取得
+            if '注文ID' not in main_df.columns or main_df.empty:
+                self.log_message("注文ID列が見つからないか、データが空です")
+                return pd.DataFrame()
+            
+            order_ids = main_df['注文ID'].dropna().unique().tolist()
+            if not order_ids:
+                self.log_message("注文IDデータが見つかりません")
+                return pd.DataFrame()
+            
+            self.log_message(f"出荷数・在庫数データを検索中: {len(order_ids)}件の注文ID")
+            
+            # AccessのODBCドライバーの制限を回避するため、pyodbcのカーソルを使って直接取得
+            try:
+                # まずテーブルの構造を確認
+                self.log_message("  テーブル構造を確認中...")
+                cursor = connection.cursor()
+                
+                # テーブル全体を取得（カーソルを使用）
+                self.log_message("  テーブル全体を取得中...")
+                table_name = self.config.shipping_stock_table_name
+                query = f"SELECT * FROM [{table_name}]"
+                
+                try:
+                    cursor.execute(query)
+                    columns = [column[0] for column in cursor.description]
+                    rows = cursor.fetchall()
+                    
+                    if not rows:
+                        self.log_message("  テーブルにデータが見つかりませんでした")
+                        cursor.close()
+                        return pd.DataFrame()
+                    
+                    self.log_message(f"  テーブルから {len(rows)}件のデータを取得しました")
+                    
+                    # DataFrameに変換
+                    shipping_stock_df = pd.DataFrame.from_records(rows, columns=columns)
+                    
+                    # 必要な列が存在するか確認
+                    required_columns = ['注文ID', '出荷数', '在庫数']
+                    missing_columns = [col for col in required_columns if col not in shipping_stock_df.columns]
+                    if missing_columns:
+                        self.log_message(f"  警告: 必要な列が見つかりません: {missing_columns}")
+                        self.log_message(f"  利用可能な列: {list(shipping_stock_df.columns)}")
+                        cursor.close()
+                        return pd.DataFrame()
+                    
+                    # 注文IDのセットを作成（高速検索のため）
+                    order_ids_set = set(str(oid) for oid in order_ids)
+                    
+                    # Python側でフィルタリング
+                    shipping_stock_df['注文ID_str'] = shipping_stock_df['注文ID'].astype(str)
+                    filtered_df = shipping_stock_df[shipping_stock_df['注文ID_str'].isin(order_ids_set)].copy()
+                    filtered_df = filtered_df.drop(columns=['注文ID_str'])
+                    
+                    # 必要な列のみを抽出
+                    filtered_df = filtered_df[required_columns].copy()
+                    
+                    if filtered_df.empty:
+                        self.log_message("  フィルタリング後、該当するデータが見つかりませんでした")
+                        cursor.close()
+                        return pd.DataFrame()
+                    
+                    self.log_message(f"  フィルタリング後: {len(filtered_df)}件のデータ")
+                    cursor.close()
+                    
+                except Exception as query_error:
+                    cursor.close()
+                    raise query_error
+                
+            except Exception as e:
+                self.log_message(f"  テーブル取得中にエラー: {str(e)}")
+                import traceback
+                self.log_message(f"  エラー詳細: {traceback.format_exc()}")
+                return pd.DataFrame()
+            
+            shipping_stock_df = filtered_df
+            
+            # 注文IDごとに集計（複数レコードがある場合は合計）
+            if len(shipping_stock_df) > len(order_ids):
+                # 複数レコードがある場合は注文IDごとに合計
+                shipping_stock_summary = shipping_stock_df.groupby('注文ID').agg({
+                    '出荷数': 'sum',
+                    '在庫数': 'sum'
+                }).reset_index()
+            else:
+                shipping_stock_summary = shipping_stock_df.copy()
+            
+            self.log_message(f"出荷数・在庫数データを取得しました: {len(shipping_stock_summary)}件")
+            
+            return shipping_stock_summary
+            
+        except Exception as e:
+            self.log_message(f"出荷数・在庫数データの取得中にエラーが発生しました: {str(e)}")
             return pd.DataFrame()
 
     def _get_inventory_table_structure(self, connection):
@@ -4272,8 +4412,13 @@ class ModernDataExtractorUI:
                     )
                     if not cleaning_lots_df.empty:
                         self.log_message(f"洗浄二次処理依頼から {len(cleaning_lots_df)}件のロットを取得しました")
+                    else:
+                        self.log_message("洗浄二次処理依頼からロットが取得できませんでした（データが空です）")
                 except Exception as e:
                     self.log_message(f"洗浄二次処理依頼からのロット取得中にエラーが発生しました: {str(e)}")
+                    import traceback
+                    self.log_message(f"エラー詳細: {traceback.format_exc()}")
+                    cleaning_lots_df = pd.DataFrame()
             
             # 洗浄二次処理依頼のロットを統合
             # 注意: 通常の在庫ロットの情報（出荷予定日を含む）は一切変更しない
