@@ -360,7 +360,6 @@ def _get_lots_from_access_batch(connection, requests: List[Dict]) -> pd.DataFram
         SELECT {columns_str}
         FROM [t_現品票履歴]
         WHERE {where_clause}
-        ORDER BY [指示日], [号機]
         """
         
         try:
@@ -407,6 +406,15 @@ def _get_lots_from_access_batch(connection, requests: List[Dict]) -> pd.DataFram
                 lots_df = pd.DataFrame(data, dtype=object)
             else:
                 lots_df = pd.DataFrame(columns=column_names)
+
+            # Access側の ORDER BY を避け、同等の安定ソートをpandas側で実施（結果の順序を維持）
+            sort_cols = []
+            if "指示日" in lots_df.columns:
+                sort_cols.append("指示日")
+            if "号機" in lots_df.columns:
+                sort_cols.append("号機")
+            if sort_cols and not lots_df.empty:
+                lots_df = lots_df.sort_values(sort_cols, na_position="last", kind="mergesort")
             
             elapsed_time = time.time() - start_time
             logger.info(f"バッチクエリ完了: {len(lots_df)}件のロットを取得 ({elapsed_time:.2f}秒)")

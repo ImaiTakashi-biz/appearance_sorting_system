@@ -2690,7 +2690,6 @@ class ModernDataExtractorUI:
             with perf_timer(logger, "access.main_query.read_sql"):
                 df = pd.read_sql(query, connection)
             self.update_progress(0.15, "データを抽出中...")
-            df = pd.read_sql(query, connection)
             self.log_message(f"データ抽出完了: {len(df)}件")
             
             # 列名をリネーム（出荷数量→出荷数）
@@ -2836,7 +2835,7 @@ class ModernDataExtractorUI:
         self.root.after(0, lambda: self.progress_bar.set(value))
         self.root.after(0, lambda: self.progress_label.configure(text=message))
     
-    def log_message(self, message: str) -> None:
+    def log_message(self, message: str, level: str = "info", channel: str = "UI") -> None:
         """
         ログメッセージの追加（loguruのみ使用）
         
@@ -2844,7 +2843,16 @@ class ModernDataExtractorUI:
             message: ログメッセージ
         """
         # print文を削除してloguruのみを使用（高速化）
-        logger.info(message)
+        level_normalized = (level or "info").lower().strip()
+        loguru_logger = logger.bind(channel=channel) if channel else logger
+        if level_normalized == "warning":
+            loguru_logger.warning(message)
+        elif level_normalized == "error":
+            loguru_logger.error(message)
+        elif level_normalized == "debug":
+            loguru_logger.debug(message)
+        else:
+            loguru_logger.info(message)
     
     def calculate_column_widths(self, df, columns, min_width=0, max_width=600):
         """
@@ -3158,12 +3166,26 @@ class ModernDataExtractorUI:
                 self.log_message("品番列が見つからないか、データが空です")
                 return pd.DataFrame()
             
-            product_numbers = main_df['品番'].dropna().unique().tolist()
+            product_numbers = sorted({
+                str(pn).strip()
+                for pn in main_df['品番'].dropna().unique().tolist()
+                if str(pn).strip()
+            })
             if not product_numbers:
                 self.log_message("品番データが見つかりません")
                 return pd.DataFrame()
             
             self.log_message(f"梱包工程データを検索中: {len(product_numbers)}件の品番")
+
+            cache_key = self._build_access_cache_key(
+                "packaging",
+                product_numbers,
+                ["%梱包%"],
+            )
+            cached_packaging = self._try_get_access_cache(cache_key)
+            if cached_packaging is not None:
+                self.log_message("Accessの梱包工程データをキャッシュから再利用しました")
+                return cached_packaging
             
             # Accessに集計を任せて転送量を削減（高速化）
             placeholders = ", ".join("?" for _ in product_numbers)
@@ -3171,10 +3193,10 @@ class ModernDataExtractorUI:
             SELECT 品番, SUM(数量) AS 梱包・完了
             FROM [t_現品票履歴]
             WHERE 品番 IN ({placeholders})
-              AND 現在工程名 LIKE ?
+              AND InStr(現在工程名, ?) > 0
             GROUP BY 品番
             """
-            params = list(product_numbers) + ["%梱包%"]
+            params = list(product_numbers) + ["梱包"]
 
             with perf_timer(logger, "access.packaging.read_sql"):
                 packaging_df = pd.read_sql(packaging_query, connection, params=params)
@@ -3184,6 +3206,7 @@ class ModernDataExtractorUI:
                 return pd.DataFrame()
 
             self.log_message(f"梱包工程データを取得しました: {len(packaging_df)}件")
+            self._store_access_cache(cache_key, packaging_df)
             return packaging_df
             
         except Exception as e:
@@ -3416,7 +3439,7 @@ class ModernDataExtractorUI:
 
             shortage_clause = " AND ".join(shortage_conditions)
 
-            # 不足ロット取得と登録済み品番ロット取得を同一クエリで実行し、登録済み品番側はキーワード絞り込みを適用しない
+            # 不足ロット取得と登録済み品番ロット取得を同一クエリで実行（登録済み側は後段のキーワード絞り込み対象外）
             if registered_product_numbers:
                 registered_placeholders = ", ".join("?" for _ in registered_product_numbers)
                 registered_clause = f"品番 IN ({registered_placeholders})"
@@ -3426,24 +3449,27 @@ class ModernDataExtractorUI:
                 product_clause = f"({shortage_clause})"
 
             where_conditions = [product_clause] + base_conditions
-
             where_clause = " AND ".join(where_conditions)
-            order_conditions = ["品番"]
-            if "指示日" in available_columns:
-                order_conditions.append("指示日 ASC")
-            elif "号機" in available_columns:
-                order_conditions.append("号機 ASC")
-            order_clause = ", ".join(order_conditions)
 
             lots_query = f"""
             SELECT {columns_str}
             FROM [t_現品票履歴]
             WHERE {where_clause}
-            ORDER BY {order_clause}
             """
 
             with perf_timer(logger, "access.lots_for_shortage.read_sql"):
                 lots_df = pd.read_sql(lots_query, connection, params=params)
+
+            # Access側の ORDER BY を避け、同等の安定ソートをpandas側で実施（結果の選択順序を維持）
+            sort_cols = []
+            if "品番" in lots_df.columns:
+                sort_cols.append("品番")
+            if "指示日" in lots_df.columns:
+                sort_cols.append("指示日")
+            elif "号機" in lots_df.columns:
+                sort_cols.append("号機")
+            if sort_cols:
+                lots_df = lots_df.sort_values(sort_cols, na_position="last", kind="mergesort")
 
             if lots_df.empty:
                 self.log_message("利用可能なロットが見つかりませんでした")
@@ -3532,21 +3558,24 @@ class ModernDataExtractorUI:
                 where_conditions.append("(現在工程名 IS NULL OR 現在工程名 NOT LIKE '%完了%')")
                 where_conditions.append("(現在工程名 IS NULL OR 現在工程名 NOT LIKE '%梱包%')")
             where_clause = " AND ".join(where_conditions)
-            order_conditions = ["品番"]
-            if "指示日" in available_columns:
-                order_conditions.append("指示日 ASC")
-            elif "号機" in available_columns:
-                order_conditions.append("号機 ASC")
-            order_clause = ", ".join(order_conditions)
-
             lots_query = f"""
             SELECT {columns_str}
             FROM [t_現品票履歴]
             WHERE {where_clause}
-            ORDER BY {order_clause}
             """
             with perf_timer(logger, "access.lots_for_registered.read_sql"):
                 lots_df = pd.read_sql(lots_query, connection, params=params)
+
+            # Access側の ORDER BY を避け、同等の安定ソートをpandas側で実施（結果の選択順序を維持）
+            sort_cols = []
+            if "品番" in lots_df.columns:
+                sort_cols.append("品番")
+            if "指示日" in lots_df.columns:
+                sort_cols.append("指示日")
+            elif "号機" in lots_df.columns:
+                sort_cols.append("号機")
+            if sort_cols:
+                lots_df = lots_df.sort_values(sort_cols, na_position="last", kind="mergesort")
             
             if lots_df.empty:
                 self.log_message("登録済み品番のロットが見つかりませんでした")
@@ -4458,6 +4487,7 @@ class ModernDataExtractorUI:
     def process_lot_assignment(self, connection, main_df, start_progress=0.65):
         """ロット割り当て処理のメイン処理"""
         try:
+            cleaning_lots_df = pd.DataFrame()
             # 不足数がマイナスのデータを抽出
             self.update_progress(start_progress + 0.05, "不足データを抽出中...")
             # main_dfが空の場合でも処理を続行できるようにする
@@ -4477,14 +4507,17 @@ class ModernDataExtractorUI:
                 
                 # 通常の在庫ロットを取得
                 self.update_progress(start_progress + 0.10, "利用可能なロットを取得中...")
+
                 with perf_timer(logger, "lots.get_available_for_shortage"):
                     lots_df = self.get_available_lots_for_shortage(connection, shortage_df)
-            
+             
             # 洗浄二次処理依頼からロットを取得（追加で取得）
-            cleaning_lots_df = pd.DataFrame()
-            if (self.config.google_sheets_url_cleaning and 
-                self.config.google_sheets_url_cleaning_instructions and 
-                self.config.google_sheets_credentials_path):
+            if (
+                cleaning_lots_df.empty
+                and self.config.google_sheets_url_cleaning
+                and self.config.google_sheets_url_cleaning_instructions
+                and self.config.google_sheets_credentials_path
+            ):
                 try:
                     self.update_progress(start_progress + 0.12, "洗浄二次処理依頼からロットを取得中...")
                     with perf_timer(logger, "lots.get_cleaning_lots"):
@@ -7919,6 +7952,12 @@ class ModernDataExtractorUI:
     
     def cleanup_resources(self):
         """リソースのクリーンアップ"""
+        if getattr(self, "_cleanup_done", False):
+            return
+        if getattr(self, "_cleanup_in_progress", False):
+            return
+
+        self._cleanup_in_progress = True
         try:
             logger.info("リソースをクリーンアップしています...")
             
@@ -7943,9 +7982,12 @@ class ModernDataExtractorUI:
                 logger.debug(f"Seat chart server の停止でエラー（無視）: {e}")
             
             logger.info("リソースのクリーンアップが完了しました")
+            self._cleanup_done = True
             
         except Exception as e:
             logger.error(f"リソースクリーンアップ中にエラーが発生しました: {e}")
+        finally:
+            self._cleanup_in_progress = False
     
     def quit_application(self):
         """アプリケーションを完全に終了する"""

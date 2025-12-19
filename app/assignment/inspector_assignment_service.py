@@ -184,13 +184,20 @@ class InspectorAssignmentManager:
         else:
             # 従来通り即座に出力
             if self.log_callback:
-                self.log_callback(message)
-        if level == 'warning':
-            logger.warning(message)
-        elif level == 'error':
-            logger.error(message)
-        else:
-            logger.info(message)
+                try:
+                    self.log_callback(message, level=level, channel="ASSIGN")
+                    return
+                except TypeError:
+                    self.log_callback(message)
+                    return
+
+            loguru_logger = logger.bind(channel="ASSIGN")
+            if level == 'warning':
+                loguru_logger.warning(message)
+            elif level == 'error':
+                loguru_logger.error(message)
+            else:
+                loguru_logger.info(message)
 
     def _flush_log_buffer(self) -> None:
         """ログバッファをフラッシュ（まとめて出力）"""
@@ -200,13 +207,20 @@ class InspectorAssignmentManager:
         # バッファ内のログをまとめて出力
         for message, level in self.log_buffer:
             if self.log_callback:
-                self.log_callback(message)
+                try:
+                    self.log_callback(message, level=level, channel="ASSIGN")
+                    continue
+                except TypeError:
+                    self.log_callback(message)
+                    continue
+
+            loguru_logger = logger.bind(channel="ASSIGN")
             if level == 'warning':
-                logger.warning(message)
+                loguru_logger.warning(message)
             elif level == 'error':
-                logger.error(message)
+                loguru_logger.error(message)
             else:
-                logger.info(message)
+                loguru_logger.info(message)
         
         # バッファをクリア
         self.log_buffer.clear()
@@ -1727,7 +1741,11 @@ class InspectorAssignmentManager:
                     
                     # 品名単位の制約が適用された場合のログ
                     if already_assigned_to_same_product_name:
-                        self.log_message(f"当日洗浄上がり品/先行検査品 {product_number} (品名: {product_name_str}): 同じ品名の他の品番に既に割り当てられた検査員 {len(already_assigned_to_same_product_name)}人を除外しました（品名単位の制約）")
+                        self.log_message(
+                            f"当日洗浄上がり品/先行検査品 {product_number} (品名: {product_name_str}): "
+                            f"同じ品名の他の品番に既に割り当てられた検査員 {len(already_assigned_to_same_product_name)}人を除外しました（品名単位の制約）",
+                            debug=True,
+                        )
                     
                     # 同一品番の複数ロットがある場合、各ロットに均等に検査員を分散させる
                     # 利用可能な検査員数をロット数で割って、各ロットに割り当て可能な検査員数を計算
@@ -1799,7 +1817,10 @@ class InspectorAssignmentManager:
                         if len(already_assigned_to_same_product_name) > 0:
                             constraint_types.append("品名単位")
                         constraint_msg = "・".join(constraint_types) if constraint_types else "制約"
-                        self.log_message(f"当日洗浄上がり品/先行検査品 {product_number}: 既に割り当てられた検査員 {excluded_count}人を除外しました（{constraint_msg}の制約、ロット数: {lot_count}）")
+                        self.log_message(
+                            f"当日洗浄上がり品/先行検査品 {product_number}: 既に割り当てられた検査員 {excluded_count}人を除外しました（{constraint_msg}の制約、ロット数: {lot_count}）",
+                            debug=True,
+                        )
                     
                     # 【改善】当日洗浄上がり品は最優先のため、候補が不足している場合は制約を緩和
                     if len(available_inspectors) < required_inspectors:
@@ -2746,10 +2767,10 @@ class InspectorAssignmentManager:
             new_team_codes = {insp['コード'] for insp in new_team_inspectors}
             
             # デバッグ情報を出力
-            self.log_message(f"品番 '{product_number}' の検査員を検索中...")
-            self.log_message(f"工程番号: '{process_number}'")
+            self.log_message(f"品番 '{product_number}' の検査員を検索中...", debug=True)
+            self.log_message(f"工程番号: '{process_number}'", debug=True)
             if new_team_codes:
-                self.log_message(f"新規品対応チームメンバー（優先度調整対象）: {sorted(new_team_codes)}")
+                self.log_message(f"新規品対応チームメンバー（優先度調整対象）: {sorted(new_team_codes)}", debug=True)
             
             # スキルマスタから該当する品番の行を取得（完全一致のみ）
             skill_rows = skill_master_df[skill_master_df.iloc[:, 0] == product_number]
@@ -2829,15 +2850,21 @@ class InspectorAssignmentManager:
                     # スキルマスタの工程番号が空欄の場合は、工程番号が一致しなくてもOK
                     if pd.isna(skill_process_number) or skill_process_number == '':
                         filtered_skill_rows.append(skill_row)
-                        self.log_message(f"工程番号が空欄のため、工程番号条件を無視して追加")
+                        self.log_message("工程番号が空欄のため、工程番号条件を無視して追加", debug=True)
                     elif str(skill_process_number) == str(process_number):
                         filtered_skill_rows.append(skill_row)
-                        self.log_message(f"工程番号 '{process_number}' でマッチしました")
+                        self.log_message(f"工程番号 '{process_number}' でマッチしました", debug=True)
                     else:
-                        self.log_message(f"工程番号 '{skill_process_number}' は条件に一致しません")
+                        self.log_message(f"工程番号 '{skill_process_number}' は条件に一致しません", debug=True)
             
             if not filtered_skill_rows:
-                self.log_message(f"工程番号 '{process_number}' に一致するスキル情報が見つかりません")
+                warning_key = ("skill_process_not_found", str(product_number).strip(), str(process_number).strip())
+                if warning_key not in self.logged_warnings:
+                    self.logged_warnings.add(warning_key)
+                    self.log_message(
+                        f"工程番号 '{process_number}' に一致するスキル情報が見つかりません",
+                        level="warning",
+                    )
                 # 出荷予定日が間近で他に割当てられない場合のみ新規品対応チームを使用
                 if allow_new_team_fallback and shipping_date is not None:
                     shipping_date = pd.to_datetime(shipping_date, errors='coerce')
@@ -3034,7 +3061,13 @@ class InspectorAssignmentManager:
                                 debug=True
                             )
                     else:
-                        self.log_message(f"警告: 検査員コード '{inspector_code}' が検査員マスタに見つかりません")
+                        warning_key = ("inspector_code_not_found", str(inspector_code).strip())
+                        if warning_key not in self.logged_warnings:
+                            self.logged_warnings.add(warning_key)
+                            self.log_message(
+                                f"警告: 検査員コード '{inspector_code}' が検査員マスタに見つかりません",
+                                level="warning",
+                            )
                         # 検査員マスタの全コードを表示
                         self.log_message(
                             f"検査員マスタの利用可能なコード: {list(inspector_master_df['#ID'].values)}",
@@ -3186,7 +3219,7 @@ class InspectorAssignmentManager:
                 available_inspectors = fixed_inspectors + other_inspectors
                 self.log_message(f"固定検査員を優先配置: {len(fixed_inspectors)}名を先頭に配置（設定: {len(fixed_inspector_names)}名）")
             
-            self.log_message(f"利用可能な検査員: {len(available_inspectors)}人")
+            self.log_message(f"利用可能な検査員: {len(available_inspectors)}人", debug=True)
             
             # 利用可能な検査員の詳細をログ出力（デバッグモードのみ）
             if available_inspectors:
@@ -6176,7 +6209,8 @@ class InspectorAssignmentManager:
                                 # 【改善】タブーリストに含まれるロットはスキップ（フェーズ間スラッシング防止）
                                 if lot_index in self.tabu_list:
                                     self.log_message(
-                                        f"偏り是正: ロットインデックス {lot_index} (品番: {product_number}) はタブーリストに含まれるため再割当てをスキップします（フェーズ間スラッシング防止）"
+                                        f"偏り是正: ロットインデックス {lot_index} (品番: {product_number}) はタブーリストに含まれるため再割当てをスキップします（フェーズ間スラッシング防止）",
+                                        debug=True,
                                     )
                                     continue
 
@@ -6197,9 +6231,17 @@ class InspectorAssignmentManager:
                                         
                                         if current_inspector_name in fixed_inspector_names:
                                             # 固定検査員が割り当てられている場合は再割当てをスキップ
-                                            self.log_message(
-                                                f"偏り是正: 品番 '{product_number}' の固定検査員 '{current_inspector_name}' は保護のため再割当てをスキップします",
+                                            once_key = (
+                                                "bias_skip_fixed_inspector",
+                                                str(product_number).strip(),
+                                                str(current_inspector_name).strip(),
                                             )
+                                            if once_key not in self.logged_warnings:
+                                                self.logged_warnings.add(once_key)
+                                                self.log_message(
+                                                    f"偏り是正: 品番 '{product_number}' の固定検査員 '{current_inspector_name}' は保護のため再割当てをスキップします",
+                                                    debug=True,
+                                                )
                                             continue
                                 
                                 # 再割当て可能かチェック（出荷予定日が古い順に処理）
@@ -6229,9 +6271,17 @@ class InspectorAssignmentManager:
                                             two_weeks_later = current_date + timedelta(days=14)
                                             if shipping_date_date <= two_weeks_later:
                                                 # 新規品で出荷予定日が2週間以内の場合は再割当てをスキップ
-                                                self.log_message(
-                                                    f"偏り是正: 新規品 {product_number} (出荷予定日: {shipping_date_date}) は保護のため再割当てをスキップします",
+                                                once_key = (
+                                                    "bias_skip_new_product",
+                                                    str(product_number).strip(),
+                                                    str(shipping_date_date),
                                                 )
+                                                if once_key not in self.logged_warnings:
+                                                    self.logged_warnings.add(once_key)
+                                                    self.log_message(
+                                                        f"偏り是正: 新規品 {product_number} (出荷予定日: {shipping_date_date}) は保護のため再割当てをスキップします",
+                                                        debug=True,
+                                                    )
                                                 continue
                                 
                                 # 利用可能な検査員を取得
@@ -7274,10 +7324,13 @@ class InspectorAssignmentManager:
                             f"アプローチ3: 当日洗浄上がり品 {unassigned_product_number} の割り当てが完了しました（検査員人数: {len(reassigned_inspectors)}人）"
                         )
                     else:
-                        self.log_message(
-                            f"⚠️ 警告: 当日洗浄上がり品 {unassigned_product_number} に再割当てできる検査員が見つかりませんでした",
-                            level='warning'
-                        )
+                        warning_key = ("same_day_cleaning.reassign_failed", str(unassigned_product_number).strip())
+                        if warning_key not in self.logged_warnings:
+                            self.logged_warnings.add(warning_key)
+                            self.log_message(
+                                f"⚠️ 警告: 当日洗浄上がり品 {unassigned_product_number} に再割当てできる検査員が見つかりませんでした",
+                                level='warning'
+                            )
             
             # 未割当のロットを取得（出荷予定日順）
             unassigned_indices = []
@@ -7476,7 +7529,11 @@ class InspectorAssignmentManager:
                             if len(already_assigned_to_same_product_name) > 0:
                                 constraint_types.append("品名単位")
                             constraint_msg = "・".join(constraint_types) if constraint_types else "制約"
-                            self.log_message(f"未割当ロット再処理: 当日洗浄上がり品/先行検査品 {product_number}: 既に割り当てられた検査員 {excluded_count}人を除外しました（{constraint_msg}の制約）")
+                            self.log_message(
+                                f"未割当ロット再処理: 当日洗浄上がり品/先行検査品 {product_number}: "
+                                f"既に割り当てられた検査員 {excluded_count}人を除外しました（{constraint_msg}の制約）",
+                                debug=True,
+                            )
                         
                         # 候補が0人の場合は、優先順位が高いため制約を緩和して元の候補を使用
                         if len(available_inspectors) == 0:
