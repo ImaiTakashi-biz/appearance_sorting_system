@@ -266,15 +266,18 @@ def _get_lots_from_access_batch(connection, requests: List[Dict]) -> pd.DataFram
 
                 escaped_machine = machine.replace("'", "''")
 
-                # Accessは巨大なINリストが遅くなることがあるため、
-                # 日付が少ない場合のみINを使い、それ以外は範囲にフォールバックする。
-                if len(dates_sorted) <= 7:
-                    date_literals = ", ".join([f"#{d}#" for d in dates_sorted])
-                    per_machine_conditions.append(f"([号機] = '{escaped_machine}' AND [指示日] IN ({date_literals}))")
-                else:
-                    start_str = pd.to_datetime(dates_sorted[0]).strftime('#%Y-%m-%d#')
-                    end_str = pd.to_datetime(dates_sorted[-1]).strftime('#%Y-%m-%d#')
-                    per_machine_conditions.append(f"([号機] = '{escaped_machine}' AND [指示日] >= {start_str} AND [指示日] <= {end_str})")
+                # 範囲指定（>= / <=）は余計な日付もヒットして取得行数が増えやすく、
+                # かえって遅くなるケースがあるため、INで「必要な日付だけ」に限定する。
+                # ただしINが巨大になりすぎないよう、分割して OR で連結する。
+                chunk_size = 14
+                in_clauses: List[str] = []
+                for i in range(0, len(dates_sorted), chunk_size):
+                    chunk = dates_sorted[i:i + chunk_size]
+                    date_literals = ", ".join([f"#{d}#" for d in chunk])
+                    in_clauses.append(f"[指示日] IN ({date_literals})")
+                per_machine_conditions.append(
+                    f"([号機] = '{escaped_machine}' AND ({' OR '.join(in_clauses)}))"
+                )
 
             # machine無しのものは従来条件で追加（まれ）
             extra_conditions: List[str] = []
@@ -407,15 +410,6 @@ def _get_lots_from_access_batch(connection, requests: List[Dict]) -> pd.DataFram
             else:
                 lots_df = pd.DataFrame(columns=column_names)
 
-            # Access側の ORDER BY を避け、同等の安定ソートをpandas側で実施（結果の順序を維持）
-            sort_cols = []
-            if "指示日" in lots_df.columns:
-                sort_cols.append("指示日")
-            if "号機" in lots_df.columns:
-                sort_cols.append("号機")
-            if sort_cols and not lots_df.empty:
-                lots_df = lots_df.sort_values(sort_cols, na_position="last", kind="mergesort")
-            
             elapsed_time = time.time() - start_time
             logger.info(f"バッチクエリ完了: {len(lots_df)}件のロットを取得 ({elapsed_time:.2f}秒)")
             
@@ -435,6 +429,15 @@ def _get_lots_from_access_batch(connection, requests: List[Dict]) -> pd.DataFram
                 # 日付文字列をクリーニングしてパース
                 lots_df['指示日'] = lots_df['指示日'].apply(clean_date_string)
                 lots_df['指示日'] = pd.to_datetime(lots_df['指示日'], errors='coerce')
+
+                # Access側の ORDER BY を避け、同等の安定ソートをpandas側で実施（結果の順序を維持）
+                sort_cols = []
+                if "指示日" in lots_df.columns:
+                    sort_cols.append("指示日")
+                if "号機" in lots_df.columns:
+                    sort_cols.append("号機")
+                if sort_cols and not lots_df.empty:
+                    lots_df = lots_df.sort_values(sort_cols, na_position="last", kind="mergesort")
             
             # 現在工程名列を空欄として追加（ロット情報に含めないため）
             if '現在工程名' not in lots_df.columns:
