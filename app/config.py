@@ -10,6 +10,9 @@ from pathlib import Path
 from app.env_loader import load_env_file
 from app.utils.path_resolver import resolve_resource_path
 from loguru import logger
+
+# ログ分類（app_.logの視認性向上）
+logger = logger.bind(channel="CFG")
 import pyodbc
 
 
@@ -147,7 +150,7 @@ class DatabaseConfig:
         available_drivers = []
         try:
             drivers = pyodbc.drivers()
-            logger.info(f"システムにインストールされている全ODBCドライバー数: {len(drivers)}")
+            logger.debug(f"システムにインストールされている全ODBCドライバー数: {len(drivers)}")
             
             # Access関連のドライバーを検索（より広範囲に）
             access_keywords = ['Access', 'ACE', 'Jet']
@@ -156,7 +159,7 @@ class DatabaseConfig:
                 if any(keyword.lower() in driver_lower for keyword in access_keywords):
                     available_drivers.append(driver)
             
-            logger.info(f"利用可能なAccessドライバー: {available_drivers}")
+            logger.debug(f"利用可能なAccessドライバー: {available_drivers}")
             
             # デバッグ用：ドライバーが見つからない場合の詳細情報
             if not available_drivers:

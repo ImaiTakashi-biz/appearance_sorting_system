@@ -7,6 +7,9 @@ import os
 from datetime import datetime, date
 from pathlib import Path
 from loguru import logger
+
+# ログ分類（app_.logの視認性向上）
+logger = logger.bind(channel="SVC:VAC")
 from app.env_loader import load_env_file
 from app.export.google_sheets_exporter_service import GoogleSheetsExporter
 

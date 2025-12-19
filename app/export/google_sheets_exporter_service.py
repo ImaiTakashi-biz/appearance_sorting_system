@@ -7,6 +7,9 @@ from typing import Optional, Any, List, Dict
 import pandas as pd
 from datetime import datetime
 from loguru import logger
+
+# ログ分類（app_.logの視認性向上）
+logger = logger.bind(channel="EXT:SHEETS")
 import re
 
 

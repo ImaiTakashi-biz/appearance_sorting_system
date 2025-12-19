@@ -7,6 +7,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from loguru import logger
 
+# ログ分類（app_.logの視認性向上）
+logger = logger.bind(channel="UI:SEAT")
+
 from app.seat_ui import SEATING_JSON_PATH, SEATING_HTML_PATH, save_seating_chart
 
 SEAT_CHART_PORT_FILE_NAME = "seat_chart_server_port.txt"

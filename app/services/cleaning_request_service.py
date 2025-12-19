@@ -12,6 +12,9 @@ from loguru import logger
 
 from app.export.google_sheets_exporter_service import GoogleSheetsExporter
 
+# ログ分類（app_.logの視認性向上）
+logger = logger.bind(channel="SVC:CLEAN")
+
 # 正規表現パターンの事前コンパイル（高速化）
 _MACHINE_PATTERN = re.compile(r'([A-Z]-\d+)')
 _DATE_PATTERN = re.compile(r'(\d{1,2}/\d{1,2})')
@@ -269,108 +272,36 @@ def _get_lots_from_access_batch(connection, requests: List[Dict]) -> pd.DataFram
         
         try:
             import time
-            logger.info(f"バッチクエリを実行中... (条件数: {len(all_conditions)})")
             start_time = time.time()
             
             # pyodbcのカーソルを直接使用してデータを取得（日付パースエラーを回避）
             cursor = connection.cursor()
             
-            try:
-                cursor.execute(query)
-            except Exception as exec_error:
-                logger.error(f"SQLクエリの実行に失敗しました: {str(exec_error)}")
-                logger.error(f"クエリ: {query[:500]}...")
-                # CStr関数が使えない場合は、元のクエリを試行
-                logger.warning("CStr関数を使用したクエリが失敗しました。元のクエリを試行します。")
-                query_fallback = f"""
-                SELECT {columns_str}
-                FROM [t_現品票履歴]
-                WHERE {where_clause}
-                ORDER BY [指示日], [号機]
-                """
-                try:
-                    cursor.execute(query_fallback)
-                    query = query_fallback
-                except Exception as fallback_error:
-                    logger.error(f"フォールバッククエリの実行も失敗しました: {str(fallback_error)}")
-                    raise
+            cursor.execute(query)
             
             # 列名を取得
-            try:
-                column_names = [desc[0] for desc in cursor.description]
-            except Exception as desc_error:
-                logger.error(f"列名の取得に失敗しました: {str(desc_error)}")
-                raise
+            column_names = [desc[0] for desc in cursor.description]
             
             # データを取得（すべて文字列として取得）
-            rows = []
-            try:
-                # fetchall()を使用（エラーが発生した場合は空のリストを返す）
-                try:
-                    rows = cursor.fetchall()
-                except Exception as fetch_all_error:
-                    # fetchall()でエラーが発生した場合、fetchone()で1行ずつ取得を試行
-                    logger.warning(f"fetchall()でエラーが発生しました: {str(fetch_all_error)}。fetchone()で1行ずつ取得を試行します。")
-                    try:
-                        row = cursor.fetchone()
-                        while row is not None:
-                            try:
-                                rows.append(row)
-                                row = cursor.fetchone()
-                            except Exception as fetch_one_error:
-                                logger.warning(f"行の取得中にエラーが発生しました: {str(fetch_one_error)}。この行をスキップします。")
-                                # 次の行を取得
-                                try:
-                                    row = cursor.fetchone()
-                                except:
-                                    break
-                    except Exception as fetch_one_loop_error:
-                        logger.error(f"fetchone()ループでエラーが発生しました: {str(fetch_one_loop_error)}")
-                        # 取得できたデータは処理を続行
-                        if not rows:
-                            raise
-            except Exception as fetch_error:
-                logger.error(f"データの取得中にエラーが発生しました: {str(fetch_error)}")
-                # エラーの詳細を確認
-                import traceback
-                logger.error(f"トレースバック: {traceback.format_exc()}")
-                # エラーが発生しても、取得できたデータは処理を続行
-                if not rows:
-                    raise
+            rows = cursor.fetchall()
             
             # DataFrameに変換
             if rows:
                 # 各行を辞書に変換（すべて文字列として扱う）
                 data = []
-                for row_idx, row in enumerate(rows):
-                    try:
-                        row_dict = {}
-                        for idx, col_name in enumerate(column_names):
-                            try:
-                                value = row[idx]
-                                # Noneの場合はそのまま
-                                if value is None:
-                                    row_dict[col_name] = None
-                                # 日付型の場合は文字列に変換（「（完）」などの文字が含まれる可能性があるため）
-                                elif isinstance(value, (datetime, pd.Timestamp)):
-                                    # 日付型の場合は文字列に変換
-                                    row_dict[col_name] = str(value)
-                                elif isinstance(value, str):
-                                    # 既に文字列の場合はそのまま
-                                    row_dict[col_name] = value
-                                else:
-                                    # その他の型は文字列に変換
-                                    row_dict[col_name] = str(value)
-                            except Exception as col_error:
-                                # 列の処理でエラーが発生した場合、Noneを設定
-                                logger.warning(f"行 {row_idx+1}, 列 {col_name} の処理中にエラーが発生しました: {str(col_error)}。Noneを設定します。")
-                                row_dict[col_name] = None
-                        data.append(row_dict)
-                    except Exception as row_error:
-                        logger.warning(f"行 {row_idx+1} の処理中にエラーが発生しました: {str(row_error)}。この行をスキップします。")
-                        import traceback
-                        logger.debug(f"行 {row_idx+1} のエラー詳細: {traceback.format_exc()}")
-                        continue
+                for row in rows:
+                    row_dict = {}
+                    for idx, col_name in enumerate(column_names):
+                        value = row[idx]
+                        if value is None:
+                            row_dict[col_name] = None
+                        elif isinstance(value, (datetime, pd.Timestamp)):
+                            row_dict[col_name] = str(value)
+                        elif isinstance(value, str):
+                            row_dict[col_name] = value
+                        else:
+                            row_dict[col_name] = str(value)
+                    data.append(row_dict)
                 
                 # DataFrameを作成（日付の自動パースを無効化）
                 lots_df = pd.DataFrame(data, dtype=object)
@@ -384,33 +315,18 @@ def _get_lots_from_access_batch(connection, requests: List[Dict]) -> pd.DataFram
             if '指示日' in lots_df.columns:
                 def clean_date_string(date_val):
                     """日付文字列から不要な文字（「（完）」など）を除去"""
-                    try:
-                        if pd.isna(date_val) or date_val is None or date_val == '':
-                            return None
-                        # まず文字列に変換
-                        date_str = str(date_val)
-                        # 「（完）」「（完了）」などの文字を除去
-                        date_str = re.sub(r'[（(].*?[）)]', '', date_str)
-                        # 前後の空白を除去
-                        date_str = date_str.strip()
-                        return date_str if date_str else None
-                    except Exception as e:
-                        logger.warning(f"日付文字列のクリーニング中にエラーが発生しました: {str(e)}, 値: {date_val}")
+                    if pd.isna(date_val) or date_val is None or date_val == '':
                         return None
+                    date_str = str(date_val)
+                    # 「（完）」「（完了）」などの文字を除去
+                    date_str = re.sub(r'[（(].*?[）)]', '', date_str)
+                    # 前後の空白を除去
+                    date_str = date_str.strip()
+                    return date_str if date_str else None
                 
-                # 日付文字列をクリーニング（エラーが発生しても処理を続行）
-                try:
-                    lots_df['指示日'] = lots_df['指示日'].apply(clean_date_string)
-                except Exception as clean_error:
-                    logger.warning(f"日付文字列のクリーニング中にエラーが発生しました: {str(clean_error)}。指示日列をNoneに設定します。")
-                    lots_df['指示日'] = None
-                
-                # クリーニング後の日付文字列をパース（エラーは無視）
-                try:
-                    lots_df['指示日'] = pd.to_datetime(lots_df['指示日'], errors='coerce')
-                except Exception as parse_error:
-                    logger.warning(f"日付文字列のパース中にエラーが発生しました: {str(parse_error)}。指示日列をNoneに設定します。")
-                    lots_df['指示日'] = None
+                # 日付文字列をクリーニングしてパース
+                lots_df['指示日'] = lots_df['指示日'].apply(clean_date_string)
+                lots_df['指示日'] = pd.to_datetime(lots_df['指示日'], errors='coerce')
             
             # 現在工程名列を空欄として追加（ロット情報に含めないため）
             if '現在工程名' not in lots_df.columns:
@@ -563,13 +479,11 @@ def _get_today_requests_from_sheets(exporter: GoogleSheetsExporter, sheet_name: 
         
         log(f"シート「{sheet_name}」から {len(all_values)}行のデータを取得しました")
         
-        today = datetime.now().strftime('%Y/%m/%d')
         today_dt = datetime.now()
+        today = today_dt.strftime('%Y/%m/%d')
         today_rows = []
-        date_format_attempts = []
-        
-        log(f"今日の日付（検索対象）: {today} ({today_dt.strftime('%Y-%m-%d')})")
-        
+        parse_failed_count = 0
+
         for row_idx, row in enumerate(all_values, start=2):
             if not row or not row[0]:
                 continue
@@ -590,46 +504,37 @@ def _get_today_requests_from_sheets(exporter: GoogleSheetsExporter, sheet_name: 
             if date_str == today:
                 matched = True
             else:
-                # 2. 日付パースを試行（複数の形式に対応）
-                parsed_date = None
-                date_formats = ['%Y/%m/%d', '%Y-%m-%d', '%m/%d', '%m-%d', '%Y/%m/%d %H:%M:%S']
-                
-                for fmt in date_formats:
+                # 2. よくある形式はdatetimeで高速に判定し、失敗時のみpandasに委譲
+                parsed_dt = None
+                for fmt in ("%Y/%m/%d", "%Y-%m-%d", "%Y/%m/%d %H:%M:%S", "%Y-%m-%d %H:%M:%S"):
                     try:
-                        parsed_date = pd.to_datetime(date_str, errors='coerce', format=fmt)
-                        if pd.notna(parsed_date):
-                            break
+                        parsed_dt = datetime.strptime(date_str, fmt)
+                        break
                     except Exception:
                         continue
-                
-                # フォーマット指定なしでパースを試行
-                if pd.isna(parsed_date):
+
+                if parsed_dt is not None:
+                    if parsed_dt.date() == today_dt.date():
+                        matched = True
+                else:
                     try:
                         parsed_date = pd.to_datetime(date_str, errors='coerce')
                     except Exception:
-                        pass
-                
-                if pd.notna(parsed_date):
-                    if isinstance(parsed_date, pd.Timestamp):
+                        parsed_date = pd.NaT
+
+                    if pd.notna(parsed_date) and isinstance(parsed_date, pd.Timestamp):
                         if parsed_date.date() == today_dt.date():
                             matched = True
-                            date_format_attempts.append(f"行{row_idx}: {date_str} → {parsed_date.strftime('%Y-%m-%d')} (一致)")
-                        else:
-                            date_format_attempts.append(f"行{row_idx}: {date_str} → {parsed_date.strftime('%Y-%m-%d')} (不一致)")
-                    else:
-                        date_format_attempts.append(f"行{row_idx}: {date_str} → パース失敗")
+                    elif pd.isna(parsed_date):
+                        parse_failed_count += 1
             
             if matched:
                 row_data = row[:11] if len(row) >= 11 else row + [''] * (11 - len(row))
                 today_rows.append(row_data)
-                log(f"  行{row_idx}: 今日の日付と一致する行を発見しました（日付: {date_str}）")
-        
-        if date_format_attempts and len(date_format_attempts) <= 10:
-            # 最初の10件の日付パース結果をログに出力（デバッグ用）
-            for attempt in date_format_attempts[:10]:
-                log(f"  {attempt}")
-        
+
         log(f"今日の日付と一致する行: {len(today_rows)}件")
+        if parse_failed_count:
+            logger.debug(f"日付パース失敗: {parse_failed_count}件（先頭列）")
         
         return today_rows
         
@@ -858,22 +763,9 @@ def get_cleaning_lots(
             log(f"バッチ処理で取得したロット数: {len(batch_lots_df)}件")
             
             if not batch_lots_df.empty:
-                # 日付列を事前に変換してキャッシュ
+                # 指示日列を正規化（YYYY-MM-DD形式に統一）
                 if "指示日" in batch_lots_df.columns:
-                    # 日付文字列から不要な文字（「（完）」など）を除去
-                    def clean_date_string(date_val):
-                        if pd.isna(date_val):
-                            return date_val
-                        date_str = str(date_val)
-                        # 「（完）」「（完了）」などの文字を除去
-                        date_str = re.sub(r'[（(].*?[）)]', '', date_str)
-                        # 前後の空白を除去
-                        date_str = date_str.strip()
-                        return date_str
-                    
-                    batch_lots_df['_指示日_cleaned'] = batch_lots_df['指示日'].apply(clean_date_string)
-                    batch_lots_df['_指示日_parsed'] = pd.to_datetime(batch_lots_df['_指示日_cleaned'], errors='coerce')
-                    batch_lots_df['_指示日_str'] = batch_lots_df['_指示日_parsed'].dt.strftime('%Y-%m-%d')
+                    batch_lots_df['_指示日_normalized'] = batch_lots_df['指示日'].apply(_normalize_instruction_date)
                 
                 # 各リクエストに対応するロットを分離
                 filtered_count = 0
@@ -884,17 +776,21 @@ def get_cleaning_lots(
                     mask = pd.Series([True] * len(filtered_df), index=filtered_df.index)
                     
                     if req.get("instruction_date"):
-                        mask = mask & (filtered_df['_指示日_str'] == req["instruction_date"])
+                        normalized_req_date = _normalize_instruction_date(req["instruction_date"])
+                        if normalized_req_date:
+                            mask = mask & (filtered_df['_指示日_normalized'] == normalized_req_date)
                     
                     if req.get("machine") and "号機" in filtered_df.columns:
                         mask = mask & (filtered_df['号機'] == req["machine"])
                     
                     if req.get("date_list"):
-                        date_set = set(req["date_list"])
-                        mask = mask & filtered_df['_指示日_str'].isin(date_set)
+                        normalized_date_list = [_normalize_instruction_date(d) for d in req["date_list"]]
+                        normalized_date_set = {d for d in normalized_date_list if d}
+                        if normalized_date_set:
+                            mask = mask & filtered_df['_指示日_normalized'].isin(normalized_date_set)
                     
                     filtered_df = filtered_df[mask].copy()
-                    filtered_df = filtered_df.drop(columns=['_指示日_parsed', '_指示日_str', '_指示日_cleaned'], errors='ignore')
+                    filtered_df = filtered_df.drop(columns=['_指示日_normalized'], errors='ignore')
                     
                     if not filtered_df.empty:
                         all_lots.append(filtered_df)
@@ -913,9 +809,6 @@ def get_cleaning_lots(
         if cleaning_instructions:
             log(f"洗浄指示からロットを取得中... ({len(cleaning_instructions)}件の指示)")
             
-            # 洗浄指示の内容をログに出力（デバッグ用）
-            for idx, instruction in enumerate(cleaning_instructions, 1):
-                log(f"  洗浄指示 {idx}: 号機={instruction.get('号機', '')}, 品番={instruction.get('品番', '')}, 品名={instruction.get('品名', '')}, 指示日={instruction.get('指示日', '')}")
             
             # 洗浄指示データをDataFrameに変換
             instruction_rows = []

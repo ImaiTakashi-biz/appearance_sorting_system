@@ -35,6 +35,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import re
 from loguru import logger
+
+# ログ分類（app_.logの視認性向上）
+logger = logger.bind(channel="UI")
 from app.config import DatabaseConfig
 import calendar
 import locale
@@ -335,6 +338,7 @@ class ModernDataExtractorUI:
         import sys
         
         logger.remove()  # デフォルトのハンドラーを削除
+        logger.configure(extra={"channel": "-"})  # 既定の分類（ログの見やすさ向上）
         
         # ログディレクトリの決定（NAS共有対応）
         if self.config and self.config.log_dir_path:
@@ -369,33 +373,7 @@ class ModernDataExtractorUI:
         if not hasattr(self, 'current_log_file') or not use_existing_file:
             self.current_log_file = log_file
         
-        # コンソール出力用のフィルタ関数（重要なログのみ）
-        def console_filter(record):
-            """重要なログのみコンソールに出力"""
-            message = record["message"]
-            level = record["level"].name
-            # WARNING以上、または重要なマーカーを含むメッセージのみ
-            return (level in ["WARNING", "ERROR", "CRITICAL"] or 
-                   "⚠️" in message or 
-                   "❌" in message or 
-                   "📊" in message or
-                   "✅" in message or
-                   "開始" in message or
-                   "完了" in message or
-                   "失敗" in message)
-        
-        # コンソール出力（重要なログのみ）
-        def _safe_console_output(message: str) -> None:
-            # print文を削除してloguruのみを使用（何もしない）
-            return
-
-        # コンソール出力（WARNING以上のみ）
-        logger.add(
-            _safe_console_output,
-            level="WARNING",  # WARNING以上のみコンソールに出力
-            format="<yellow>{time:HH:mm:ss}</yellow> | <level>{level: <8}</level> | {message}",
-            filter=console_filter
-        )
+        # GUIアプリのためコンソール出力は行わない
         
         # ログファイルの冒頭にユーザーアカウント名を記載（ファイル作成前に書き込む）
         try:
@@ -443,24 +421,25 @@ class ModernDataExtractorUI:
         logger.add(
             log_file,
             level="INFO",  # INFO以上をファイルに記録
-            format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} | {message}",
-            rotation="10 MB",  # 10MBごとにローテーション
+            format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {extra[channel]} | {name}:{line} | {message}",
+            rotation="5 MB",  # 5MBごとにローテーション（ログ肥大化を抑制）
             retention="30 days",  # 30日間保持
+            compression="zip",  # ローテーション後に圧縮して容量削減
             encoding="utf-8",
             backtrace=True,  # ERROR時はスタックトレースを出力
-            diagnose=True,  # ERROR時は診断情報を出力
+            diagnose=False,  # 容量が大きくなりやすい詳細診断は抑制
             enqueue=True,  # スレッドセーフな出力
             catch=True  # ログ出力中のエラーをキャッチ
         )
         
-        logger.info(f"📝 ログファイル: {log_file.absolute()}")
+        logger.bind(channel="SYS").info(f"ログファイル: {log_file.absolute()}")
     
     def load_config(self):
         """設定の読み込み"""
         try:
             self.config = DatabaseConfig()
             if self.config.validate_config():
-                logger.info("設定の読み込みが完了しました")
+                logger.bind(channel="SYS").info("設定の読み込みが完了しました")
                 
                 # Googleスプレッドシートエクスポーターを初期化
                 if self.config.google_sheets_url and self.config.google_sheets_credentials_path:
@@ -1454,7 +1433,7 @@ class ModernDataExtractorUI:
                 # UIが構築されている場合はリストを更新
                 if self.registered_list_container is not None:
                     self.update_registered_list()
-                logger.info(f"✅ 登録済み品番リストを読み込みました: {len(self.registered_products)}件")
+                logger.bind(channel="SYS").info(f"登録済み品番リストを読み込みました: {len(self.registered_products)}件")
         except Exception as e:
             logger.error(f"登録済み品番リストの読み込みに失敗しました: {str(e)}")
             self.registered_products = []
@@ -6540,9 +6519,9 @@ class ModernDataExtractorUI:
             messagebox.showwarning("Seat chart", "Inspector assignment data is not available.")
             return
         lots_by_inspector = self._serialize_inspector_lots_for_seating()
-        logger.info(
-            "serialize_inspector_lots_for_seating result: {} entries",
-            {k: len(v) for k, v in lots_by_inspector.items()},
+        logger.bind(channel="UI:SEAT").debug(
+            "serialize_inspector_lots_for_seating inspectors={}",
+            len(lots_by_inspector),
         )
         if not lots_by_inspector:
             messagebox.showinfo("Seat chart", "No lot data is available for seating layout export.")
@@ -6579,7 +6558,7 @@ class ModernDataExtractorUI:
         try:
             seating_path = Path(html_path)
             if not seating_path.exists():
-                logger.warning("Seat chart HTMLが見つかりません: %s", html_path)
+                logger.warning("Seat chart HTMLが見つかりません: {}", html_path)
                 messagebox.showwarning("Seat chart", f"座席表HTMLが存在しません: {html_path}")
                 return
             file_url = ""
@@ -6592,7 +6571,7 @@ class ModernDataExtractorUI:
                 self._seat_chart_server.start()
                 server_url = self._seat_chart_server.get_html_url(html_path)
             except Exception as exc:
-                logger.debug("Seat chart server の起動に失敗しました: %s", exc)
+                logger.debug("Seat chart server の起動に失敗しました: {}", exc)
             target_url = server_url or file_url
             opened = False
             try:
@@ -6606,9 +6585,9 @@ class ModernDataExtractorUI:
                 except Exception:
                     logger.debug("os.startfile による座席表 HTML の起動に失敗しました", exc_info=True)
             if opened:
-                logger.info("Seat chart opened: %s", target_url)
+                logger.bind(channel="UI:SEAT").debug("Seat chart opened: {}", target_url)
             else:
-                logger.warning("Seat chart HTML を自動的に開けませんでした: %s", html_path)
+                logger.warning("Seat chart HTML を自動的に開けませんでした: {}", html_path)
                 messagebox.showwarning("Seat chart", f"座席表HTMLを開くことができませんでした。\n{html_path}")
         except Exception as exc:
             logger.error("Seat chart HTML を開けませんでした", exc_info=True)
@@ -6940,9 +6919,9 @@ class ModernDataExtractorUI:
         df = self.current_inspector_data
         if df is None or df.empty:
             return {}
-        logger.info("serialize_inspector_lots_for_seating columns={}", df.columns.tolist())
+        logger.bind(channel="UI:SEAT").debug("serialize_inspector_lots_for_seating columns={}", df.columns.tolist())
         if not df.empty:
-            logger.info("sample row: {}", df.iloc[0].to_dict())
+            logger.bind(channel="UI:SEAT").debug("sample row: {}", df.iloc[0].to_dict())
         inspector_cols = [
             col for col in df.columns
             if col.startswith("検査員") and col[len("検査員"):].isdigit()

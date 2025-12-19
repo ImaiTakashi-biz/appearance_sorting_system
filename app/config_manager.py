@@ -10,6 +10,9 @@ from pathlib import Path
 from typing import Optional
 from loguru import logger
 
+# ログ分類（app_.logの視認性向上）
+logger = logger.bind(channel="CFG")
+
 
 class AppConfigManager:
     """アプリケーション設定管理クラス"""

@@ -2988,7 +2988,8 @@ class InspectorAssignmentManager:
                                 interpretation = vacation_info.get("interpretation", "")
                                 self.log_message(
                                     f"検査員 '{inspector_name}' は終日休暇のため候補から除外 "
-                                    f"(休暇コード: {code}, 解釈: {interpretation})"
+                                    f"(休暇コード: {code}, 解釈: {interpretation})",
+                                    debug=True
                                 )
                                 continue
                         
@@ -3002,26 +3003,35 @@ class InspectorAssignmentManager:
                             'is_new_team': is_new_team_member  # 新規品対応チームメンバーの場合はTrue
                         })
                         if is_new_team_member:
-                            self.log_message(f"検査員 '{inspector_name}' (コード: {inspector_code}, スキル: {skill_value}, 新規品対応チーム) を追加")
+                            self.log_message(
+                                f"検査員 '{inspector_name}' (コード: {inspector_code}, スキル: {skill_value}, 新規品対応チーム) を追加",
+                                debug=True
+                            )
                         else:
-                            self.log_message(f"検査員 '{inspector_name}' (コード: {inspector_code}, スキル: {skill_value}) を追加")
+                            self.log_message(
+                                f"検査員 '{inspector_name}' (コード: {inspector_code}, スキル: {skill_value}) を追加",
+                                debug=True
+                            )
                     else:
                         self.log_message(f"警告: 検査員コード '{inspector_code}' が検査員マスタに見つかりません")
                         # 検査員マスタの全コードを表示
-                        self.log_message(f"検査員マスタの利用可能なコード: {list(inspector_master_df['#ID'].values)}")
+                        self.log_message(
+                            f"検査員マスタの利用可能なコード: {list(inspector_master_df['#ID'].values)}",
+                            debug=True
+                        )
                 
                 # デバッグ: スキル値の要約をログに出力
                 if skill_values_found:
-                    self.log_message(f"📊 スキル値1,2,3が見つかった検査員: {', '.join(skill_values_found)}")
+                    self.log_message(f"📊 スキル値1,2,3が見つかった検査員: {', '.join(skill_values_found)}", debug=True)
                 else:
-                    self.log_message(f"⚠️ スキル値1,2,3が見つかった検査員: 0人")
+                    self.log_message("⚠️ スキル値1,2,3が見つかった検査員: 0人", debug=True)
                 
                 if skill_values_excluded:
                     excluded_summary = ', '.join(skill_values_excluded[:20])  # 最初の20件のみ表示
                     if len(skill_values_excluded) > 20:
                         excluded_summary += f" ... (他{len(skill_values_excluded) - 20}件)"
-                    self.log_message(f"📊 除外されたスキル値: {excluded_summary}")
-                    self.log_message(f"📊 除外された検査員数: {len(skill_values_excluded)}人")
+                    self.log_message(f"📊 除外されたスキル値: {excluded_summary}", debug=True)
+                    self.log_message(f"📊 除外された検査員数: {len(skill_values_excluded)}人", debug=True)
             
             # 【追加】固定検査員を優先的に配置
             fixed_inspector_names = self._collect_fixed_inspector_names(product_number, target_process_name)
@@ -4475,13 +4485,15 @@ class InspectorAssignmentManager:
                     if relax_work_hours and daily_hours + additional_hours > allowed_max_hours:
                         self.log_message(
                             f"検査員 '{inspector['氏名']}' は勤務時間完全超過のため除外 "
-                            f"(今日: {daily_hours:.1f}h + {additional_hours:.1f}h > {allowed_max_hours:.1f}h)"
+                            f"(今日: {daily_hours:.1f}h + {additional_hours:.1f}h > {allowed_max_hours:.1f}h)",
+                            debug=True
                         )
                         continue
                     elif not relax_work_hours:
                         self.log_message(
                             f"検査員 '{inspector['氏名']}' は勤務時間超過のため除外 "
-                            f"(今日: {daily_hours:.1f}h + {additional_hours:.1f}h > {allowed_max_hours - 0.05:.1f}h)"
+                            f"(今日: {daily_hours:.1f}h + {additional_hours:.1f}h > {allowed_max_hours - 0.05:.1f}h)",
+                            debug=True
                         )
                         continue
                     else:
@@ -4490,7 +4502,8 @@ class InspectorAssignmentManager:
                         self.log_message(
                             f"検査員 '{inspector['氏名']}' は勤務時間上限に近いが含める（緩和モード） "
                             f"(今日: {daily_hours:.1f}h + {additional_hours:.1f}h = {daily_hours + additional_hours:.1f}h, "
-                            f"最大勤務時間: {max_daily_hours:.1f}h)"
+                            f"最大勤務時間: {max_daily_hours:.1f}h)",
+                            debug=True
                         )
 
                 # 改善ポイント: 4時間上限ルールの2段階化
@@ -4503,7 +4516,8 @@ class InspectorAssignmentManager:
                 if projected_hours >= PRODUCT_LIMIT_DRAFT_THRESHOLD:
                     self.log_message(
                         f"検査員 '{inspector['氏名']}' は品番 {product_number} の累計が {product_hours:.1f}h で、"
-                        f"追加すると {projected_hours:.1f}h となるため（{PRODUCT_LIMIT_DRAFT_THRESHOLD}h以上）今回は除外します"
+                        f"追加すると {projected_hours:.1f}h となるため（{PRODUCT_LIMIT_DRAFT_THRESHOLD}h以上）今回は除外します",
+                        debug=True
                     )
                     continue
 
@@ -4513,7 +4527,8 @@ class InspectorAssignmentManager:
                 self.log_message(
                     f"検査員 '{inspector['氏名']}' は利用可能 "
                     f"(今日: {daily_hours:.1f}h + {additional_hours:.1f}h = {daily_hours + additional_hours:.1f}h, "
-                    f"最大勤務時間: {max_daily_hours:.1f}h, 品番累計予定: {projected_hours:.1f}h)"
+                    f"最大勤務時間: {max_daily_hours:.1f}h, 品番累計予定: {projected_hours:.1f}h)",
+                    debug=True
                 )
 
             # 【追加】固定検査員を優先的に配置
@@ -7552,7 +7567,8 @@ class InspectorAssignmentManager:
                                 if daily_hours + divided_time > allowed_max_hours:
                                     self.log_message(
                                         f"未割当ロット再処理（勤務時間緩和）: 検査員 '{insp['氏名']}' は勤務時間完全超過のため除外 "
-                                        f"(今日: {daily_hours:.1f}h + {divided_time:.1f}h > {allowed_max_hours:.1f}h)"
+                                        f"(今日: {daily_hours:.1f}h + {divided_time:.1f}h > {allowed_max_hours:.1f}h)",
+                                        debug=True
                                     )
                                     continue
                                 else:
@@ -7560,7 +7576,8 @@ class InspectorAssignmentManager:
                                     insp['__near_work_hours_limit'] = True
                                     self.log_message(
                                         f"未割当ロット再処理（勤務時間緩和）: 検査員 '{insp['氏名']}' は勤務時間上限に近いが含める "
-                                        f"(今日: {daily_hours:.1f}h + {divided_time:.1f}h = {daily_hours + divided_time:.1f}h, 最大: {allowed_max_hours:.1f}h)"
+                                        f"(今日: {daily_hours:.1f}h + {divided_time:.1f}h = {daily_hours + divided_time:.1f}h, 最大: {allowed_max_hours:.1f}h)",
+                                        debug=True
                                     )
                             
                             if projected_hours >= 3.5:
