@@ -38,6 +38,8 @@ from loguru import logger
 
 # ログ分類（app_.logの視認性向上）
 logger = logger.bind(channel="UI")
+
+from app.utils.perf import perf_timer
 from app.config import DatabaseConfig
 import calendar
 import locale
@@ -337,9 +339,6 @@ class ModernDataExtractorUI:
         from datetime import datetime
         import sys
         
-        logger.remove()  # デフォルトのハンドラーを削除
-        logger.configure(extra={"channel": "-"})  # 既定の分類（ログの見やすさ向上）
-        
         # ログディレクトリの決定（NAS共有対応）
         if self.config and self.config.log_dir_path:
             # config.envで設定されている場合はそれを使用（NAS共有対応）
@@ -372,6 +371,18 @@ class ModernDataExtractorUI:
         # 起動時に作成されたログファイルのパスを保存（データ抽出時の統合用）
         if not hasattr(self, 'current_log_file') or not use_existing_file:
             self.current_log_file = log_file
+
+        # 既に同一のログ構成で初期化済みなら何もしない（重複出力/ハンドラー再設定を抑制）
+        try:
+            perf_log_file = log_file.with_name(f"{log_file.stem}_perf.log")
+            config_key = (str(log_file), str(perf_log_file))
+            if getattr(self, "_logging_config_key", None) == config_key:
+                return
+        except Exception:
+            pass
+
+        logger.remove()  # デフォルトのハンドラーを削除
+        logger.configure(extra={"channel": "-"})  # 既定の分類（ログの見やすさ向上）
         
         # GUIアプリのためコンソール出力は行わない
         
@@ -431,8 +442,36 @@ class ModernDataExtractorUI:
             enqueue=True,  # スレッドセーフな出力
             catch=True  # ログ出力中のエラーをキャッチ
         )
-        
+
         logger.bind(channel="SYS").info(f"ログファイル: {log_file.absolute()}")
+        try:
+            self._logging_config_key = (str(log_file), str(log_file.with_name(f"{log_file.stem}_perf.log")))
+        except Exception:
+            pass
+
+        # パフォーマンス計測ログ（DEBUGのみ）を別ファイルへ出力
+        try:
+            perf_log_file = log_file.with_name(f"{log_file.stem}_perf.log")
+
+            def _perf_filter(record):
+                return record.get("extra", {}).get("channel") == "PERF"
+
+            logger.add(
+                perf_log_file,
+                level="DEBUG",
+                format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {extra[channel]} | {name}:{line} | {message}",
+                rotation="1 MB",
+                retention="30 days",
+                compression="zip",
+                encoding="utf-8",
+                enqueue=True,
+                catch=True,
+                filter=_perf_filter,
+            )
+            logger.bind(channel="SYS").info(f"PERFログファイル: {perf_log_file.absolute()}")
+        except Exception:
+            # 計測ログの設定に失敗しても本処理は継続
+            pass
     
     def load_config(self):
         """設定の読み込み"""
@@ -2498,7 +2537,8 @@ class ModernDataExtractorUI:
         success = False  # 成功フラグを追加
         try:
             # 既存のログファイルに追記（起動時のログファイルに統合）
-            self.setup_logging(use_existing_file=True)
+            with perf_timer(logger, "logging.setup"):
+                self.setup_logging(use_existing_file=True)
             
             self.log_message(f"データ抽出を開始します")
             self.log_message(f"抽出期間: {start_date} ～ {end_date}")
@@ -2524,22 +2564,25 @@ class ModernDataExtractorUI:
             if vacation_sheets_url and credentials_path:
                 try:
                     # 月全体の休暇予定を読み込む
-                    vacation_data = load_vacation_schedule(
-                        sheets_url=vacation_sheets_url,
-                        credentials_path=credentials_path,
-                        year=extraction_date.year,
-                        month=extraction_date.month
-                    )
+                    with perf_timer(logger, "vacation.load"):
+                        vacation_data = load_vacation_schedule(
+                            sheets_url=vacation_sheets_url,
+                            credentials_path=credentials_path,
+                            year=extraction_date.year,
+                            month=extraction_date.month
+                        )
                     
                     # 対象日の休暇情報を取得
-                    vacation_data_for_date = get_vacation_for_date(vacation_data, extraction_date)
+                    with perf_timer(logger, "vacation.filter_for_date"):
+                        vacation_data_for_date = get_vacation_for_date(vacation_data, extraction_date)
                     
                     self.log_message(f"休暇予定を取得しました: {len(vacation_data_for_date)}名")
                     
                     # 検査員マスタを読み込む（休暇情報のフィルタリング用）
                     if inspector_master_df is None:
                         try:
-                            inspector_master_df = self.load_inspector_master_cached()
+                            with perf_timer(logger, "inspector_master.load_cached"):
+                                inspector_master_df = self.load_inspector_master_cached()
                         except Exception as e:
                             self.log_message(f"警告: 検査員マスタの読み込みに失敗しました: {str(e)}")
                     
@@ -2581,12 +2624,14 @@ class ModernDataExtractorUI:
             
             # データベース接続
             self.update_progress(0.02, "データベースに接続中...")
-            connection = self.config.get_connection()
+            with perf_timer(logger, "db.connect"):
+                connection = self.config.get_connection()
             self.log_message("データベース接続が完了しました")
             
             # 検査対象.csvを読み込む（キャッシュ機能を使用）
             self.update_progress(0.05, "検査対象CSVを読み込み中...")
-            self.inspection_target_keywords = self.load_inspection_target_csv_cached()
+            with perf_timer(logger, "inspection_target_csv.load_cached"):
+                self.inspection_target_keywords = self.load_inspection_target_csv_cached()
             
             # テーブル構造を確認（キャッシュ機能付き・高速化）
             import time
@@ -2604,7 +2649,8 @@ class ModernDataExtractorUI:
             if actual_columns is None:
                 self.update_progress(0.08, "テーブル構造を確認中...")
                 columns_query = f"SELECT TOP 1 * FROM [{self.config.access_table_name}]"
-                sample_df = pd.read_sql(columns_query, connection)
+                with perf_timer(logger, "access.table_structure.read_sql"):
+                    sample_df = pd.read_sql(columns_query, connection)
                 
                 if sample_df.empty:
                     self.log_message("テーブルにデータが見つかりません")
@@ -2641,6 +2687,8 @@ class ModernDataExtractorUI:
                 query = f"SELECT {columns_str} FROM [{self.config.access_table_name}]"
             
             # データの抽出
+            with perf_timer(logger, "access.main_query.read_sql"):
+                df = pd.read_sql(query, connection)
             self.update_progress(0.15, "データを抽出中...")
             df = pd.read_sql(query, connection)
             self.log_message(f"データ抽出完了: {len(df)}件")
@@ -2660,7 +2708,8 @@ class ModernDataExtractorUI:
             
             # t_現品票履歴から梱包工程の数量を取得
             self.update_progress(0.35, "梱包工程データを取得中...")
-            packaging_data = self.get_packaging_quantities(connection, df)
+            with perf_timer(logger, "packaging_quantities"):
+                packaging_data = self.get_packaging_quantities(connection, df)
             
             # 梱包数量をメインデータに結合
             self.update_progress(0.45, "データを処理中...")
@@ -2709,7 +2758,8 @@ class ModernDataExtractorUI:
             # 不足数がマイナスの品番に対してロット割り当てを実行
             # 出荷予定日からデータが無い場合でも、先行検査品と洗浄品の処理を実行
             self.update_progress(0.65, "ロット割り当て処理中...")
-            self.process_lot_assignment(connection, df, start_progress=0.65)
+            with perf_timer(logger, "lot_assignment"):
+                self.process_lot_assignment(connection, df, start_progress=0.65)
             
             # 完了
             self.update_progress(1.0, "データ抽出が完了しました")
@@ -3115,30 +3165,26 @@ class ModernDataExtractorUI:
             
             self.log_message(f"梱包工程データを検索中: {len(product_numbers)}件の品番")
             
-            # 品番のリストをSQL用の文字列に変換
-            product_numbers_str = "', '".join([str(pn) for pn in product_numbers])
-            
-            # t_現品票履歴から梱包工程のデータを取得
+            # Accessに集計を任せて転送量を削減（高速化）
+            placeholders = ", ".join("?" for _ in product_numbers)
             packaging_query = f"""
-            SELECT 品番, 数量
+            SELECT 品番, SUM(数量) AS 梱包・完了
             FROM [t_現品票履歴]
-            WHERE 品番 IN ('{product_numbers_str}')
-            AND 現在工程名 LIKE '%梱包%'
+            WHERE 品番 IN ({placeholders})
+              AND 現在工程名 LIKE ?
+            GROUP BY 品番
             """
-            
-            packaging_df = pd.read_sql(packaging_query, connection)
+            params = list(product_numbers) + ["%梱包%"]
+
+            with perf_timer(logger, "access.packaging.read_sql"):
+                packaging_df = pd.read_sql(packaging_query, connection, params=params)
             
             if packaging_df.empty:
                 self.log_message("梱包工程のデータが見つかりませんでした")
                 return pd.DataFrame()
-            
-            # 品番ごとに数量を合計
-            packaging_summary = packaging_df.groupby('品番')['数量'].sum().reset_index()
-            packaging_summary.columns = ['品番', '梱包・完了']
-            
-            self.log_message(f"梱包工程データを取得しました: {len(packaging_summary)}件")
 
-            return packaging_summary
+            self.log_message(f"梱包工程データを取得しました: {len(packaging_df)}件")
+            return packaging_df
             
         except Exception as e:
             self.log_message(f"梱包工程データの取得中にエラーが発生しました: {str(e)}")
@@ -3325,6 +3371,15 @@ class ModernDataExtractorUI:
                 self.log_message("Accessのロットデータをキャッシュから再利用しました")
                 return cached_lots
 
+            registered_product_numbers = []
+            if self.registered_products:
+                registered_product_numbers = [
+                    item.get('品番', '')
+                    for item in self.registered_products
+                    if item.get('品番', '')
+                ]
+                registered_product_numbers = sorted({str(pn).strip() for pn in registered_product_numbers if str(pn).strip()})
+
             actual_columns, has_rows = self._get_inventory_table_structure(connection)
             if not has_rows:
                 self.log_message("t_現品票履歴テーブルにデータが見つかりません")
@@ -3339,26 +3394,38 @@ class ModernDataExtractorUI:
 
             columns_str = ", ".join([f"[{col}]" for col in available_columns])
 
-            placeholders = ", ".join("?" for _ in shortage_products)
-            where_conditions = [f"品番 IN ({placeholders})"]
+            shortage_placeholders = ", ".join("?" for _ in shortage_products)
+            shortage_conditions = [f"品番 IN ({shortage_placeholders})"]
             params = list(shortage_products)
 
             if "現在工程名" in available_columns:
                 # NULL の場合に NOT LIKE が NULL となり除外されてしまうため、NULL は許容して後段で扱う
-                where_conditions.append("(現在工程名 IS NULL OR 現在工程名 NOT LIKE '%完了%')")
-                where_conditions.append("(現在工程名 IS NULL OR 現在工程名 NOT LIKE '%梱包%')")
+                base_conditions = [
+                    "(現在工程名 IS NULL OR 現在工程名 NOT LIKE '%完了%')",
+                    "(現在工程名 IS NULL OR 現在工程名 NOT LIKE '%梱包%')",
+                ]
+
+                # キーワード絞り込み（OR/LIKE）はAccess側で遅くなりやすいので、
+                # まず品番IN中心で取得し、後段で不足品番側のみpandasで絞り込む（結果は同一）
                 if self.inspection_target_keywords:
-                    keyword_conditions = []
-                    for keyword in self.inspection_target_keywords:
-                        escaped_keyword = keyword.replace("%", "[%]").replace("_", "[_]")
-                        keyword_conditions.append("現在工程名 LIKE ?")
-                        params.append(f"%{escaped_keyword}%")
-                    if keyword_conditions:
-                        keyword_filter = "(" + " OR ".join(keyword_conditions) + ")"
-                        where_conditions.append(keyword_filter)
-                        self.log_message(f"検査対象キーワードでフィルタリング: {len(keyword_conditions)}件のキーワード")
+                    self.log_message(f"検査対象キーワードでフィルタリング: {len(self.inspection_target_keywords)}件のキーワード")
                 else:
                     self.log_message("検査対象キーワードが設定されていません。全てのロットを対象とします。")
+            else:
+                base_conditions = []
+
+            shortage_clause = " AND ".join(shortage_conditions)
+
+            # 不足ロット取得と登録済み品番ロット取得を同一クエリで実行し、登録済み品番側はキーワード絞り込みを適用しない
+            if registered_product_numbers:
+                registered_placeholders = ", ".join("?" for _ in registered_product_numbers)
+                registered_clause = f"品番 IN ({registered_placeholders})"
+                params.extend(registered_product_numbers)
+                product_clause = f"(({shortage_clause}) OR ({registered_clause}))"
+            else:
+                product_clause = f"({shortage_clause})"
+
+            where_conditions = [product_clause] + base_conditions
 
             where_clause = " AND ".join(where_conditions)
             order_conditions = ["品番"]
@@ -3375,16 +3442,44 @@ class ModernDataExtractorUI:
             ORDER BY {order_clause}
             """
 
-            lots_df = pd.read_sql(lots_query, connection, params=params)
+            with perf_timer(logger, "access.lots_for_shortage.read_sql"):
+                lots_df = pd.read_sql(lots_query, connection, params=params)
 
             if lots_df.empty:
                 self.log_message("利用可能なロットが見つかりませんでした")
                 return pd.DataFrame()
 
-            self._store_access_cache(cache_key, lots_df)
+            # 不足品番だけ返す（登録済み品番分はキャッシュに保持して二重クエリを回避）
+            shortage_lots_df = lots_df[lots_df["品番"].isin(shortage_products)].copy()
 
-            self.log_message(f"利用可能なロットを取得しました: {len(lots_df)}件")
-            return lots_df
+            # 不足品番側のみ、検査対象キーワードで絞り込み（Access側のOR/LIKEを避ける）
+            if (
+                not shortage_lots_df.empty
+                and self.inspection_target_keywords
+                and "現在工程名" in shortage_lots_df.columns
+            ):
+                with perf_timer(logger, "lots.shortage.keyword_filter"):
+                    process_series = shortage_lots_df["現在工程名"].astype(str)
+                    keyword_mask = pd.Series(False, index=shortage_lots_df.index, dtype=bool)
+                    for keyword in self.inspection_target_keywords:
+                        if not isinstance(keyword, str) or not keyword.strip():
+                            continue
+                        keyword_mask |= process_series.str.contains(keyword.strip(), na=False, regex=False)
+                    shortage_lots_df = shortage_lots_df[keyword_mask].copy()
+
+            self._store_access_cache(cache_key, shortage_lots_df)
+
+            if registered_product_numbers:
+                registered_cache_key = self._build_access_cache_key(
+                    "registered",
+                    registered_product_numbers
+                )
+                registered_lots_df = lots_df[ lots_df["品番"].isin(registered_product_numbers) ].copy()
+                if not registered_lots_df.empty:
+                    self._store_access_cache(registered_cache_key, registered_lots_df)
+
+            self.log_message(f"利用可能なロットを取得しました: {len(shortage_lots_df)}件")
+            return shortage_lots_df
 
         except Exception as e:
             self.log_message(f"利用可能ロットの取得中にエラーが発生しました: {str(e)}")
@@ -3450,7 +3545,8 @@ class ModernDataExtractorUI:
             WHERE {where_clause}
             ORDER BY {order_clause}
             """
-            lots_df = pd.read_sql(lots_query, connection, params=params)
+            with perf_timer(logger, "access.lots_for_registered.read_sql"):
+                lots_df = pd.read_sql(lots_query, connection, params=params)
             
             if lots_df.empty:
                 self.log_message("登録済み品番のロットが見つかりませんでした")
@@ -3473,13 +3569,21 @@ class ModernDataExtractorUI:
                 return assignment_df
             
             # 登録済み品番のロットを取得
-            registered_lots_df = self.get_registered_products_lots(connection)
+            with perf_timer(logger, "lots.registered.get_registered_products_lots"):
+                registered_lots_df = self.get_registered_products_lots(connection)
             
             if registered_lots_df.empty:
                 return assignment_df
             
             # 登録済み品番ごとに処理
             additional_assignments = []
+
+            main_row_by_product = {}
+            if main_df is not None and not main_df.empty and '品番' in main_df.columns:
+                try:
+                    main_row_by_product = main_df.dropna(subset=['品番']).drop_duplicates('品番').set_index('品番')
+                except Exception:
+                    main_row_by_product = {}
             
             for registered_item in self.registered_products:
                 product_number = registered_item.get('品番', '')
@@ -3496,43 +3600,44 @@ class ModernDataExtractorUI:
                 # 指示日順でソート（生産日の古い順）
                 process_filter = registered_item.get('工程名', '').strip()
                 if process_filter:
-                    process_keywords = [
-                        keyword.strip()
-                        for keyword in re.split(r'[／/]', process_filter)
-                        if keyword.strip()
-                    ]
-                    if not process_keywords:
-                        process_keywords = [process_filter]
-                    process_columns = [col for col in ['現在工程名', '現在工程二次処理', '工程名'] if col in product_lots.columns]
-                    if process_columns:
-                        has_process_data = any(
-                            product_lots[col].astype(str).str.strip().ne('').any()
-                            for col in process_columns
-                        )
-                        if has_process_data:
-                            mask = pd.Series(False, index=product_lots.index, dtype=bool)
-                            for col in process_columns:
-                                column_data = product_lots[col].astype(str)
-                                column_mask = pd.Series(False, index=product_lots.index, dtype=bool)
-                                for keyword in process_keywords:
-                                    column_mask |= column_data.str.contains(keyword, na=False, regex=False)
-                                mask |= column_mask
-                            if not mask.any():
+                    with perf_timer(logger, f"lots.registered.process_filter[{product_number}]"):
+                        process_keywords = [
+                            keyword.strip()
+                            for keyword in re.split(r'[／/]', process_filter)
+                            if keyword.strip()
+                        ]
+                        if not process_keywords:
+                            process_keywords = [process_filter]
+                        process_columns = [col for col in ['現在工程名', '現在工程二次処理', '工程名'] if col in product_lots.columns]
+                        if process_columns:
+                            has_process_data = any(
+                                product_lots[col].astype(str).str.strip().ne('').any()
+                                for col in process_columns
+                            )
+                            if has_process_data:
+                                mask = pd.Series(False, index=product_lots.index, dtype=bool)
+                                for col in process_columns:
+                                    column_data = product_lots[col].astype(str)
+                                    column_mask = pd.Series(False, index=product_lots.index, dtype=bool)
+                                    for keyword in process_keywords:
+                                        column_mask |= column_data.str.contains(keyword, na=False, regex=False)
+                                    mask |= column_mask
+                                if not mask.any():
+                                    self.log_message(
+                                        f"工程名「{process_filter}」に一致するロットが見つかりません: {product_number}"
+                                    )
+                                    continue
+                                product_lots = product_lots[mask].copy()
+                            else:
                                 self.log_message(
-                                    f"工程名「{process_filter}」に一致するロットが見つかりません: {product_number}"
+                                    f"工程名「{process_filter}」を指定しましたが、現在工程名が未記載のため割当をスキップします: {product_number}"
                                 )
                                 continue
-                            product_lots = product_lots[mask].copy()
                         else:
                             self.log_message(
-                                f"工程名「{process_filter}」を指定しましたが、現在工程名が未記載のため割当をスキップします: {product_number}"
+                                f"工程名「{process_filter}」を指定しましたが、照合可能な工程名列がありません（割当をスキップ）: {product_number}"
                             )
                             continue
-                    else:
-                        self.log_message(
-                            f"工程名「{process_filter}」を指定しましたが、照合可能な工程名列がありません（割当をスキップ）: {product_number}"
-                        )
-                        continue
                 if product_lots.empty:
                     continue
                 if process_filter:
@@ -3541,65 +3646,65 @@ class ModernDataExtractorUI:
                     )
 
                 if '指示日' in product_lots.columns:
-                    product_lots = product_lots.copy()
-                    product_lots['_指示日_ソート用'] = product_lots['指示日'].apply(
-                        lambda x: str(x) if pd.notna(x) else ''
-                    )
-                    product_lots = product_lots.sort_values('_指示日_ソート用', na_position='last')
-                    product_lots = product_lots.drop(columns=['_指示日_ソート用'])
+                    with perf_timer(logger, f"lots.registered.sort[{product_number}]"):
+                        product_lots = product_lots.copy()
+                        product_lots['_指示日_ソート用'] = product_lots['指示日'].apply(
+                            lambda x: str(x) if pd.notna(x) else ''
+                        )
+                        product_lots = product_lots.sort_values('_指示日_ソート用', na_position='last')
+                        product_lots = product_lots.drop(columns=['_指示日_ソート用'])
                 
                 # 検査可能ロット数／日を考慮してロットを割り当て
                 assigned_count = 0
                 lot_cols = {col: idx for idx, col in enumerate(product_lots.columns)}
-                
-                for lot in product_lots.itertuples(index=False):
-                    if assigned_count >= max_lots_per_day:
-                        break
-                    
-                    # main_dfから該当品番の情報を取得
-                    product_in_main = main_df[main_df['品番'] == product_number]
-                    
-                    if not product_in_main.empty:
-                        main_row = product_in_main.iloc[0]
-                    else:
-                        # main_dfに存在しない場合は、ロットの情報のみを使用
+
+                main_row = None
+                if isinstance(main_row_by_product, pd.DataFrame) and product_number in main_row_by_product.index:
+                    try:
+                        main_row = main_row_by_product.loc[product_number]
+                    except Exception:
                         main_row = None
-                    
-                    lot_quantity = int(lot[lot_cols['数量']]) if pd.notna(lot[lot_cols['数量']]) else 0
-                    
-                    # 出荷予定日は「先行検査」とする
-                    shipping_date = "先行検査"
-                    
-                    # 品名と客先を取得（main_dfから取得できない場合はロットデータから取得）
-                    product_name = (
-                        main_row.get('品名', '') if main_row is not None else 
-                        (lot[lot_cols.get('品名', -1)] if '品名' in lot_cols and pd.notna(lot[lot_cols.get('品名', -1)]) else '')
-                    )
-                    customer_name = (
-                        main_row.get('客先', '') if main_row is not None else 
-                        (lot[lot_cols.get('客先', -1)] if '客先' in lot_cols and pd.notna(lot[lot_cols.get('客先', -1)]) else '')
-                    )
-                    
-                    assignment_result = {
-                        '出荷予定日': shipping_date,
-                        '品番': product_number,
-                        '品名': product_name,
-                        '客先': customer_name,
-                        '出荷数': int(main_row.get('出荷数', 0)) if main_row is not None else 0,
-                        '在庫数': int(main_row.get('在庫数', 0)) if main_row is not None else 0,
-                        '在梱包数': int(main_row.get('梱包・完了', 0)) if main_row is not None else 0,
-                        '不足数': 0,  # 登録済み品番は不足数0として扱う
-                        'ロット数量': lot_quantity,
-                        '指示日': lot[lot_cols.get('指示日', -1)] if '指示日' in lot_cols and pd.notna(lot[lot_cols['指示日']]) else '',
-                        '号機': lot[lot_cols.get('号機', -1)] if '号機' in lot_cols and pd.notna(lot[lot_cols['号機']]) else '',
-                        '現在工程番号': lot[lot_cols.get('現在工程番号', -1)] if '現在工程番号' in lot_cols and pd.notna(lot[lot_cols['現在工程番号']]) else '',
-                        '現在工程名': lot[lot_cols.get('現在工程名', -1)] if '現在工程名' in lot_cols and pd.notna(lot[lot_cols['現在工程名']]) else '',
-                        '現在工程二次処理': lot[lot_cols.get('現在工程二次処理', -1)] if '現在工程二次処理' in lot_cols and pd.notna(lot[lot_cols['現在工程二次処理']]) else '',
-                        '生産ロットID': lot[lot_cols.get('生産ロットID', -1)] if '生産ロットID' in lot_cols and pd.notna(lot[lot_cols['生産ロットID']]) else ''
-                    }
-                    
-                    additional_assignments.append(assignment_result)
-                    assigned_count += 1
+                
+                with perf_timer(logger, f"lots.registered.build_assignments[{product_number}]"):
+                    for lot in product_lots.itertuples(index=False):
+                        if assigned_count >= max_lots_per_day:
+                            break
+                        
+                        lot_quantity = int(lot[lot_cols['数量']]) if pd.notna(lot[lot_cols['数量']]) else 0
+                        
+                        # 出荷予定日は「先行検査」とする
+                        shipping_date = "先行検査"
+                        
+                        # 品名と客先を取得（main_dfから取得できない場合はロットデータから取得）
+                        product_name = (
+                            main_row.get('品名', '') if main_row is not None else 
+                            (lot[lot_cols.get('品名', -1)] if '品名' in lot_cols and pd.notna(lot[lot_cols.get('品名', -1)]) else '')
+                        )
+                        customer_name = (
+                            main_row.get('客先', '') if main_row is not None else 
+                            (lot[lot_cols.get('客先', -1)] if '客先' in lot_cols and pd.notna(lot[lot_cols.get('客先', -1)]) else '')
+                        )
+                        
+                        assignment_result = {
+                            '出荷予定日': shipping_date,
+                            '品番': product_number,
+                            '品名': product_name,
+                            '客先': customer_name,
+                            '出荷数': int(main_row.get('出荷数', 0)) if main_row is not None else 0,
+                            '在庫数': int(main_row.get('在庫数', 0)) if main_row is not None else 0,
+                            '在梱包数': int(main_row.get('梱包・完了', 0)) if main_row is not None else 0,
+                            '不足数': 0,  # 登録済み品番は不足数0として扱う
+                            'ロット数量': lot_quantity,
+                            '指示日': lot[lot_cols.get('指示日', -1)] if '指示日' in lot_cols and pd.notna(lot[lot_cols['指示日']]) else '',
+                            '号機': lot[lot_cols.get('号機', -1)] if '号機' in lot_cols and pd.notna(lot[lot_cols['号機']]) else '',
+                            '現在工程番号': lot[lot_cols.get('現在工程番号', -1)] if '現在工程番号' in lot_cols and pd.notna(lot[lot_cols['現在工程番号']]) else '',
+                            '現在工程名': lot[lot_cols.get('現在工程名', -1)] if '現在工程名' in lot_cols and pd.notna(lot[lot_cols['現在工程名']]) else '',
+                            '現在工程二次処理': lot[lot_cols.get('現在工程二次処理', -1)] if '現在工程二次処理' in lot_cols and pd.notna(lot[lot_cols['現在工程二次処理']]) else '',
+                            '生産ロットID': lot[lot_cols.get('生産ロットID', -1)] if '生産ロットID' in lot_cols and pd.notna(lot[lot_cols['生産ロットID']]) else ''
+                        }
+                        
+                        additional_assignments.append(assignment_result)
+                        assigned_count += 1
                 
                 self.log_message(f"登録済み品番 {product_number}: {assigned_count}ロットを割り当てました（最大: {max_lots_per_day}ロット/日）")
             
@@ -4360,7 +4465,8 @@ class ModernDataExtractorUI:
                 shortage_df = pd.DataFrame()
                 self.log_message("出荷予定日からのデータがありません。先行検査品と洗浄品の処理を続行します...")
             else:
-                shortage_df = main_df[main_df['不足数'] < 0].copy()
+                with perf_timer(logger, "lot_assignment.shortage.extract"):
+                    shortage_df = main_df[main_df['不足数'] < 0].copy()
             
             if shortage_df.empty:
                 self.log_message("不足数がマイナスのデータがありません。先行検査品と洗浄品の処理を続行します...")
@@ -4371,7 +4477,8 @@ class ModernDataExtractorUI:
                 
                 # 通常の在庫ロットを取得
                 self.update_progress(start_progress + 0.10, "利用可能なロットを取得中...")
-                lots_df = self.get_available_lots_for_shortage(connection, shortage_df)
+                with perf_timer(logger, "lots.get_available_for_shortage"):
+                    lots_df = self.get_available_lots_for_shortage(connection, shortage_df)
             
             # 洗浄二次処理依頼からロットを取得（追加で取得）
             cleaning_lots_df = pd.DataFrame()
@@ -4380,15 +4487,16 @@ class ModernDataExtractorUI:
                 self.config.google_sheets_credentials_path):
                 try:
                     self.update_progress(start_progress + 0.12, "洗浄二次処理依頼からロットを取得中...")
-                    cleaning_lots_df = get_cleaning_lots(
-                        connection,
-                        self.config.google_sheets_url_cleaning,
-                        self.config.google_sheets_url_cleaning_instructions,
-                        self.config.google_sheets_credentials_path,
-                        log_callback=self.log_message,
-                        process_master_path=self.config.process_master_path if self.config else None,
-                        inspection_target_keywords=self.inspection_target_keywords
-                    )
+                    with perf_timer(logger, "lots.get_cleaning_lots"):
+                        cleaning_lots_df = get_cleaning_lots(
+                            connection,
+                            self.config.google_sheets_url_cleaning,
+                            self.config.google_sheets_url_cleaning_instructions,
+                            self.config.google_sheets_credentials_path,
+                            log_callback=self.log_message,
+                            process_master_path=self.config.process_master_path if self.config else None,
+                            inspection_target_keywords=self.inspection_target_keywords
+                        )
                     if not cleaning_lots_df.empty:
                         self.log_message(f"洗浄二次処理依頼から {len(cleaning_lots_df)}件のロットを取得しました")
                     else:
@@ -4509,7 +4617,8 @@ class ModernDataExtractorUI:
             assignment_df = pd.DataFrame()
             if not shortage_df.empty and not lots_df.empty:
                 self.update_progress(start_progress + 0.15, "ロットを割り当て中...")
-                assignment_df = self.assign_lots_to_shortage(shortage_df, lots_df)
+                with perf_timer(logger, "lot_assignment.assign_lots_to_shortage"):
+                    assignment_df = self.assign_lots_to_shortage(shortage_df, lots_df)
             elif lots_df.empty and shortage_df.empty:
                 # 出荷予定日からのデータが無い場合、assignment_dfを空のDataFrameで初期化
                 assignment_df = pd.DataFrame()
@@ -4518,7 +4627,8 @@ class ModernDataExtractorUI:
             # 登録済み品番のロットを割り当て（追加）
             if self.registered_products:
                 self.update_progress(start_progress + 0.17, "登録済み品番のロットを割り当て中...")
-                assignment_df = self.assign_registered_products_lots(connection, main_df, assignment_df)
+                with perf_timer(logger, "lots.assign_registered_products"):
+                    assignment_df = self.assign_registered_products_lots(connection, main_df, assignment_df)
             
             # 洗浄二次処理依頼のロットを追加（不足数がマイナスの品番と一致するものも含む）
             if not cleaning_lots_df.empty:
@@ -4570,57 +4680,58 @@ class ModernDataExtractorUI:
                     # 列名から列インデックスへのマッピングを作成（高速化：itertuples()を使用）
                     lot_col_idx_map = {col: all_additional_cleaning_lots.columns.get_loc(col) for col in all_additional_cleaning_lots.columns}
                     
-                    for row_tuple in all_additional_cleaning_lots.itertuples(index=True):
-                        lot_row_idx = row_tuple[0]  # インデックス
-                        lot_row = all_additional_cleaning_lots.loc[lot_row_idx]  # Seriesとして扱うために元の行を取得
+                    with perf_timer(logger, "lot_assignment.add_additional_cleaning_lots"):
+                        for row_tuple in all_additional_cleaning_lots.itertuples(index=True):
+                            lot_row_idx = row_tuple[0]  # インデックス
+                            lot_row = all_additional_cleaning_lots.loc[lot_row_idx]  # Seriesとして扱うために元の行を取得
                         
-                        # 品番がmain_dfに存在するか確認（main_dfが空の場合でもエラーが発生しないようにする）
-                        product_in_main = pd.DataFrame()
-                        if not main_df.empty and '品番' in main_df.columns:
-                            product_in_main = main_df[main_df['品番'] == lot_row['品番']]
-                        if not product_in_main.empty:
-                            # main_dfから該当品番の最初の行を取得
-                            main_row = product_in_main.iloc[0]
-                            additional_assignment = {
-                                '出荷予定日': "当日洗浄上がり品",  # 洗浄二次処理依頼から取得したロットは常に「当日洗浄上がり品」
-                                '品番': lot_row['品番'],
-                                '品名': lot_row.get('品名', main_row.get('品名', '')),
-                                '客先': lot_row.get('客先', main_row.get('客先', '')),
-                                '出荷数': int(main_row.get('出荷数', 0)),
-                                '在庫数': int(main_row.get('在庫数', 0)),
-                                '在梱包数': int(main_row.get('梱包・完了', 0)),
-                                '不足数': 0,  # 不足数がマイナスでない場合は0
-                                'ロット数量': int(lot_row.get('数量', lot_row.get('ロット数量', 0))),
-                                '指示日': lot_row.get('指示日', ''),
-                                '号機': lot_row.get('号機', ''),
-                                '現在工程番号': lot_row.get('現在工程番号', ''),
-                                '現在工程名': lot_row.get('現在工程名', ''),
-                                '現在工程二次処理': lot_row.get('現在工程二次処理', ''),
-                                '生産ロットID': lot_row.get('生産ロットID', ''),
-                                '__from_cleaning_sheet': True
-                            }
-                            additional_assignments.append(additional_assignment)
-                        else:
-                            # main_dfに存在しない場合は、ロットの情報のみを使用
-                            additional_assignment = {
-                                '出荷予定日': "当日洗浄上がり品",  # 洗浄二次処理依頼から取得したロットは常に「当日洗浄上がり品」
-                                '品番': lot_row['品番'],
-                                '品名': lot_row.get('品名', ''),
-                                '客先': lot_row.get('客先', ''),
-                                '出荷数': 0,
-                                '在庫数': 0,
-                                '在梱包数': 0,
-                                '不足数': 0,
-                                'ロット数量': int(lot_row.get('数量', lot_row.get('ロット数量', 0))),
-                                '指示日': lot_row.get('指示日', ''),
-                                '号機': lot_row.get('号機', ''),
-                                '現在工程番号': lot_row.get('現在工程番号', ''),
-                                '現在工程名': lot_row.get('現在工程名', ''),
-                                '現在工程二次処理': lot_row.get('現在工程二次処理', ''),
-                                '生産ロットID': lot_row.get('生産ロットID', ''),
-                                '__from_cleaning_sheet': True
-                            }
-                            additional_assignments.append(additional_assignment)
+                            # 品番がmain_dfに存在するか確認（main_dfが空の場合でもエラーが発生しないようにする）
+                            product_in_main = pd.DataFrame()
+                            if not main_df.empty and '品番' in main_df.columns:
+                                product_in_main = main_df[main_df['品番'] == lot_row['品番']]
+                            if not product_in_main.empty:
+                                # main_dfから該当品番の最初の行を取得
+                                main_row = product_in_main.iloc[0]
+                                additional_assignment = {
+                                    '出荷予定日': "当日洗浄上がり品",  # 洗浄二次処理依頼から取得したロットは常に「当日洗浄上がり品」
+                                    '品番': lot_row['品番'],
+                                    '品名': lot_row.get('品名', main_row.get('品名', '')),
+                                    '客先': lot_row.get('客先', main_row.get('客先', '')),
+                                    '出荷数': int(main_row.get('出荷数', 0)),
+                                    '在庫数': int(main_row.get('在庫数', 0)),
+                                    '在梱包数': int(main_row.get('梱包・完了', 0)),
+                                    '不足数': 0,  # 不足数がマイナスでない場合は0
+                                    'ロット数量': int(lot_row.get('数量', lot_row.get('ロット数量', 0))),
+                                    '指示日': lot_row.get('指示日', ''),
+                                    '号機': lot_row.get('号機', ''),
+                                    '現在工程番号': lot_row.get('現在工程番号', ''),
+                                    '現在工程名': lot_row.get('現在工程名', ''),
+                                    '現在工程二次処理': lot_row.get('現在工程二次処理', ''),
+                                    '生産ロットID': lot_row.get('生産ロットID', ''),
+                                    '__from_cleaning_sheet': True
+                                }
+                                additional_assignments.append(additional_assignment)
+                            else:
+                                # main_dfに存在しない場合は、ロットの情報のみを使用
+                                additional_assignment = {
+                                    '出荷予定日': "当日洗浄上がり品",  # 洗浄二次処理依頼から取得したロットは常に「当日洗浄上がり品」
+                                    '品番': lot_row['品番'],
+                                    '品名': lot_row.get('品名', ''),
+                                    '客先': lot_row.get('客先', ''),
+                                    '出荷数': 0,
+                                    '在庫数': 0,
+                                    '在梱包数': 0,
+                                    '不足数': 0,
+                                    'ロット数量': int(lot_row.get('数量', lot_row.get('ロット数量', 0))),
+                                    '指示日': lot_row.get('指示日', ''),
+                                    '号機': lot_row.get('号機', ''),
+                                    '現在工程番号': lot_row.get('現在工程番号', ''),
+                                    '現在工程名': lot_row.get('現在工程名', ''),
+                                    '現在工程二次処理': lot_row.get('現在工程二次処理', ''),
+                                    '生産ロットID': lot_row.get('生産ロットID', ''),
+                                    '__from_cleaning_sheet': True
+                                }
+                                additional_assignments.append(additional_assignment)
                     
                     if additional_assignments:
                         additional_df = pd.DataFrame(additional_assignments)
@@ -4634,7 +4745,8 @@ class ModernDataExtractorUI:
             
             if not assignment_df.empty:
                 # ロットIDの重複を削除（出荷予定日の優先順位に基づいて）
-                assignment_df = self.remove_duplicate_lot_ids(assignment_df)
+                with perf_timer(logger, "lot_assignment.remove_duplicate_lot_ids"):
+                    assignment_df = self.remove_duplicate_lot_ids(assignment_df)
                 
                 # ロット割り当て結果は選択式表示のため、ここでは表示しない
                 # self.display_lot_assignment_table(assignment_df)
@@ -4645,7 +4757,8 @@ class ModernDataExtractorUI:
                 # 検査員割振り処理を実行（進捗は連続させる）
                 # ロット割り当て: 0.65-0.85 (0.2の範囲)
                 # 検査員割振り: 0.85-1.0 (0.15の範囲)
-                self.process_inspector_assignment(assignment_df, start_progress=0.85)
+                with perf_timer(logger, "inspector_assignment"):
+                    self.process_inspector_assignment(assignment_df, start_progress=0.85)
             else:
                 self.log_message("ロット割り当て結果がありません")
                 
@@ -4675,7 +4788,8 @@ class ModernDataExtractorUI:
                 progress_range_master = 0.8
             
             self.update_progress(progress_base, "マスタファイルを読み込み中...")
-            masters = self.load_masters_parallel(progress_base=progress_base, progress_range=progress_range_master)
+            with perf_timer(logger, "masters.load_parallel"):
+                masters = self.load_masters_parallel(progress_base=progress_base, progress_range=progress_range_master)
             
             product_master_df = masters.get('product')
             inspector_master_df = masters.get('inspector')
@@ -4725,15 +4839,17 @@ class ModernDataExtractorUI:
             self.update_progress(table_progress, "検査員割振りテーブルを作成中...")
             product_master_path = self.config.product_master_path if self.config else None
             process_master_path = self.config.process_master_path if self.config else None
-            inspection_target_keywords = self.load_inspection_target_csv()
+            with perf_timer(logger, "inspection_target_csv.load"):
+                inspection_target_keywords = self.load_inspection_target_csv()
             
-            inspector_df = self.inspector_manager.create_inspector_assignment_table(
-                assignment_df, 
-                product_master_df, 
-                product_master_path=product_master_path,
-                process_master_path=process_master_path,
-                inspection_target_keywords=inspection_target_keywords
-            )
+            with perf_timer(logger, "inspector_assignment.create_table"):
+                inspector_df = self.inspector_manager.create_inspector_assignment_table(
+                    assignment_df,
+                    product_master_df,
+                    product_master_path=product_master_path,
+                    process_master_path=process_master_path,
+                    inspection_target_keywords=inspection_target_keywords
+                )
             if inspector_df is None:
                 self.log_message("検査員割振りテーブルの作成に失敗しました")
                 return
@@ -4753,22 +4869,24 @@ class ModernDataExtractorUI:
             
             # 検査員を割り当て（スキル値付きで保存）
             self.update_progress(assign_progress, "検査員を割り当て中...")
-            inspector_df_with_skills = self.inspector_manager.assign_inspectors(
-                inspector_df, 
-                inspector_master_df, 
-                skill_master_df, 
-                show_skill_values=True,
-                process_master_df=process_master_df,
-                inspection_target_keywords=inspection_target_keywords
-            )
+            with perf_timer(logger, "inspector_assignment.assign_inspectors"):
+                inspector_df_with_skills = self.inspector_manager.assign_inspectors(
+                    inspector_df, 
+                    inspector_master_df, 
+                    skill_master_df, 
+                    show_skill_values=True,
+                    process_master_df=process_master_df,
+                    inspection_target_keywords=inspection_target_keywords
+                )
             
             # 表示用のデータは氏名のみ
-            inspector_df = inspector_df_with_skills.copy()
-            for col in inspector_df.columns:
-                if col.startswith('検査員'):
-                    inspector_df[col] = inspector_df[col].astype(str).apply(
-                        lambda x: x.split('(')[0].strip() if '(' in x and ')' in x else x
-                    )
+            with perf_timer(logger, "inspector_assignment.display_name_strip"):
+                inspector_df = inspector_df_with_skills.copy()
+                for col in inspector_df.columns:
+                    if col.startswith('検査員'):
+                        inspector_df[col] = inspector_df[col].astype(str).apply(
+                            lambda x: x.split('(')[0].strip() if '(' in x and ')' in x else x
+                        )
             
             # 検査員割振りデータを保存（エクスポート用）
             self.current_inspector_data = inspector_df

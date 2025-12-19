@@ -5,6 +5,7 @@
 
 from typing import Optional, List, Dict, Any, Tuple, Callable, Set, Union
 from datetime import date, timedelta
+from time import perf_counter
 import pandas as pd
 import numpy as np
 import logging
@@ -12,6 +13,9 @@ import copy
 import openpyxl
 from pathlib import Path
 import re
+from loguru import logger as loguru_logger
+
+from app.utils.perf import perf_timer
 
 logger = logging.getLogger(__name__)
 
@@ -1424,11 +1428,13 @@ class InspectorAssignmentManager:
             self.same_day_same_name_relaxation_attempts.clear()
             self.logged_vacation_messages.clear()
             # 【高速化】検査員マスタのインデックスを構築
-            self._build_inspector_index(inspector_master_df)
+            with perf_timer(loguru_logger, "inspector_assignment.manager.build_inspector_index"):
+                self._build_inspector_index(inspector_master_df)
             self.same_day_constraint_relaxations.clear()
             
             # 結果用のDataFrameを準備
-            result_df = self._prepare_result_dataframe(inspector_df)
+            with perf_timer(loguru_logger, "inspector_assignment.manager.prepare_result_dataframe"):
+                result_df = self._prepare_result_dataframe(inspector_df)
             
             process_name_context: str = ''
             # 出荷予定日でソート（古い順）- 最優先ルール
@@ -1436,17 +1442,20 @@ class InspectorAssignmentManager:
             result_df['出荷予定日'] = result_df['出荷予定日'].apply(self._convert_shipping_date)
             
             # ソート用の補助列を追加
-            result_df = self._add_sorting_columns(result_df, skill_master_df)
+            with perf_timer(loguru_logger, "inspector_assignment.manager.add_sorting_columns"):
+                result_df = self._add_sorting_columns(result_df, skill_master_df)
 
             # 事前にスキルベースの候補人数と割当可能性を算出
-            result_df = self._calculate_feasibility_and_candidates(
-                result_df, skill_master_df, inspector_master_df
-            )
+            with perf_timer(loguru_logger, "inspector_assignment.manager.calculate_candidates"):
+                result_df = self._calculate_feasibility_and_candidates(
+                    result_df, skill_master_df, inspector_master_df
+                )
             
             # 並び順ロジック: 出荷予定日の優先順位ごとに候補数が少ないロットを優先
             # 列名のインデックスマップを作成（itertuples用）
             result_cols = {col: idx for idx, col in enumerate(result_df.columns)}
-            result_df = self._sort_lots_by_priority(result_df, result_cols)
+            with perf_timer(loguru_logger, "inspector_assignment.manager.sort_lots_by_priority"):
+                result_df = self._sort_lots_by_priority(result_df, result_cols)
             high_priority_mask = result_df.get('_is_high_priority', pd.Series([False] * len(result_df), index=result_df.index)).astype(bool)
             high_priority_total = int(high_priority_mask.sum())
             high_priority_remaining = high_priority_total
@@ -1466,6 +1475,7 @@ class InspectorAssignmentManager:
             
             # 各ロットに対して検査員を割り当て
             result_cols_after_sort = {col: idx for idx, col in enumerate(result_df.columns)}
+            _first_pass_t0 = perf_counter()
             for row_idx, row in enumerate(result_df.itertuples(index=False)):
                 index = result_df.index[row_idx]
                 inspection_time = row[result_cols_after_sort['検査時間']]
@@ -1527,6 +1537,7 @@ class InspectorAssignmentManager:
                         excluded = before_count - len(fixed_inspector_names)
                         self.log_message(
                             f"固定検査員のうち終日休暇の {excluded}名 を除外しました: 品番 '{product_number}'",
+                            debug=True,
                             level='warning'
                         )
                 fixed_primary_name: Optional[str] = None
@@ -2503,26 +2514,36 @@ class InspectorAssignmentManager:
                 result_df.at[index, 'チーム情報'] = team_info
                 self.log_message(
                     f"[割当結果] 品番 {product_number}: 割当人数 {len(assigned_inspectors)} / "
-                    f"残時間 {result_df.at[index, 'remaining_work_hours']:.2f}h / status={result_df.at[index, 'assignability_status']}"
+                    f"残時間 {result_df.at[index, 'remaining_work_hours']:.2f}h / status={result_df.at[index, 'assignability_status']}",
+                    debug=True,
                 )
             
+            loguru_logger.bind(channel="PERF").debug(
+                "PERF {}: {:.1f} ms",
+                "inspector_assignment.manager.first_pass_assign",
+                (perf_counter() - _first_pass_t0) * 1000.0,
+            )
             self.log_message(f"第1次割り当てが完了しました: {len(result_df)}件")
             
             # 割り当て統計を表示（第1次）
             self.log_message("=== 第1次割り当て統計 ===")
-            self.print_assignment_statistics(inspector_master_df)
+            with perf_timer(loguru_logger, "inspector_assignment.manager.print_stats.first_pass"):
+                self.print_assignment_statistics(inspector_master_df)
             
             # 全体最適化を実行（勤務時間超過の調整と偏りの是正）
             self.log_message("=== 全体最適化を開始 ===")
-            result_df = self.optimize_assignments(result_df, inspector_master_df, skill_master_df, show_skill_values, process_master_df, inspection_target_keywords)
+            with perf_timer(loguru_logger, "inspector_assignment.manager.optimize_assignments"):
+                result_df = self.optimize_assignments(result_df, inspector_master_df, skill_master_df, show_skill_values, process_master_df, inspection_target_keywords)
             self.log_message("=== 全体最適化が完了 ===")
             
             # 最終割り当て統計を表示
             self.log_message("=== 最終割り当て統計 ===")
-            self.print_assignment_statistics(inspector_master_df)
+            with perf_timer(loguru_logger, "inspector_assignment.manager.print_stats.final"):
+                self.print_assignment_statistics(inspector_master_df)
             
             # 改善ポイント: 最終ログ出力の拡充
-            self.print_detailed_kpi_statistics(result_df, inspector_master_df, skill_master_df)
+            with perf_timer(loguru_logger, "inspector_assignment.manager.print_detailed_kpi"):
+                self.print_detailed_kpi_statistics(result_df, inspector_master_df, skill_master_df)
             
             if '_base_candidates' in result_df.columns:
                 result_df = result_df.drop(columns=['_base_candidates'])
@@ -3080,6 +3101,7 @@ class InspectorAssignmentManager:
                                 self.log_message(
                                     f"   固定検査員 '{missing_name}' は終日休暇のため除外します "
                                     f"(休暇コード: {code}, 解釈: {interpretation})",
+                                    debug=True,
                                     level='warning'
                                 )
                                 continue

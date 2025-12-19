@@ -6,11 +6,13 @@ import os
 import re
 import pyodbc
 import pandas as pd
+import concurrent.futures
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Tuple
 from loguru import logger
 
 from app.export.google_sheets_exporter_service import GoogleSheetsExporter
+from app.utils.perf import perf_timer
 
 # ログ分類（app_.logの視認性向上）
 logger = logger.bind(channel="SVC:CLEAN")
@@ -209,42 +211,130 @@ def _get_lots_from_access_batch(connection, requests: List[Dict]) -> pd.DataFram
         # すべての列を通常通り取得（pyodbcカーソルで直接取得するため、CStrは不要）
         columns_str = ", ".join([f"[{col}]" for col in available_columns])
         
-        # すべての条件をORで結合
+        # AccessはOR条件が多いと遅くなりやすいため、可能なら
+        # 「指示日範囲 × 号機ごと」の包絡条件にして取得（後段のpandas側で厳密に絞り込み）
         all_conditions = []
-        
+
+        # 号機ごとに必要な指示日集合を作り、可能なら IN(...) でピンポイントに絞る
+        # （範囲指定だと不要日付まで拾ってしまい、Access側の実行が重くなりやすい）
+        machine_dates: Dict[str, set] = {}
+        no_machine_reqs: List[Dict] = []
+        all_dates_set: set[str] = set()
+
         for req in requests:
-            conditions = []
-            
-            # 指示日
+            machine = str(req.get("machine", "")).strip()
+            date_candidates: List[str] = []
+
             if req.get("instruction_date"):
                 normalized = _normalize_instruction_date(req["instruction_date"])
                 if normalized:
-                    try:
-                        date_obj = datetime.strptime(normalized, "%Y-%m-%d")
-                        date_str = date_obj.strftime('#%Y-%m-%d#')
-                        conditions.append(f"[指示日] = {date_str}")
-                    except Exception:
-                        logger.warning(f"指示日の正規化に失敗したためスキップします: {req['instruction_date']}")
-            
-            # 日付リスト
+                    date_candidates.append(normalized)
+
             if req.get("date_list"):
-                date_list = req["date_list"]
-                if len(date_list) > 0:
-                    # 文字列形式のままソートして高速化
-                    sorted_dates_str = sorted(date_list)
-                    start_date = pd.to_datetime(sorted_dates_str[0])
-                    end_date = pd.to_datetime(sorted_dates_str[-1])
-                    start_str = start_date.strftime('#%Y-%m-%d#')
-                    end_str = end_date.strftime('#%Y-%m-%d#')
-                    conditions.append(f"[指示日] >= {start_str} AND [指示日] <= {end_str}")
-            
-            # 号機
-            if req.get("machine") and "号機" in available_columns:
-                escaped_machine = req["machine"].replace("'", "''")
-                conditions.append(f"[号機] = '{escaped_machine}'")
-            
-            if conditions:
-                all_conditions.append(f"({' AND '.join(conditions)})")
+                date_list = [d for d in (req.get("date_list") or []) if isinstance(d, str) and d.strip()]
+                date_candidates.extend(date_list)
+
+            if not date_candidates:
+                continue
+
+            # YYYY-MM-DD に揃えて保持
+            normalized_dates = []
+            for d in date_candidates:
+                nd = _normalize_instruction_date(d)
+                if nd:
+                    normalized_dates.append(nd)
+            if not normalized_dates:
+                continue
+
+            all_dates_set.update(normalized_dates)
+
+            if not machine:
+                no_machine_reqs.append(req)
+                continue
+
+            if machine not in machine_dates:
+                machine_dates[machine] = set()
+            machine_dates[machine].update(normalized_dates)
+
+        use_envelope = bool(machine_dates) and ("号機" in available_columns)
+        if use_envelope:
+            per_machine_conditions: List[str] = []
+            for machine, dates in sorted(machine_dates.items(), key=lambda x: x[0]):
+                dates_sorted = sorted({d for d in dates if isinstance(d, str) and d})
+                if not dates_sorted:
+                    continue
+
+                escaped_machine = machine.replace("'", "''")
+
+                # Accessは巨大なINリストが遅くなることがあるため、
+                # 日付が少ない場合のみINを使い、それ以外は範囲にフォールバックする。
+                if len(dates_sorted) <= 7:
+                    date_literals = ", ".join([f"#{d}#" for d in dates_sorted])
+                    per_machine_conditions.append(f"([号機] = '{escaped_machine}' AND [指示日] IN ({date_literals}))")
+                else:
+                    start_str = pd.to_datetime(dates_sorted[0]).strftime('#%Y-%m-%d#')
+                    end_str = pd.to_datetime(dates_sorted[-1]).strftime('#%Y-%m-%d#')
+                    per_machine_conditions.append(f"([号機] = '{escaped_machine}' AND [指示日] >= {start_str} AND [指示日] <= {end_str})")
+
+            # machine無しのものは従来条件で追加（まれ）
+            extra_conditions: List[str] = []
+            for req in no_machine_reqs:
+                conditions = []
+                if req.get("instruction_date"):
+                    normalized = _normalize_instruction_date(req["instruction_date"])
+                    if normalized:
+                        try:
+                            date_obj = datetime.strptime(normalized, "%Y-%m-%d")
+                            date_str = date_obj.strftime('#%Y-%m-%d#')
+                            conditions.append(f"[指示日] = {date_str}")
+                        except Exception:
+                            pass
+                if req.get("date_list"):
+                    date_list = req.get("date_list") or []
+                    if date_list:
+                        sorted_dates_str = sorted(date_list)
+                        start_date = pd.to_datetime(sorted_dates_str[0])
+                        end_date = pd.to_datetime(sorted_dates_str[-1])
+                        start_str = start_date.strftime('#%Y-%m-%d#')
+                        end_str = end_date.strftime('#%Y-%m-%d#')
+                        conditions.append(f"[指示日] >= {start_str} AND [指示日] <= {end_str}")
+                if conditions:
+                    extra_conditions.append(f"({' AND '.join(conditions)})")
+
+            combined = per_machine_conditions + extra_conditions
+            all_conditions = [f"({' OR '.join(combined)})"] if combined else []
+
+        if not all_conditions:
+            # 従来方式（OR条件）
+            for req in requests:
+                conditions = []
+
+                if req.get("instruction_date"):
+                    normalized = _normalize_instruction_date(req["instruction_date"])
+                    if normalized:
+                        try:
+                            date_obj = datetime.strptime(normalized, "%Y-%m-%d")
+                            date_str = date_obj.strftime('#%Y-%m-%d#')
+                            conditions.append(f"[指示日] = {date_str}")
+                        except Exception:
+                            logger.warning(f"指示日の正規化に失敗したためスキップします: {req['instruction_date']}")
+
+                if req.get("date_list"):
+                    date_list = req["date_list"]
+                    if len(date_list) > 0:
+                        sorted_dates_str = sorted(date_list)
+                        start_date = pd.to_datetime(sorted_dates_str[0])
+                        end_date = pd.to_datetime(sorted_dates_str[-1])
+                        start_str = start_date.strftime('#%Y-%m-%d#')
+                        end_str = end_date.strftime('#%Y-%m-%d#')
+                        conditions.append(f"[指示日] >= {start_str} AND [指示日] <= {end_str}")
+
+                if req.get("machine") and "号機" in available_columns:
+                    escaped_machine = req["machine"].replace("'", "''")
+                    conditions.append(f"[号機] = '{escaped_machine}'")
+
+                if conditions:
+                    all_conditions.append(f"({' AND '.join(conditions)})")
         
         if not all_conditions:
             return pd.DataFrame()
@@ -254,36 +344,46 @@ def _get_lots_from_access_batch(connection, requests: List[Dict]) -> pd.DataFram
         # 材料識別でフィルタリング（5のみを対象）
         if "材料識別" in available_columns:
             where_clause = f"({where_clause}) AND [材料識別] = 5"
+
+        # 全体の指示日範囲で追加絞り込み（結果は不変・Access側の検索範囲を狭める）
+        if all_dates_set:
+            try:
+                dates_sorted = sorted(all_dates_set)
+                where_clause = f"({where_clause}) AND [指示日] >= #{dates_sorted[0]}# AND [指示日] <= #{dates_sorted[-1]}#"
+            except Exception:
+                pass
         
         # バッチクエリを実行
-        # 指示日列を文字列として取得するため、CStr関数を使用
-        # ただし、ORDER BY句では元の列名を使用
-        columns_str_with_cstr = ", ".join([
-            f"CStr([{col}]) AS [{col}]" if col == "指示日" else f"[{col}]"
-            for col in available_columns
-        ])
-        
+        # CStr([指示日]) はAccess側でインデックスを使いにくくなる場合があるため、
+        # 可能な限り生のDate型で取得し、Python側で文字列化して扱う（結果は同一）。
         query = f"""
-        SELECT {columns_str_with_cstr}
+        SELECT {columns_str}
         FROM [t_現品票履歴]
         WHERE {where_clause}
         ORDER BY [指示日], [号機]
         """
         
         try:
+            from time import perf_counter
             import time
             start_time = time.time()
             
             # pyodbcのカーソルを直接使用してデータを取得（日付パースエラーを回避）
             cursor = connection.cursor()
-            
+
+            t0 = perf_counter()
             cursor.execute(query)
-            
+            execute_total_ms = (perf_counter() - t0) * 1000.0
+            logger.bind(channel="PERF").debug("PERF {}: {:.1f} ms", "cleaning.access.batch.cursor_execute", execute_total_ms)
+
             # 列名を取得
             column_names = [desc[0] for desc in cursor.description]
-            
+
             # データを取得（すべて文字列として取得）
+            t1 = perf_counter()
             rows = cursor.fetchall()
+            fetch_total_ms = (perf_counter() - t1) * 1000.0
+            logger.bind(channel="PERF").debug("PERF {}: {:.1f} ms", "cleaning.access.batch.fetchall", fetch_total_ms)
             
             # DataFrameに変換
             if rows:
@@ -331,11 +431,14 @@ def _get_lots_from_access_batch(connection, requests: List[Dict]) -> pd.DataFram
             # 現在工程名列を空欄として追加（ロット情報に含めないため）
             if '現在工程名' not in lots_df.columns:
                 lots_df['現在工程名'] = ''
-            
+
             return lots_df
         except Exception as query_error:
             logger.error(f"バッチクエリ実行中にエラーが発生しました: {str(query_error)}")
-            logger.error(f"クエリ: {query[:500]}...")  # クエリの最初の500文字をログに出力
+            try:
+                logger.error(f"クエリ: {query[:500]}...")  # クエリの最初の500文字をログに出力
+            except Exception:
+                pass
             import traceback
             logger.error(f"トレースバック: {traceback.format_exc()}")
             raise
@@ -672,7 +775,11 @@ def get_cleaning_lots(
         else:
             logger.info(msg)
 
-    process_master_df = _load_process_master(process_master_path, log) if process_master_path else None
+    if process_master_path:
+        with perf_timer(logger, "cleaning.process_master.load"):
+            process_master_df = _load_process_master(process_master_path, log)
+    else:
+        process_master_df = None
     normalized_keywords = [
         kw.strip() for kw in (inspection_target_keywords or []) if isinstance(kw, str) and kw.strip()
     ]
@@ -695,12 +802,23 @@ def get_cleaning_lots(
         today = datetime.now()
         sheet_name_today = today.strftime('%m%d')
         
-        # データ取得
-        log("洗浄二次処理依頼からデータを取得中...")
-        today_data = _get_today_requests_from_sheets(exporter_cleaning, "依頼一覧", log_callback=log)
-        
-        log("洗浄指示からデータを取得中...")
-        cleaning_instructions = _get_cleaning_instructions_from_sheets(exporter_instructions, sheet_name_today)
+        # データ取得（独立処理なので並列化して待ち時間を短縮）
+        def _fetch_today_requests():
+            log("洗浄二次処理依頼からデータを取得中...")
+            with perf_timer(logger, "cleaning.sheets.today_requests"):
+                return _get_today_requests_from_sheets(exporter_cleaning, "依頼一覧", log_callback=log)
+
+        def _fetch_instructions():
+            log("洗浄指示からデータを取得中...")
+            with perf_timer(logger, "cleaning.sheets.instructions"):
+                return _get_cleaning_instructions_from_sheets(exporter_instructions, sheet_name_today)
+
+        with perf_timer(logger, "cleaning.sheets.parallel_total"):
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                future_today = executor.submit(_fetch_today_requests)
+                future_instructions = executor.submit(_fetch_instructions)
+                today_data = future_today.result()
+                cleaning_instructions = future_instructions.result()
         
         # today_dataが空でも洗浄指示があれば処理を続行
         if not today_data and not cleaning_instructions:
@@ -759,7 +877,8 @@ def get_cleaning_lots(
         all_lots = []
         if batch_requests:
             log(f"バッチ処理でロットを取得中... ({len(batch_requests)}件のリクエスト)")
-            batch_lots_df = _get_lots_from_access_batch(connection, batch_requests)
+            with perf_timer(logger, "cleaning.access.batch_lots"):
+                batch_lots_df = _get_lots_from_access_batch(connection, batch_requests)
             log(f"バッチ処理で取得したロット数: {len(batch_lots_df)}件")
             
             if not batch_lots_df.empty:
