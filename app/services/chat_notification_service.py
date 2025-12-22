@@ -4,9 +4,12 @@ ARAICHAT通知サービス
 """
 
 import json
+import hashlib
 import time
+import threading
 from typing import Optional, Dict, List, Any
 from pathlib import Path
+import os
 import requests
 from loguru import logger
 import pandas as pd
@@ -14,6 +17,9 @@ import pandas as pd
 
 class ChatNotificationService:
     """ARAICHAT通知サービス"""
+
+    _dedupe_lock = threading.Lock()
+    _in_flight_keys: set[str] = set()
     
     def __init__(
         self,
@@ -34,10 +40,76 @@ class ChatNotificationService:
         self.room_config_path = room_config_path
         self.process_room_map: Dict[str, str] = {}
         self.default_room_id: Optional[str] = None
+        self._dedupe_cache_ttl_seconds = 10 * 60  # 10分（タイムアウト再送/二重クリックの抑止）
         
         if room_config_path:
             self._load_room_config()
-    
+
+    def _get_dedupe_cache_path(self) -> Path:
+        local_app_data = os.getenv("LOCALAPPDATA")
+        if local_app_data:
+            base_dir = Path(local_app_data)
+        else:
+            base_dir = Path.home() / "AppData" / "Local"
+            if not base_dir.exists():
+                base_dir = Path.home()
+
+        cache_dir = base_dir / "appearance_sorting_system" / "araichat"
+        try:
+            cache_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            return Path("araichat_send_dedupe.json")
+        return cache_dir / "send_dedupe.json"
+
+    def _load_dedupe_cache(self) -> Dict[str, float]:
+        path = self._get_dedupe_cache_path()
+        try:
+            if not path.exists():
+                return {}
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                return {}
+            out: Dict[str, float] = {}
+            for key, ts in data.items():
+                try:
+                    out[str(key)] = float(ts)
+                except Exception:
+                    continue
+            return out
+        except Exception:
+            return {}
+
+    def _save_dedupe_cache(self, cache: Dict[str, float]) -> None:
+        path = self._get_dedupe_cache_path()
+        try:
+            tmp_path = path.with_suffix(path.suffix + ".tmp")
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(cache, f, ensure_ascii=False)
+            tmp_path.replace(path)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _build_dedupe_key(room_id: str, message: str) -> str:
+        digest = hashlib.sha256(f"{room_id}\n{message}".encode("utf-8", errors="ignore")).hexdigest()
+        return digest
+
+    def _should_suppress_duplicate(self, dedupe_key: str, now: float) -> bool:
+        with self._dedupe_lock:
+            cache = self._load_dedupe_cache()
+            ttl = float(self._dedupe_cache_ttl_seconds)
+            last_ts = cache.get(dedupe_key)
+            return last_ts is not None and (now - float(last_ts)) <= ttl
+
+    def _record_sent(self, dedupe_key: str, sent_at: float) -> None:
+        with self._dedupe_lock:
+            cache = self._load_dedupe_cache()
+            ttl = float(self._dedupe_cache_ttl_seconds)
+            cache = {k: v for k, v in cache.items() if isinstance(v, (int, float)) and (sent_at - float(v)) <= ttl}
+            cache[dedupe_key] = float(sent_at)
+            self._save_dedupe_cache(cache)
+
     def _load_room_config(self) -> None:
         """工程ごとのROOM_ID設定を読み込み"""
         try:
@@ -120,6 +192,20 @@ class ChatNotificationService:
         if not room_id:
             logger.warning(f"工程 '{process_name}' に対応するROOM_IDが見つかりません")
             return False
+
+        # クライアント側の恒久対策：同一ROOM/同一本文を短時間で二重送信しない
+        full_message = f"{title}\n{message}" if title else message
+        dedupe_key = self._build_dedupe_key(room_id=str(room_id), message=str(full_message))
+        now = time.time()
+        if self._should_suppress_duplicate(dedupe_key, now):
+            logger.warning(f"ARAICHAT二重送信を抑止しました: 工程={process_name}, ROOM_ID={room_id}")
+            return True
+
+        with self._dedupe_lock:
+            if dedupe_key in self._in_flight_keys:
+                logger.warning(f"ARAICHAT送信が進行中のため二重実行を抑止しました: 工程={process_name}, ROOM_ID={room_id}")
+                return True
+            self._in_flight_keys.add(dedupe_key)
         
         # URLの末尾スラッシュを調整
         base_url = self.base_url.rstrip("/")
@@ -129,8 +215,6 @@ class ChatNotificationService:
             "Authorization": f"Bearer {self.api_key}"
         }
         
-        # メッセージを構築
-        full_message = f"{title}\n{message}" if title else message
         data = {"text": full_message}
         
         # リトライ設定
@@ -139,44 +223,55 @@ class ChatNotificationService:
         timeout_connect = 5   # 接続タイムアウト（秒）
         timeout_read = 30     # 読み取りタイムアウト（秒、テキスト送信なので180秒は不要）
         
-        for attempt in range(1, max_retries + 1):
-            try:
-                if attempt > 1:
-                    wait_time = backoff_seconds * (2 ** (attempt - 2))
-                    logger.info(f"ARAICHAT送信リトライ {attempt}/{max_retries}（{wait_time}秒待機後）...")
-                    time.sleep(wait_time)
-                
-                timeout = (timeout_connect, timeout_read)
-                start_time = time.time()
-                
-                resp = requests.post(url, headers=headers, data=data, timeout=timeout)
-                elapsed_time = time.time() - start_time
-                
-                logger.debug(f"ARAICHAT送信レスポンス: {resp.status_code}（処理時間: {elapsed_time:.2f}秒）")
-                
-                resp.raise_for_status()
-                _ = resp.json()
-                logger.info(f"ARAICHAT送信成功: 工程={process_name}, ROOM_ID={room_id}")
-                return True
-                
-            except requests.exceptions.Timeout as e:
-                elapsed_time = time.time() - start_time if 'start_time' in locals() else 0
-                if attempt < max_retries:
-                    logger.warning(f"ARAICHAT送信タイムアウト（{elapsed_time:.2f}秒）: {e} - リトライします")
-                    continue
-                else:
+        try:
+            for attempt in range(1, max_retries + 1):
+                start_time = None
+                try:
+                    if attempt > 1:
+                        wait_time = backoff_seconds * (2 ** (attempt - 2))
+                        logger.info(f"ARAICHAT送信リトライ {attempt}/{max_retries}（{wait_time}秒待機後）...")
+                        time.sleep(wait_time)
+
+                    timeout = (timeout_connect, timeout_read)
+                    start_time = time.time()
+
+                    resp = requests.post(url, headers=headers, data=data, timeout=timeout)
+                    elapsed_time = time.time() - start_time
+
+                    logger.debug(f"ARAICHAT送信レスポンス: {resp.status_code}（処理時間: {elapsed_time:.2f}秒）")
+
+                    resp.raise_for_status()
+                    _ = resp.json()
+                    logger.info(f"ARAICHAT送信成功: 工程={process_name}, ROOM_ID={room_id}")
+                    self._record_sent(dedupe_key, time.time())
+                    return True
+
+                except requests.exceptions.ReadTimeout as e:
+                    # 送信自体は完了しているが応答が返らないケースがあるため、恒久対策として再送しない
+                    elapsed_time = (time.time() - start_time) if start_time else 0
+                    logger.warning(
+                        f"ARAICHAT送信ReadTimeout（{elapsed_time:.2f}秒）: {e} - 重複送信防止のため再送しません"
+                    )
+                    self._record_sent(dedupe_key, time.time())
+                    return True
+
+                except (requests.exceptions.ConnectTimeout, requests.exceptions.Timeout) as e:
+                    elapsed_time = (time.time() - start_time) if start_time else 0
+                    if attempt < max_retries:
+                        logger.warning(f"ARAICHAT送信タイムアウト（{elapsed_time:.2f}秒）: {e} - リトライします")
+                        continue
                     logger.error(f"ARAICHAT送信タイムアウトエラー（{max_retries}回試行後）: 工程={process_name}")
                     return False
-                    
-            except requests.exceptions.HTTPError as e:
-                status_code = e.response.status_code if e.response else None
-                response_text = e.response.text if e.response else ""
-                
-                # 一時的なサーバーエラー（5xx）の場合はリトライ
-                if status_code and 500 <= status_code < 600 and attempt < max_retries:
-                    logger.warning(f"ARAICHAT送信HTTP {status_code} エラー: {e} - リトライします")
-                    continue
-                else:
+
+                except requests.exceptions.HTTPError as e:
+                    status_code = e.response.status_code if e.response else None
+                    response_text = e.response.text if e.response else ""
+
+                    # 一時的なサーバーエラー（5xx）の場合はリトライ
+                    if status_code and 500 <= status_code < 600 and attempt < max_retries:
+                        logger.warning(f"ARAICHAT送信HTTP {status_code} エラー: {e} - リトライします")
+                        continue
+
                     logger.error(
                         f"ARAICHAT送信HTTPエラー: {e}, "
                         f"ステータスコード: {status_code}, "
@@ -184,20 +279,22 @@ class ChatNotificationService:
                         f"工程: {process_name}"
                     )
                     return False
-                    
-            except requests.exceptions.RequestException as e:
-                if attempt < max_retries:
-                    logger.warning(f"ARAICHAT送信ネットワークエラー: {e} - リトライします")
-                    continue
-                else:
+
+                except requests.exceptions.RequestException as e:
+                    if attempt < max_retries:
+                        logger.warning(f"ARAICHAT送信ネットワークエラー: {e} - リトライします")
+                        continue
                     logger.error(f"ARAICHAT送信リクエストエラー（{max_retries}回試行後）: {e}, 工程: {process_name}")
                     return False
-                    
-            except Exception as e:
-                logger.error(f"ARAICHAT送信予期しないエラー: {e}, 工程: {process_name}", exc_info=True)
-                return False
-        
-        return False
+
+                except Exception as e:
+                    logger.error(f"ARAICHAT送信予期しないエラー: {e}, 工程: {process_name}", exc_info=True)
+                    return False
+
+            return False
+        finally:
+            with self._dedupe_lock:
+                self._in_flight_keys.discard(dedupe_key)
 
     @staticmethod
     def _format_date_value(value: Any, default: str) -> str:

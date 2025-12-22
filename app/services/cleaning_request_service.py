@@ -20,8 +20,9 @@ logger = logger.bind(channel="SVC:CLEAN")
 # 正規表現パターンの事前コンパイル（高速化）
 _MACHINE_PATTERN = re.compile(r'([A-Z]-\d+)')
 _DATE_PATTERN = re.compile(r'(\d{1,2}/\d{1,2})')
-_LOT_PATTERN = re.compile(r'(\d+)\s*ロット')
+_LOT_PATTERN = re.compile(r'(\d+)\s*(?:ロット|ﾛｯﾄ|LOT|lot)')
 _YMD_PATTERN = re.compile(r'(\d{4})[/-](\d{1,2})[/-](\d{1,2})')
+_REMARKS_SEGMENT_SPLIT_PATTERN = re.compile(r"[、､,，;\n]+")
 
 # テーブル構造のキャッシュ（高速化のため）
 _table_structure_cache = None
@@ -90,6 +91,27 @@ def _parse_remarks(remarks: str) -> Optional[Dict[str, str]]:
         return result
     
     return None
+
+
+def _parse_remarks_multi(remarks: str) -> List[Dict[str, str]]:
+    """
+    詳細・備考から複数の「号機 + 開始日付 + ロット数」指定を抽出する。
+    例: "E-11 12/12～ 5ロット、F-12 12/13～ 5ロット" -> 2件
+    """
+    if not remarks or not isinstance(remarks, str):
+        return []
+
+    # まず区切りで分割して、それぞれを既存ロジックで解析する（挙動を崩しにくい）
+    segments = [seg.strip() for seg in _REMARKS_SEGMENT_SPLIT_PATTERN.split(remarks) if seg and seg.strip()]
+    if not segments:
+        return []
+
+    parsed_list: List[Dict[str, str]] = []
+    for seg in segments:
+        parsed = _parse_remarks(seg)
+        if parsed:
+            parsed_list.append(parsed)
+    return parsed_list
 
 
 def _generate_date_range(start_date_str: str, days: int) -> List[str]:
@@ -859,29 +881,33 @@ def get_cleaning_lots(
             machine = row[idx_号機].strip() if idx_号機 >= 0 and len(row) > idx_号機 and row[idx_号機] else ""
             remarks = row[idx_詳細備考].strip() if idx_詳細備考 >= 0 and len(row) > idx_詳細備考 and row[idx_詳細備考] else ""
             
-            request = {}
+            requests: List[Dict[str, object]] = []
             
             # 指示日と号機が両方ある場合
             if instruction_date and machine:
                 normalized = _normalize_instruction_date(instruction_date)
                 if normalized:
-                    request["instruction_date"] = normalized
-                    request["machine"] = machine
+                    requests.append({
+                        "instruction_date": normalized,
+                        "machine": machine,
+                    })
             
             # 指示日または号機が欠落している場合、詳細・備考を解析
             elif remarks:
-                parsed = _parse_remarks(remarks)
-                if parsed:
+                parsed_list = _parse_remarks_multi(remarks)
+                for parsed in parsed_list:
                     date_list = _generate_date_range(parsed['start_date'], parsed['days'])
-                    request["date_list"] = date_list
-                    request["machine"] = parsed['machine']
+                    requests.append({
+                        "date_list": date_list,
+                        "machine": parsed['machine'],
+                    })
             
-            if request:
+            for request in requests:
                 batch_requests.append(request)
                 row_info_list.append({
                     "index": i,
                     "row": row,
-                    "request": request
+                    "request": request,
                 })
         
         # バッチ処理で一括取得
