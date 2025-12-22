@@ -9751,6 +9751,18 @@ class ModernDataExtractorUI:
                 text_color="white"
             )
             cancel_button.pack(side="left", padx=10)
+
+            # ボタンが画面下に隠れるケースがあるため、生成後に最終サイズで再調整
+            try:
+                confirm_window.update_idletasks()
+                required_height = main_frame.winfo_reqheight() + 40
+                target_height = min(max(calculated_height, required_height), max_height)
+                if target_height != calculated_height:
+                    calculated_height = target_height
+                    y = (screen_height - calculated_height) // 2
+                    confirm_window.geometry(f"{window_width}x{calculated_height}+{x}+{y}")
+            except Exception:
+                pass
             
         except Exception as e:
             self.log_message(f"確認ウィンドウの表示中にエラーが発生しました: {str(e)}")
