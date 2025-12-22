@@ -13,6 +13,7 @@ a = Analysis(
     datas=[
         ('config.env', '.'),  # config.envをexeに埋め込む
         ('aptest-384703-24764f69b34f.json', '.'),  # Google認証情報JSONファイルを埋め込む
+        ('araichat_room_config.json', '.'),  # ARAICHATルーム設定ファイルを埋め込む
         ('appearance_sorting_system.ico', '.'),  # アイコンファイルを埋め込む
         ('inspector_assignment_rules_help.html', '.'),  # ヘルプHTMLファイルを埋め込む
     ],

@@ -20,6 +20,7 @@ class ChatNotificationService:
 
     _dedupe_lock = threading.Lock()
     _in_flight_keys: set[str] = set()
+    _in_flight_cond = threading.Condition(_dedupe_lock)
     
     def __init__(
         self,
@@ -41,6 +42,23 @@ class ChatNotificationService:
         self.process_room_map: Dict[str, str] = {}
         self.default_room_id: Optional[str] = None
         self._dedupe_cache_ttl_seconds = 10 * 60  # 10分（タイムアウト再送/二重クリックの抑止）
+
+        # 送信の体感速度を優先（ReadTimeout時は重複送信防止のため再送しない設計）
+        def _read_int_env(name: str, default: int) -> int:
+            raw = os.getenv(name)
+            if raw is None:
+                return default
+            try:
+                val = int(str(raw).strip())
+                return val if val > 0 else default
+            except Exception:
+                return default
+
+        self._timeout_connect_seconds = _read_int_env("ARAICHAT_TIMEOUT_CONNECT_SECONDS", 3)
+        # 「完了」はサーバ応答(2xx)を受け取った場合のみ表示したいため、既定は長めに待つ
+        self._timeout_read_seconds = _read_int_env("ARAICHAT_TIMEOUT_READ_SECONDS", 60)
+        self._max_retries = _read_int_env("ARAICHAT_MAX_RETRIES", 2)
+        self._backoff_seconds = _read_int_env("ARAICHAT_BACKOFF_SECONDS", 1)
         
         if room_config_path:
             self._load_room_config()
@@ -203,8 +221,12 @@ class ChatNotificationService:
 
         with self._dedupe_lock:
             if dedupe_key in self._in_flight_keys:
-                logger.warning(f"ARAICHAT送信が進行中のため二重実行を抑止しました: 工程={process_name}, ROOM_ID={room_id}")
-                return True
+                # 既に同一送信が走っている場合、完了(=サーバ応答取得)まで待つ
+                logger.warning(f"ARAICHAT送信が進行中のため待機します: 工程={process_name}, ROOM_ID={room_id}")
+                self._in_flight_cond.wait(timeout=float(self._timeout_read_seconds) + 10.0)
+                if self._should_suppress_duplicate(dedupe_key, time.time()):
+                    return True
+                return False
             self._in_flight_keys.add(dedupe_key)
         
         # URLの末尾スラッシュを調整
@@ -212,16 +234,19 @@ class ChatNotificationService:
         url = f"{base_url}/api/integrations/send/{room_id}"
         
         headers = {
-            "Authorization": f"Bearer {self.api_key}"
+            "Authorization": f"Bearer {self.api_key}",
+            # サーバが対応している場合に二重送信を防ぐ（未対応でも無害）
+            "Idempotency-Key": dedupe_key,
+            "X-Idempotency-Key": dedupe_key,
         }
         
         data = {"text": full_message}
         
         # リトライ設定
-        max_retries = 3
-        backoff_seconds = 2  # 初期待機時間（指数バックオフ: 2秒、4秒、8秒）
-        timeout_connect = 5   # 接続タイムアウト（秒）
-        timeout_read = 30     # 読み取りタイムアウト（秒、テキスト送信なので180秒は不要）
+        max_retries = int(self._max_retries)
+        backoff_seconds = int(self._backoff_seconds)  # 初期待機時間（指数バックオフ）
+        timeout_connect = int(self._timeout_connect_seconds)   # 接続タイムアウト（秒）
+        timeout_read = int(self._timeout_read_seconds)     # 読み取りタイムアウト（秒）
         
         try:
             for attempt in range(1, max_retries + 1):
@@ -247,13 +272,18 @@ class ChatNotificationService:
                     return True
 
                 except requests.exceptions.ReadTimeout as e:
-                    # 送信自体は完了しているが応答が返らないケースがあるため、恒久対策として再送しない
+                    # 送信済みだが応答が返らない可能性があるため、
+                    # Idempotency-Key を付与した上で「同一キーで再試行」して完了確認を試みる。
                     elapsed_time = (time.time() - start_time) if start_time else 0
-                    logger.warning(
-                        f"ARAICHAT送信ReadTimeout（{elapsed_time:.2f}秒）: {e} - 重複送信防止のため再送しません"
+                    if attempt < max_retries:
+                        logger.warning(
+                            f"ARAICHAT送信ReadTimeout（{elapsed_time:.2f}秒）: {e} - 同一Idempotency-Keyで再試行します"
+                        )
+                        continue
+                    logger.error(
+                        f"ARAICHAT送信ReadTimeout（{elapsed_time:.2f}秒）: {e} - 完了確認できないため失敗扱いにします"
                     )
-                    self._record_sent(dedupe_key, time.time())
-                    return True
+                    return False
 
                 except (requests.exceptions.ConnectTimeout, requests.exceptions.Timeout) as e:
                     elapsed_time = (time.time() - start_time) if start_time else 0
@@ -295,6 +325,7 @@ class ChatNotificationService:
         finally:
             with self._dedupe_lock:
                 self._in_flight_keys.discard(dedupe_key)
+                self._in_flight_cond.notify_all()
 
     @staticmethod
     def _format_date_value(value: Any, default: str) -> str:
@@ -331,11 +362,11 @@ class ChatNotificationService:
         # メッセージを構築（希望フォーマットに合わせる）
         message_parts = []
         
-        # タイトルを追加（ー出荷間近の外観未検査ロット情報ー）
-        message_parts.append("ー出荷間近の外観未検査ロット情報ー\n")
+        # タイトルを追加（タイトル後に1行改行）
+        message_parts.append("ー出荷間近の外観未検査ロット情報ー\n\n")
         
         # タイトルの下に案内文を追加
-        message_parts.append("現在工程の部門において、進捗状況を確認し、必要に応じて後工程へ至急回す等の対応指示をご検討ください\n")
+        message_parts.append("各ロットの現在工程の部門においては、内容を必ず確認し、進捗の停滞や滞留が出ないよう、出荷予定日が近いロットは優先対応をお願いします\n")
         
         # 一行改行
         message_parts.append("\n")
