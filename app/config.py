@@ -127,6 +127,20 @@ class DatabaseConfig:
                     self.log_dir_path = self._get_resource_path(log_dir_path)
             else:
                 self.log_dir_path = None
+            
+            # 【追加】ARAICHAT設定
+            self.araichat_base_url = os.getenv("ARAICHAT_BASE_URL")
+            self.araichat_api_key = os.getenv("ARAICHAT_API_KEY")
+            
+            # 工程ごとのROOM_ID設定ファイルのパス（JSON形式）
+            araichat_room_config_path = os.getenv("ARAICHAT_ROOM_CONFIG_PATH")
+            if araichat_room_config_path:
+                if araichat_room_config_path.startswith('\\\\'):
+                    self.araichat_room_config_path = araichat_room_config_path
+                else:
+                    self.araichat_room_config_path = self._get_resource_path(araichat_room_config_path)
+            else:
+                self.araichat_room_config_path = None
 
             # 必須設定の確認
             if not self.access_file_path:

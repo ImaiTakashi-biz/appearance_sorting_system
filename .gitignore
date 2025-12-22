@@ -144,6 +144,9 @@ aptest-*.json
 # その他のJSONファイルは個別に判断（プロジェクト設定ファイルなどは含める）
 # app_settings.jsonはネットワーク共有パスで管理されるため、ローカルファイルは除外
 app_settings.json
+# ARAICHATルーム設定ファイル（ユーザーが設定ダイアログから変更する可能性があるため除外）
+# デフォルト値はリポジトリに含める場合は、この行をコメントアウトしてください
+araichat_room_config.json
 
 # Data files (機密情報を含む可能性)
 *.csv

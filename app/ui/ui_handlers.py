@@ -162,6 +162,9 @@ class ModernDataExtractorUI:
         self.current_inspector_data = None
         self._seat_chart_server = SeatChartServer()
         
+        # 【追加】検査対象外ロット情報保存用
+        self.non_inspection_lots_df = pd.DataFrame()
+        
         # スキル表示状態管理
         self.original_inspector_data = None  # 元のデータを保持
         
@@ -445,20 +448,36 @@ class ModernDataExtractorUI:
 
         # ファイル出力（すべてのログを1つのファイルに統一）
         # ERROR時はスタックトレースも含める
-        logger.add(
-            log_file,
-            level="INFO",  # INFO以上をファイルに記録
-            format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {extra[channel]} | {name}:{line} | {message}",
-            rotation="5 MB",  # 5MBごとにローテーション（ログ肥大化を抑制）
-            retention="30 days",  # 30日間保持
-            compression="zip",  # ローテーション後に圧縮して容量削減
-            encoding="utf-8",
-            backtrace=True,  # ERROR時はスタックトレースを出力
-            diagnose=False,  # 容量が大きくなりやすい詳細診断は抑制
-            enqueue=True,  # スレッドセーフな出力
-            catch=True,  # ログ出力中のエラーをキャッチ
-            filter=_main_filter,
-        )
+        # エラーハンドリングを改善（ログ書き込みエラーを抑制）
+        # ログファイルのパスを検証（無効な文字が含まれていないことを確認）
+        try:
+            log_file_str = str(log_file)
+            # ログファイルのパスが有効か確認
+            if len(log_file_str) > 260:  # Windowsのパス長制限
+                # パスが長すぎる場合は短縮
+                log_file = log_dir / "app.log"
+                log_file_str = str(log_file)
+        except Exception:
+            pass
+        
+        try:
+            logger.add(
+                log_file_str,
+                level="INFO",  # INFO以上をファイルに記録
+                format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {extra[channel]} | {name}:{line} | {message}",
+                rotation="5 MB",  # 5MBごとにローテーション（ログ肥大化を抑制）
+                retention="30 days",  # 30日間保持
+                compression="zip",  # ローテーション後に圧縮して容量削減
+                encoding="utf-8",
+                backtrace=True,  # ERROR時はスタックトレースを出力
+                diagnose=False,  # 容量が大きくなりやすい詳細診断は抑制
+                enqueue=True,  # スレッドセーフな出力
+                catch=True,  # ログ出力中のエラーをキャッチ（エラーメッセージは表示されるが、アプリは継続）
+                filter=_main_filter,
+            )
+        except Exception:
+            # ログ設定に失敗した場合は無視（アプリケーションの動作を妨げない）
+            pass
 
         logger.bind(channel="SYS").info(f"ログファイル: {log_file.absolute()}")
         try:
@@ -2182,6 +2201,30 @@ class ModernDataExtractorUI:
             text_color="white"
         )
         self.reload_button.pack(side="left", padx=(0, 15))
+        
+        # 【追加】右側のボタングループ（補助操作）
+        right_buttons_frame = ctk.CTkFrame(buttons_frame, fg_color="transparent")
+        right_buttons_frame.pack(side="right")
+        
+        # ARAICHAT送信ボタン（右側）（白基調で青と黒の配色、視認性を改善）
+        self.send_araichat_button = ctk.CTkButton(
+            right_buttons_frame,
+            text="検査対象外ロットをARAICHATに送信",
+            command=self.show_non_inspection_lots_confirmation,
+            font=ctk.CTkFont(family="Yu Gothic", size=14, weight="bold"),
+            height=45,
+            width=280,
+            fg_color="#FFFFFF",  # 白背景
+            hover_color="#E5E7EB",  # ホバー時は薄いグレー（他のボタンと同じパターン）
+            corner_radius=10,
+            border_width=3,
+            border_color="#3B82F6",  # 青のボーダー（太く）
+            text_color="#1E3A8A"  # 濃い青のテキスト
+        )
+        self.send_araichat_button.pack(side="right", padx=(15, 0))
+        
+        # ボタンの初期状態を設定（データがない場合は無効化）
+        self._update_araichat_button_state()
     
     def create_progress_section(self, parent):
         """進捗セクションの作成"""
@@ -2317,7 +2360,7 @@ class ModernDataExtractorUI:
         """設定ダイアログを表示"""
         dialog = ctk.CTkToplevel(self.root)
         dialog.title("割り当てルール設定")
-        dialog.geometry("550x400")
+        dialog.geometry("550x480")
         dialog.transient(self.root)
         dialog.grab_set()
         
@@ -2395,6 +2438,28 @@ class ModernDataExtractorUI:
             text_color="gray"
         )
         info_label.pack(pady=10)
+        
+        # ARAICHATルームID設定ボタン（管理者用）
+        araichat_frame = ctk.CTkFrame(main_frame)
+        araichat_frame.pack(fill="x", pady=10)
+        
+        araichat_label = ctk.CTkLabel(
+            araichat_frame,
+            text="ARAICHATルームID設定（管理者のみ）:",
+            font=ctk.CTkFont(family="Yu Gothic", size=14)
+        )
+        araichat_label.pack(side="left", padx=10, pady=10)
+        
+        araichat_button = ctk.CTkButton(
+            araichat_frame,
+            text="設定を開く",
+            command=self.show_araichat_room_settings,
+            font=ctk.CTkFont(family="Yu Gothic", size=12),
+            width=120,
+            fg_color="#6B7280",
+            hover_color="#4B5563"
+        )
+        araichat_button.pack(side="left", padx=10, pady=10)
         
         # ボタンフレーム
         button_frame = ctk.CTkFrame(main_frame)
@@ -2483,6 +2548,245 @@ class ModernDataExtractorUI:
             hover_color="#DC2626"
         )
         cancel_button.pack(side="right", padx=10)
+    
+    def show_araichat_room_settings(self):
+        """ARAICHATルームID設定ダイアログ（パスワード認証付き）"""
+        # パスワード認証ダイアログ
+        password_dialog = ctk.CTkToplevel(self.root)
+        password_dialog.title("管理者認証")
+        password_dialog.geometry("400x200")
+        password_dialog.transient(self.root)
+        password_dialog.grab_set()
+        password_dialog.resizable(False, False)
+        
+        # パスワードを環境変数から取得（デフォルトは"admin"）
+        admin_password = os.getenv("ARAICHAT_ADMIN_PASSWORD", "admin")
+        
+        main_frame = ctk.CTkFrame(password_dialog)
+        main_frame.pack(fill="both", expand=True, padx=20, pady=20)
+        
+        title_label = ctk.CTkLabel(
+            main_frame,
+            text="管理者認証",
+            font=ctk.CTkFont(family="Yu Gothic", size=18, weight="bold")
+        )
+        title_label.pack(pady=(0, 20))
+        
+        password_label = ctk.CTkLabel(
+            main_frame,
+            text="パスワード:",
+            font=ctk.CTkFont(family="Yu Gothic", size=14)
+        )
+        password_label.pack(pady=10)
+        
+        password_entry = ctk.CTkEntry(
+            main_frame,
+            width=250,
+            font=ctk.CTkFont(family="Yu Gothic", size=14),
+            show="*"  # パスワードを隠す
+        )
+        password_entry.pack(pady=10)
+        password_entry.focus()
+        
+        def verify_password():
+            """パスワードを確認"""
+            entered_password = password_entry.get()
+            if entered_password == admin_password:
+                password_dialog.destroy()
+                self._show_araichat_room_settings_dialog()
+            else:
+                messagebox.showerror("認証エラー", "パスワードが正しくありません")
+                password_entry.delete(0, tk.END)
+                password_entry.focus()
+        
+        def on_enter_key(event):
+            """Enterキーで認証"""
+            verify_password()
+        
+        password_entry.bind("<Return>", on_enter_key)
+        
+        button_frame = ctk.CTkFrame(main_frame)
+        button_frame.pack(pady=20)
+        
+        ok_button = ctk.CTkButton(
+            button_frame,
+            text="認証",
+            command=verify_password,
+            font=ctk.CTkFont(family="Yu Gothic", size=14, weight="bold"),
+            width=100,
+            fg_color="#3B82F6",
+            hover_color="#2563EB"
+        )
+        ok_button.pack(side="left", padx=10)
+        
+        cancel_button = ctk.CTkButton(
+            button_frame,
+            text="キャンセル",
+            command=password_dialog.destroy,
+            font=ctk.CTkFont(family="Yu Gothic", size=14),
+            width=100,
+            fg_color="#6B7280",
+            hover_color="#4B5563"
+        )
+        cancel_button.pack(side="left", padx=10)
+    
+    def _show_araichat_room_settings_dialog(self):
+        """ARAICHATルームID設定ダイアログ（認証後）"""
+        dialog = ctk.CTkToplevel(self.root)
+        dialog.title("ARAICHATルームID設定")
+        dialog.geometry("500x300")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+        
+        # メインフレーム
+        main_frame = ctk.CTkFrame(dialog)
+        main_frame.pack(fill="both", expand=True, padx=20, pady=20)
+        
+        # タイトル
+        title_label = ctk.CTkLabel(
+            main_frame,
+            text="ARAICHATルームID設定",
+            font=ctk.CTkFont(family="Yu Gothic", size=18, weight="bold")
+        )
+        title_label.pack(pady=(0, 20))
+        
+        # 現在のルームIDを読み込み
+        current_room_id = "142"  # デフォルト値
+        room_config_path = self._get_araichat_room_config_path()
+        
+        # まずconfig.envで指定されたパスを確認
+        if self.config and self.config.araichat_room_config_path:
+            config_env_path = Path(self.config.araichat_room_config_path)
+            if config_env_path.exists():
+                try:
+                    with open(config_env_path, 'r', encoding='utf-8') as f:
+                        config = json.load(f)
+                        current_room_id = config.get('default_room_id', '142')
+                        room_config_path = str(config_env_path)  # config.envのパスを使用
+                except Exception as e:
+                    logger.warning(f"ARAICHATルーム設定の読み込みに失敗（config.env）: {e}")
+        
+        # config.envのパスが存在しない場合は、実行ファイルと同じディレクトリを確認
+        if current_room_id == "142" and room_config_path and Path(room_config_path).exists():
+            try:
+                with open(room_config_path, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                    current_room_id = config.get('default_room_id', '142')
+            except Exception as e:
+                logger.warning(f"ARAICHATルーム設定の読み込みに失敗: {e}")
+        
+        # ルームID設定フレーム
+        room_frame = ctk.CTkFrame(main_frame)
+        room_frame.pack(fill="x", pady=10)
+        
+        room_label = ctk.CTkLabel(
+            room_frame,
+            text="ルームID:",
+            font=ctk.CTkFont(family="Yu Gothic", size=14)
+        )
+        room_label.pack(side="left", padx=10, pady=10)
+        
+        room_entry = ctk.CTkEntry(
+            room_frame,
+            width=150,
+            font=ctk.CTkFont(family="Yu Gothic", size=14)
+        )
+        room_entry.insert(0, str(current_room_id))
+        room_entry.pack(side="left", padx=10, pady=10)
+        
+        # 説明ラベル
+        info_label = ctk.CTkLabel(
+            main_frame,
+            text="※ すべての工程から同じルームにメッセージが送信されます。",
+            font=ctk.CTkFont(family="Yu Gothic", size=12),
+            text_color="gray"
+        )
+        info_label.pack(pady=10)
+        
+        # ボタンフレーム
+        button_frame = ctk.CTkFrame(main_frame)
+        button_frame.pack(fill="x", pady=20)
+        
+        def save_room_id():
+            """ルームIDを保存"""
+            try:
+                room_id = room_entry.get().strip()
+                if not room_id:
+                    messagebox.showerror("エラー", "ルームIDを入力してください")
+                    return
+                
+                # 数値かどうか確認（オプション）
+                if not room_id.isdigit():
+                    result = messagebox.askyesno(
+                        "確認",
+                        f"ルームID '{room_id}' は数値ではありません。\nこのまま保存しますか？"
+                    )
+                    if not result:
+                        return
+                
+                # 設定を保存（oneFile化を考慮して実行ファイルと同じディレクトリに保存）
+                config = {
+                    "default_room_id": room_id
+                }
+                
+                # 保存先は実行ファイルと同じディレクトリ（oneFile化対応）
+                save_config_path = Path(self._get_araichat_room_config_path())
+                # ディレクトリが存在しない場合は作成
+                save_config_path.parent.mkdir(parents=True, exist_ok=True)
+                
+                with open(save_config_path, 'w', encoding='utf-8') as f:
+                    json.dump(config, f, indent=2, ensure_ascii=False)
+                
+                logger.info(f"ARAICHATルームIDを保存しました: {room_id} (パス: {save_config_path})")
+                
+                # configのパスも更新（次回の送信時に新しい設定が読み込まれるように）
+                if self.config:
+                    self.config.araichat_room_config_path = str(save_config_path)
+                
+                messagebox.showinfo("完了", f"ルームIDを '{room_id}' に設定しました。\n次回の送信から反映されます。")
+                dialog.destroy()
+                
+            except Exception as e:
+                error_msg = f"ルームIDの保存に失敗しました: {str(e)}"
+                logger.error(error_msg, exc_info=True)
+                messagebox.showerror("エラー", error_msg)
+        
+        save_button = ctk.CTkButton(
+            button_frame,
+            text="保存",
+            command=save_room_id,
+            font=ctk.CTkFont(family="Yu Gothic", size=14, weight="bold"),
+            width=100,
+            fg_color="#3B82F6",
+            hover_color="#2563EB"
+        )
+        save_button.pack(side="left", padx=10)
+        
+        cancel_button = ctk.CTkButton(
+            button_frame,
+            text="キャンセル",
+            command=dialog.destroy,
+            font=ctk.CTkFont(family="Yu Gothic", size=14),
+            width=100,
+            fg_color="#6B7280",
+            hover_color="#4B5563"
+        )
+        cancel_button.pack(side="right", padx=10)
+    
+    def _get_araichat_room_config_path(self) -> str:
+        """ARAICHATルーム設定ファイルのパスを取得（oneFile化対応）"""
+        # 実行ファイルのディレクトリを取得
+        if getattr(sys, 'frozen', False):
+            # exe化されている場合
+            base_dir = Path(sys.executable).parent
+        else:
+            # 通常のPython実行の場合
+            base_dir = Path(__file__).parent.parent.parent
+        
+        # 設定ファイルのパス
+        config_path = base_dir / "araichat_room_config.json"
+        return str(config_path)
     
     def reload_config(self):
         """設定のリロード"""
@@ -3689,6 +3993,370 @@ class ModernDataExtractorUI:
             self.log_message(f"利用可能ロットの取得中にエラーが発生しました: {str(e)}")
             return pd.DataFrame()
     
+    def get_non_inspection_target_lots_for_shortage(self, connection, shortage_df):
+        """
+        不足品番の検査対象外ロットを取得（前後工程情報付き）
+        
+        Args:
+            connection: Accessデータベース接続
+            shortage_df: 不足数がマイナスのデータ
+        
+        Returns:
+            検査対象外ロットのDataFrame（前後工程情報を含む）
+        """
+        try:
+            if shortage_df.empty:
+                return pd.DataFrame()
+            
+            shortage_products = shortage_df[shortage_df['不足数'] < 0]['品番'].dropna().unique().tolist()
+            if not shortage_products:
+                return pd.DataFrame()
+            
+            self.log_message(f"検査対象外ロットを取得中: {len(shortage_products)}品番")
+            
+            # テーブル構造を取得
+            actual_columns, has_rows = self._get_inventory_table_structure(connection)
+            if not has_rows:
+                return pd.DataFrame()
+            
+            available_columns = [col for col in actual_columns if col in [
+                "品番", "品名", "客先", "数量", "ロット数量", "指示日", "号機", 
+                "現在工程番号", "現在工程名", "現在工程二次処理", "生産ロットID"
+            ]]
+            
+            if not available_columns:
+                available_columns = actual_columns
+            
+            columns_str = ", ".join([f"[{col}]" for col in available_columns])
+            shortage_placeholders = ", ".join("?" for _ in shortage_products)
+            
+            # 検査対象外のロットを取得（検査対象キーワードに一致しないもの）
+            # 高速化: WHERE条件を最適化
+            process_subconditions = [
+                "現在工程名 NOT LIKE '%完了%'",
+                "現在工程名 NOT LIKE '%梱包%'",
+            ]
+            
+            # 検査対象キーワードに一致しないロットを取得（高速化: 条件を統合）
+            if self.inspection_target_keywords and "現在工程名" in available_columns:
+                valid_keywords = [kw.strip() for kw in self.inspection_target_keywords if isinstance(kw, str) and kw.strip()]
+                if valid_keywords:
+                    # LIKE条件を統合して高速化（' をエスケープしてクエリ失敗を抑制）
+                    for kw in valid_keywords:
+                        kw_escaped = kw.replace("'", "''")
+                        process_subconditions.append(f"現在工程名 NOT LIKE '%{kw_escaped}%'")
+            
+            where_conditions = [
+                f"品番 IN ({shortage_placeholders})",
+                f"(現在工程名 IS NULL OR ({' AND '.join(process_subconditions)}))",
+            ]
+            
+            where_clause = " AND ".join(where_conditions)
+            
+            query = f"""
+            SELECT {columns_str}
+            FROM [t_現品票履歴]
+            WHERE {where_clause}
+            """
+            
+            with perf_timer(logger, "access.non_inspection_lots.read_sql"):
+                # 高速化: chunksizeを指定してメモリ効率を向上
+                non_inspection_lots_df = pd.read_sql(query, connection, params=shortage_products)
+            
+            if non_inspection_lots_df.empty:
+                return pd.DataFrame()
+            
+            # 前後工程情報の取得は不要（削除）
+            
+            # 出荷予定日をshortage_dfからマージ（品番で結合、高速化）
+            if not shortage_df.empty and '出荷予定日' in shortage_df.columns and '品番' in shortage_df.columns:
+                # 品番ごとの出荷予定日を取得（最初の値を使用、高速化）
+                shipping_date_map = shortage_df.groupby('品番')['出荷予定日'].first().to_dict()
+                if shipping_date_map:
+                    # mapを使用（高速、大量データでも効率的）
+                    non_inspection_lots_df['出荷予定日'] = non_inspection_lots_df['品番'].map(shipping_date_map)
+            
+            return non_inspection_lots_df
+            
+        except Exception as e:
+            self.log_message(f"検査対象外ロットの取得中にエラーが発生しました: {str(e)}")
+            logger.error(f"検査対象外ロット取得エラー: {e}", exc_info=True)
+            return pd.DataFrame()
+    
+    def _add_adjacent_process_info(self, lots_df: pd.DataFrame, process_master_path: str) -> pd.DataFrame:
+        """
+        前後工程情報をロットデータに追加（高速化版）
+        
+        Args:
+            lots_df: ロットデータ
+            process_master_path: 工程マスタのパス
+        
+        Returns:
+            前後工程情報が追加されたDataFrame
+        """
+        try:
+            from pathlib import Path
+            import os
+            
+            # 工程マスタをキャッシュから読み込み（高速化）
+            cache_key = 'process_master'
+            process_master_df = None
+            
+            # キャッシュチェック
+            if cache_key in self.master_cache:
+                try:
+                    current_mtime = os.path.getmtime(process_master_path)
+                    cached_mtime = self.cache_file_mtimes.get(cache_key, 0)
+                    if current_mtime == cached_mtime:
+                        process_master_df = self.master_cache[cache_key]
+                        logger.debug("工程マスタをキャッシュから読み込みました（ファイル未変更）")
+                except (OSError, AttributeError):
+                    pass
+            
+            # キャッシュミスの場合は読み込み
+            if process_master_df is None:
+                process_master_path_obj = Path(process_master_path)
+                if not process_master_path_obj.exists():
+                    return lots_df
+                
+                try:
+                    process_master_df = pd.read_excel(process_master_path, header=None, engine='openpyxl')
+                except Exception as e:
+                    self.log_message(f"工程マスタの読み込みに失敗しました: {str(e)}")
+                    return lots_df
+                
+                if process_master_df.empty:
+                    return lots_df
+                
+                # キャッシュに保存
+                try:
+                    self.master_cache[cache_key] = process_master_df
+                    self.cache_file_mtimes[cache_key] = os.path.getmtime(process_master_path)
+                    self.cache_timestamps[cache_key] = datetime.now()
+                except Exception:
+                    pass
+            
+            # 前後工程情報の列を追加（初期化）
+            lots_df = lots_df.copy()
+            lots_df['前工程番号'] = ''
+            lots_df['前工程名'] = ''
+            lots_df['後工程番号'] = ''
+            lots_df['後工程名'] = ''
+            lots_df['工程情報'] = ''
+            
+            # 必要な列が存在するか確認
+            if '品番' not in lots_df.columns or '現在工程番号' not in lots_df.columns:
+                return lots_df
+            
+            # 工程マスタの列名を事前に準備（高速化）
+            product_col = process_master_df.columns[0]
+            process_master_df[product_col] = process_master_df[product_col].astype(str).str.strip()
+            
+            # 工程番号と列インデックスのマッピングを事前作成（高速化）
+            process_number_to_col_idx = {}
+            for col_idx in range(1, len(process_master_df.columns)):
+                col_name = str(process_master_df.columns[col_idx]).strip()
+                if col_name:
+                    process_number_to_col_idx[col_name] = col_idx
+            
+            # 品番と工程番号の組み合わせで一括処理（高速化）
+            # 品番と現在工程番号の組み合わせを取得
+            lots_df['品番_clean'] = lots_df['品番'].astype(str).str.strip()
+            lots_df['現在工程番号_clean'] = lots_df['現在工程番号'].astype(str).str.strip()
+            
+            # 有効な行のみをフィルタリング
+            valid_mask = (lots_df['品番_clean'] != '') & (lots_df['品番_clean'] != 'nan') & \
+                        (lots_df['現在工程番号_clean'] != '') & (lots_df['現在工程番号_clean'] != 'nan')
+            
+            if not valid_mask.any():
+                lots_df = lots_df.drop(columns=['品番_clean', '現在工程番号_clean'])
+                return lots_df
+            
+            # 工程マスタから該当品番の行を一括取得（高速化）
+            unique_products = lots_df[valid_mask]['品番_clean'].unique()
+            matching_rows_dict = {}
+            
+            for product in unique_products:
+                matching_rows = process_master_df[process_master_df[product_col] == product]
+                if not matching_rows.empty:
+                    matching_rows_dict[product] = matching_rows.iloc[0]
+            
+            # ベクトル化された処理（高速化）
+            def get_process_info(row):
+                product = row['品番_clean']
+                current_process = row['現在工程番号_clean']
+                
+                if product not in matching_rows_dict or current_process not in process_number_to_col_idx:
+                    return pd.Series({
+                        '前工程番号': '',
+                        '前工程名': '',
+                        '後工程番号': '',
+                        '後工程名': ''
+                    })
+                
+                matching_row = matching_rows_dict[product]
+                current_col_idx = process_number_to_col_idx[current_process]
+                
+                # 前工程
+                prev_process_number = ''
+                prev_process_name = ''
+                if current_col_idx > 1:
+                    prev_col_idx = current_col_idx - 1
+                    prev_process_number = str(process_master_df.columns[prev_col_idx]).strip()
+                    prev_value = matching_row.iloc[prev_col_idx]
+                    prev_process_name = str(prev_value).strip() if pd.notna(prev_value) else ''
+                
+                # 後工程
+                next_process_number = ''
+                next_process_name = ''
+                if current_col_idx < len(process_master_df.columns) - 1:
+                    next_col_idx = current_col_idx + 1
+                    next_process_number = str(process_master_df.columns[next_col_idx]).strip()
+                    next_value = matching_row.iloc[next_col_idx]
+                    next_process_name = str(next_value).strip() if pd.notna(next_value) else ''
+                
+                return pd.Series({
+                    '前工程番号': prev_process_number,
+                    '前工程名': prev_process_name,
+                    '後工程番号': next_process_number,
+                    '後工程名': next_process_name
+                })
+            
+            # 一括処理（高速化）
+            process_info_df = lots_df[valid_mask].apply(get_process_info, axis=1)
+            lots_df.loc[valid_mask, '前工程番号'] = process_info_df['前工程番号']
+            lots_df.loc[valid_mask, '前工程名'] = process_info_df['前工程名']
+            lots_df.loc[valid_mask, '後工程番号'] = process_info_df['後工程番号']
+            lots_df.loc[valid_mask, '後工程名'] = process_info_df['後工程名']
+            
+            # 工程情報をまとめる（ベクトル化）
+            def build_process_info(row):
+                parts = []
+                if row.get('前工程名', ''):
+                    parts.append(f"前: {row['前工程名']}")
+                if row.get('現在工程名', ''):
+                    parts.append(f"現在: {row['現在工程名']}")
+                if row.get('後工程名', ''):
+                    parts.append(f"後: {row['後工程名']}")
+                return " / ".join(parts) if parts else ''
+            
+            lots_df['工程情報'] = lots_df.apply(build_process_info, axis=1)
+            
+            # 一時列を削除
+            lots_df = lots_df.drop(columns=['品番_clean', '現在工程番号_clean'])
+            
+            return lots_df
+            
+        except Exception as e:
+            self.log_message(f"前後工程情報の追加中にエラーが発生しました: {str(e)}")
+            logger.error(f"前後工程情報追加エラー: {e}", exc_info=True)
+            return lots_df
+    
+    def log_non_inspection_lots_info(self, connection, shortage_df):
+        """
+        検査対象外ロットの情報をログに出力（データを保存してボタンで送信可能にする）
+        
+        Args:
+            connection: Accessデータベース接続
+            shortage_df: 不足数がマイナスのデータ
+        """
+        try:
+            if shortage_df.empty:
+                self.non_inspection_lots_df = pd.DataFrame()
+                self._update_araichat_button_state()
+                return
+            
+            # 検査対象外ロットを取得
+            non_inspection_lots_df = self.get_non_inspection_target_lots_for_shortage(connection, shortage_df)
+            
+            # ソート処理（出荷予定日 → 品番 → 指示日の順で昇順）
+            non_inspection_lots_df = self._sort_non_inspection_lots_df(non_inspection_lots_df)
+            
+            # インスタンス変数に保存（ボタン送信用）
+            self.non_inspection_lots_df = non_inspection_lots_df.copy() if not non_inspection_lots_df.empty else pd.DataFrame()
+            
+            # ボタンの状態を更新
+            self._update_araichat_button_state()
+            
+            if non_inspection_lots_df.empty:
+                self.log_message("検査対象外ロットは見つかりませんでした")
+                return
+            
+            # ログに出力
+            self.log_message("=" * 80)
+            self.log_message("【検査対象外ロット（参考情報）】")
+            self.log_message(f"合計: {len(non_inspection_lots_df)}件")
+            self.log_message("=" * 80)
+            
+            # 工程ごとにグループ化してログ出力
+            if '現在工程名' in non_inspection_lots_df.columns:
+                for process_name, process_group_df in non_inspection_lots_df.groupby('現在工程名'):
+                    process_name_clean = str(process_name).strip() if pd.notna(process_name) else None
+                    
+                    self.log_message(f"\n工程: {process_name_clean or '工程名不明'}")
+                    # 既存の出力は最終行の情報のみを表示しているため、無駄なループを避けて同等の結果を生成
+                    last_row = process_group_df.iloc[-1]
+                    lot_quantity = last_row.get('ロット数量', '')
+                    current_process = last_row.get('現在工程名', '')
+                    instruction_date = last_row.get('指示日', '')
+                    machine_number = last_row.get('号機', '')
+                    
+                    info_parts = []
+                    if lot_quantity:
+                        info_parts.append(f"ロット数量: {lot_quantity}")
+                    if current_process:
+                        info_parts.append(f"現在工程: {current_process}")
+                    if instruction_date:
+                        info_parts.append(f"指示日: {instruction_date}")
+                    if machine_number:
+                        info_parts.append(f"号機: {machine_number}")
+                    
+                    self.log_message(f"  - {', '.join(info_parts)}")
+                    
+                    # 工程情報の出力は不要（削除）
+            
+            self.log_message("=" * 80)
+            self.log_message("")
+            self.log_message("💡 右上の「検査対象外ロットをARAICHATに送信」ボタンから送信できます")
+            
+        except Exception as e:
+            self.log_message(f"検査対象外ロット情報の出力中にエラーが発生しました: {str(e)}")
+            logger.error(f"検査対象外ロット情報出力エラー: {e}", exc_info=True)
+            self.non_inspection_lots_df = pd.DataFrame()
+            self._update_araichat_button_state()
+
+    def _sort_non_inspection_lots_df(self, lots_df: pd.DataFrame) -> pd.DataFrame:
+        """検査対象外ロットのソート（出荷予定日 → 品番 → 指示日、NaNは最後）"""
+        if lots_df is None or lots_df.empty:
+            return pd.DataFrame() if lots_df is None else lots_df
+
+        sort_df = lots_df.copy()
+
+        if '出荷予定日' in sort_df.columns:
+            sort_df['_sort_出荷予定日'] = pd.to_datetime(sort_df['出荷予定日'], errors='coerce')
+        else:
+            sort_df['_sort_出荷予定日'] = pd.NaT
+
+        if '指示日' in sort_df.columns:
+            sort_df['_sort_指示日'] = pd.to_datetime(sort_df['指示日'], errors='coerce')
+        else:
+            sort_df['_sort_指示日'] = pd.NaT
+
+        if '品番' in sort_df.columns:
+            sort_df['_sort_品番'] = sort_df['品番'].fillna('').astype(str)
+        else:
+            sort_df['_sort_品番'] = ''
+
+        return (
+            sort_df.sort_values(
+                by=['_sort_出荷予定日', '_sort_品番', '_sort_指示日'],
+                ascending=[True, True, True],
+                na_position='last'
+            )
+            .drop(columns=['_sort_出荷予定日', '_sort_品番', '_sort_指示日'])
+            .reset_index(drop=True)
+        )
+    
     def get_registered_products_lots(self, connection):
         """登録済み品番のロットをt_現品票履歴から取得"""
         try:
@@ -4688,6 +5356,15 @@ class ModernDataExtractorUI:
 
                 with perf_timer(logger, "lots.get_available_for_shortage"):
                     lots_df = self.get_available_lots_for_shortage(connection, shortage_df)
+                
+                # 【追加】検査対象外ロット情報を取得（参考情報として）
+                try:
+                    self.update_progress(start_progress + 0.105, "検査対象外ロット情報を取得中...")
+                    with perf_timer(logger, "lots.get_non_inspection_target"):
+                        self.log_non_inspection_lots_info(connection, shortage_df)
+                except Exception as e:
+                    self.log_message(f"検査対象外ロット情報の取得中にエラーが発生しました: {str(e)}")
+                    logger.error(f"検査対象外ロット情報取得エラー: {e}", exc_info=True)
              
             # 洗浄二次処理依頼からロットを取得（追加で取得）
             if (
@@ -8653,3 +9330,604 @@ class ModernDataExtractorUI:
             self.log_message(error_msg)
             logger.error(error_msg)
             messagebox.showerror("エラー", error_msg)
+    
+    def _update_araichat_button_state(self):
+        """ARAICHAT送信ボタンの有効/無効状態を更新"""
+        if hasattr(self, 'send_araichat_button'):
+            if self.non_inspection_lots_df is not None and not self.non_inspection_lots_df.empty:
+                # 有効時: 白基調で青と黒の配色（他のボタンと同じホバーパターン）
+                self.send_araichat_button.configure(
+                    state="normal", 
+                    fg_color="#FFFFFF",  # 白背景
+                    hover_color="#E5E7EB",  # ホバー時は薄いグレー（他のボタンと同じパターン）
+                    border_color="#3B82F6",  # 青のボーダー
+                    border_width=3,  # ボーダーを太く
+                    text_color="#1E3A8A"  # 濃い青のテキスト
+                )
+            else:
+                # 無効時: グレー
+                self.send_araichat_button.configure(
+                    state="disabled", 
+                    fg_color="#9CA3AF", 
+                    hover_color="#9CA3AF",
+                    border_color="#9CA3AF",
+                    border_width=2,
+                    text_color="#6B7280"
+                )
+    
+    def show_non_inspection_lots_confirmation(self):
+        """検査対象外ロット情報の確認ウィンドウを表示"""
+        try:
+            # データの確認
+            if self.non_inspection_lots_df is None or self.non_inspection_lots_df.empty:
+                messagebox.showwarning(
+                    "送信エラー",
+                    "検査対象外ロット情報がありません。\n\nデータ抽出を実行してから送信してください。"
+                )
+                return
+            
+            # 確認ウィンドウを作成（サイズは後で動的に調整）
+            confirm_window = ctk.CTkToplevel(self.root)
+            confirm_window.title("検査対象外ロット情報 - 送信確認")
+            confirm_window.transient(self.root)
+            confirm_window.grab_set()
+            confirm_window.focus_set()
+            
+            # モーダルウィンドウのスクロール問題を修正
+            # 親ウィンドウのスクロールイベントを無効化
+            def disable_parent_scroll(event):
+                # モーダルウィンドウが開いている間は親ウィンドウのスクロールを無効化
+                if confirm_window.winfo_exists():
+                    return "break"
+                return None
+            
+            # 親ウィンドウとその子ウィジェットのスクロールイベントを一時的に無効化
+            scroll_bindings = []
+            def disable_scroll_on_widget(widget):
+                try:
+                    # 既存のバインディングを保存
+                    bindings = widget.bind("<MouseWheel>")
+                    if bindings:
+                        scroll_bindings.append((widget, "<MouseWheel>", bindings))
+                    widget.bind("<MouseWheel>", disable_parent_scroll, add="+")
+                    
+                    # Linux用
+                    bindings4 = widget.bind("<Button-4>")
+                    if bindings4:
+                        scroll_bindings.append((widget, "<Button-4>", bindings4))
+                    widget.bind("<Button-4>", disable_parent_scroll, add="+")
+                    
+                    bindings5 = widget.bind("<Button-5>")
+                    if bindings5:
+                        scroll_bindings.append((widget, "<Button-5>", bindings5))
+                    widget.bind("<Button-5>", disable_parent_scroll, add="+")
+                except:
+                    pass
+            
+            # 親ウィンドウとその子ウィジェットに適用
+            disable_scroll_on_widget(self.root)
+            for child in self.root.winfo_children():
+                try:
+                    disable_scroll_on_widget(child)
+                except:
+                    pass
+            
+            # ウィンドウが閉じられた時にイベントを復元
+            def on_window_close():
+                # 保存したバインディングを復元
+                for widget, event, binding in scroll_bindings:
+                    try:
+                        if binding:
+                            widget.bind(event, binding)
+                        else:
+                            widget.unbind(event)
+                    except:
+                        pass
+                confirm_window.destroy()
+            
+            confirm_window.protocol("WM_DELETE_WINDOW", on_window_close)
+            
+            # メインフレーム（メインUIと同じスタイル）
+            main_frame = ctk.CTkFrame(confirm_window, fg_color="#EFF6FF", corner_radius=12)
+            main_frame.pack(fill="both", expand=True, padx=20, pady=20)
+            
+            # タイトル（メインUIと同じスタイル）
+            title_label = ctk.CTkLabel(
+                main_frame,
+                text="検査対象外ロット情報 - 送信確認",
+                font=ctk.CTkFont(family="Yu Gothic", size=20, weight="bold"),
+                text_color="#1E3A8A"
+            )
+            title_label.pack(pady=(15, 10))
+            
+            # 説明ラベル（メインUIと同じスタイル）
+            info_label = ctk.CTkLabel(
+                main_frame,
+                text=f"以下の {len(self.non_inspection_lots_df)}件 の検査対象外ロット情報があります。\n送信する行にチェックを入れてから送信してください。",
+                font=ctk.CTkFont(family="Yu Gothic", size=14),
+                text_color="#374151",
+                justify="left"
+            )
+            info_label.pack(pady=(0, 15))
+            
+            # テーブル表示用のフレーム（メインUIと同じスタイル）
+            table_frame = ctk.CTkFrame(main_frame, fg_color="white", corner_radius=8, border_width=1, border_color="#DBEAFE")
+            table_frame.pack(fill="both", expand=True, padx=15, pady=(0, 15))
+            
+            # Treeview用の内部フレーム（ttk.Treeviewは通常のtk.Frameが必要）
+            tree_container = tk.Frame(table_frame, bg="white")
+            tree_container.pack(fill="both", expand=True, padx=10, pady=10)
+            
+            # 表示する列を選択（工程情報、前工程名、後工程名を削除）
+            # 出荷予定日を送信の右に配置するため、最初に配置
+            # 品名の右に客先を追加
+            display_columns = ['出荷予定日', '品番', '品名', '客先', 'ロット数量', '現在工程名', '指示日', '号機', '生産ロットID']
+            available_columns = [col for col in display_columns if col in self.non_inspection_lots_df.columns]
+            
+            # チェックボックス列を最初に追加、その次に出荷予定日
+            tree_columns = ['送信'] + available_columns
+            
+            # Treeviewで表示
+            tree = ttk.Treeview(tree_container, columns=tree_columns, show='headings', height=20)
+            
+            # 列の設定
+            column_widths = {
+                '送信': 50,
+                '品番': 120,
+                '品名': 150,
+                '客先': 150,
+                'ロット数量': 100,
+                '現在工程名': 150,
+                '指示日': 120,
+                '号機': 80,
+                '生産ロットID': 120,
+                '出荷予定日': 120
+            }
+            
+            # チェックボックス列の設定
+            tree.heading('送信', text='送信')
+            tree.column('送信', width=column_widths.get('送信', 50), anchor='center')
+            
+            for col in available_columns:
+                tree.heading(col, text=col)
+                tree.column(col, width=column_widths.get(col, 120), anchor='w')
+            
+            # チェック状態を管理する辞書（デフォルトはFalse）
+            check_states = {}
+            
+            # スクロールバー
+            v_scrollbar = ttk.Scrollbar(tree_container, orient="vertical", command=tree.yview)
+            h_scrollbar = ttk.Scrollbar(tree_container, orient="horizontal", command=tree.xview)
+            tree.configure(yscrollcommand=v_scrollbar.set, xscrollcommand=h_scrollbar.set)
+            
+            # グリッド配置
+            tree.grid(row=0, column=0, sticky="nsew")
+            v_scrollbar.grid(row=0, column=1, sticky="ns")
+            h_scrollbar.grid(row=1, column=0, sticky="ew")
+            
+            tree_container.grid_rowconfigure(0, weight=1)
+            tree_container.grid_columnconfigure(0, weight=1)
+            
+            # スタイル設定（他のUIと統一：Yu Gothicフォントを使用）
+            style = ttk.Style()
+            style.configure("Treeview", 
+                          background="white",
+                          foreground="#374151",
+                          fieldbackground="white",
+                          font=("Yu Gothic", 10))
+            # 選択時のハイライトを無効化（背景色を白のまま）
+            style.map("Treeview",
+                     background=[('selected', 'white')],
+                     foreground=[('selected', '#374151')])
+            
+            # チェックありの行のタグスタイル（1段階強い色）
+            tree.tag_configure('checked', background='#BFDBFE')  # より濃い青の背景
+            
+            # マウスオーバー時のハイライト用タグ（1段階強い色）
+            tree.tag_configure('hover', background='#E5E7EB')  # より濃いグレーの背景
+            
+            # 現在マウスオーバーしている行を追跡
+            current_hover_item = None
+            
+            # マウスオーバー時のハイライト処理
+            def on_mouse_enter(event):
+                nonlocal current_hover_item
+                item = tree.identify_row(event.y)
+                if item and item != current_hover_item:
+                    # 前の行のハイライトを解除
+                    if current_hover_item:
+                        prev_tags = list(tree.item(current_hover_item, 'tags'))
+                        if 'hover' in prev_tags:
+                            prev_tags.remove('hover')
+                        # チェック状態を維持
+                        if check_states.get(current_hover_item, False):
+                            if 'checked' not in prev_tags:
+                                prev_tags.append('checked')
+                        tree.item(current_hover_item, tags=tuple(prev_tags) if prev_tags else ())
+                    
+                    # 新しい行をハイライト
+                    current_hover_item = item
+                    current_tags = list(tree.item(item, 'tags'))
+                    if 'hover' not in current_tags:
+                        current_tags.append('hover')
+                    tree.item(item, tags=tuple(current_tags))
+            
+            def on_mouse_leave(event):
+                nonlocal current_hover_item
+                if current_hover_item:
+                    tags = list(tree.item(current_hover_item, 'tags'))
+                    if 'hover' in tags:
+                        tags.remove('hover')
+                    # チェック状態を維持
+                    if check_states.get(current_hover_item, False):
+                        if 'checked' not in tags:
+                            tags.append('checked')
+                    tree.item(current_hover_item, tags=tuple(tags) if tags else ())
+                    current_hover_item = None
+            
+            # マウス移動時のハイライト処理
+            def on_mouse_motion(event):
+                on_mouse_enter(event)
+            
+            # チェックボックスのトグル関数（行全体のクリックに対応）
+            def toggle_check(event):
+                # クリック位置を確認
+                region = tree.identify_region(event.x, event.y)
+                if region not in ("cell", "tree"):
+                    return
+                
+                item = tree.identify_row(event.y)
+                if not item:
+                    return
+                
+                # 行全体のクリックでチェック状態をトグル
+                current_state = check_states.get(item, False)
+                new_state = not current_state
+                check_states[item] = new_state
+                
+                # チェックボックスの表示を更新
+                check_symbol = "☑" if new_state else "☐"
+                tree.set(item, '送信', check_symbol)
+                
+                # ハイライト表示を更新（タグを使用）
+                current_tags = list(tree.item(item, 'tags'))
+                # hoverタグを維持
+                has_hover = 'hover' in current_tags
+                if new_state:
+                    if 'checked' not in current_tags:
+                        current_tags.append('checked')
+                else:
+                    if 'checked' in current_tags:
+                        current_tags.remove('checked')
+                
+                # hoverタグを再追加
+                if has_hover and 'hover' not in current_tags:
+                    current_tags.append('hover')
+                
+                tree.item(item, tags=tuple(current_tags) if current_tags else ())
+            
+            # 行全体のクリックイベントをバインド
+            def on_tree_click(event):
+                toggle_check(event)
+                # デフォルトの選択動作を防ぐ
+                return "break"
+            
+            tree.bind("<Button-1>", on_tree_click)
+            tree.bind("<Double-1>", on_tree_click)
+            tree.bind("<Motion>", on_mouse_motion)
+            tree.bind("<Leave>", on_mouse_leave)
+            
+            # データを挿入（日付形式をyyyy/mm/ddに変換）
+            # TreeviewのアイテムIDとDataFrameのインデックスの対応を保持
+            item_to_df_index = {}
+            def _format_date_series_for_tree(series: pd.Series) -> pd.Series:
+                original = series.astype(object)
+                original_str = original.where(pd.notna(original), '').astype(str)
+                parsed = pd.to_datetime(original, errors='coerce')
+                formatted = parsed.dt.strftime('%Y/%m/%d')
+                mask = parsed.notna()
+                return original_str.where(~mask, formatted)
+
+            tree_df = self.non_inspection_lots_df.loc[:, available_columns].copy()
+            for col in available_columns:
+                if col in ['指示日', '出荷予定日'] and col in tree_df.columns:
+                    tree_df[col] = _format_date_series_for_tree(tree_df[col])
+                else:
+                    series = tree_df[col].astype(object)
+                    tree_df[col] = series.where(pd.notna(series), '').astype(str)
+
+            for row_tuple in tree_df.itertuples(index=True, name=None):
+                idx = row_tuple[0]
+                values = ['☐', *row_tuple[1:]]  # チェックボックス列（デフォルトは未チェック）
+                item_id = tree.insert("", "end", values=values)
+                # チェック状態を初期化（デフォルトはFalse）
+                check_states[item_id] = False
+                # TreeviewのアイテムIDとDataFrameのインデックスの対応を保存
+                item_to_df_index[item_id] = idx
+            
+            # ウィンドウサイズを動的に計算（列幅の合計 + 余白 + スクロールバー）
+            # 実際に設定された列幅の合計を計算
+            total_column_width = column_widths.get('送信', 50)  # チェックボックス列
+            for col in available_columns:
+                total_column_width += column_widths.get(col, 120)
+            
+            # 余白とスクロールバーを考慮
+            # メインフレームのパディング（左右20px × 2 = 40px）
+            # テーブルフレームのパディング（左右15px × 2 = 30px）
+            # ツリーコンテナのパディング（左右10px × 2 = 20px）
+            # 縦スクロールバー（約20px）
+            # ウィンドウの装飾（約20px）
+            total_padding = 40 + 30 + 20 + 20 + 20
+            window_width = total_column_width + total_padding
+            
+            # 画面サイズを取得して、最大幅を制限（画面幅の95%を超えないように）
+            screen_width = confirm_window.winfo_screenwidth()
+            max_width = int(screen_width * 0.95)
+            window_width = min(window_width, max_width)
+            
+            # ウィンドウの高さはデータ行数に応じて調整
+            row_count = len(self.non_inspection_lots_df)
+            # 1行あたり約25px、ヘッダーとボタンエリアで約250px
+            calculated_height = max(400, min(800, row_count * 25 + 250))
+            # 画面高さの90%を超えないように
+            screen_height = confirm_window.winfo_screenheight()
+            max_height = int(screen_height * 0.9)
+            calculated_height = min(calculated_height, max_height)
+            
+            # ウィンドウサイズを設定（update_idletasks()を呼んでから計算を正確にする）
+            confirm_window.update_idletasks()
+            confirm_window.geometry(f"{window_width}x{calculated_height}")
+            
+            # ウィンドウを中央に配置
+            x = (screen_width - window_width) // 2
+            y = (screen_height - calculated_height) // 2
+            confirm_window.geometry(f"{window_width}x{calculated_height}+{x}+{y}")
+            
+            # ボタンフレーム（メインUIと同じスタイル）
+            button_frame = ctk.CTkFrame(main_frame, fg_color="transparent")
+            button_frame.pack(pady=(0, 15))
+            
+            # 送信ボタン（チェックありの行のみを送信）
+            def send_checked_items():
+                # チェックありの行のインデックスを取得
+                checked_indices = []
+                for item_id, is_checked in check_states.items():
+                    if is_checked:
+                        # TreeviewのアイテムIDから元のDataFrameのインデックスを取得
+                        if item_id in item_to_df_index:
+                            checked_indices.append(item_to_df_index[item_id])
+                
+                if not checked_indices:
+                    messagebox.showwarning(
+                        "送信エラー",
+                        "送信対象が選択されていません。\n\nチェックボックスで送信する行を選択してください。"
+                    )
+                    return
+                
+                # 送信前の最終確認
+                checked_count = len(checked_indices)
+                confirm_result = messagebox.askyesno(
+                    "送信確認",
+                    f"選択された{checked_count}件のロット情報をARAICHATに送信しますか？\n\n"
+                    "この操作は取り消せません。"
+                )
+                
+                if not confirm_result:
+                    return  # ユーザーが「いいえ」を選択した場合は送信をキャンセル
+                
+                # チェックありの行のみのDataFrameを作成
+                checked_df = self.non_inspection_lots_df.loc[checked_indices].copy()
+                
+                # ウィンドウを閉じて送信処理を開始
+                confirm_window.destroy()
+                self.send_non_inspection_lots_to_araichat_with_df(checked_df)
+            
+            send_button = ctk.CTkButton(
+                button_frame,
+                text="ARAICHATに送信",
+                command=send_checked_items,
+                font=ctk.CTkFont(family="Yu Gothic", size=14, weight="bold"),
+                width=150,
+                height=40,
+                fg_color="#FFFFFF",  # 白背景
+                hover_color="#E5E7EB",  # ホバー時は薄いグレー（他のボタンと同じパターン）
+                corner_radius=10,
+                border_width=3,
+                border_color="#3B82F6",  # 青のボーダー（太く）
+                text_color="#1E3A8A"  # 濃い青のテキスト
+            )
+            send_button.pack(side="left", padx=10)
+            
+            # キャンセルボタン
+            cancel_button = ctk.CTkButton(
+                button_frame,
+                text="キャンセル",
+                command=on_window_close,
+                font=ctk.CTkFont(family="Yu Gothic", size=14, weight="bold"),
+                width=150,
+                height=40,
+                fg_color="#6B7280",
+                hover_color="#4B5563",
+                text_color="white"
+            )
+            cancel_button.pack(side="left", padx=10)
+            
+        except Exception as e:
+            self.log_message(f"確認ウィンドウの表示中にエラーが発生しました: {str(e)}")
+            logger.error(f"確認ウィンドウ表示エラー: {e}", exc_info=True)
+            messagebox.showerror("エラー", f"確認ウィンドウの表示に失敗しました:\n{str(e)}")
+    
+    def _confirm_and_send(self, confirm_window):
+        """確認ウィンドウを閉じて送信処理を開始（後方互換性のため残す）"""
+        confirm_window.destroy()
+        self.send_non_inspection_lots_to_araichat()
+    
+    def send_non_inspection_lots_to_araichat_with_df(self, target_df):
+        """指定されたDataFrameをARAICHATに送信"""
+        try:
+            # 送信処理を別スレッドで実行（UIをブロックしない）
+            if hasattr(self, 'send_araichat_button'):
+                self.send_araichat_button.configure(state="disabled", text="送信中...")
+            threading.Thread(
+                target=self._send_non_inspection_lots_to_araichat_thread_with_df,
+                args=(target_df,),
+                daemon=True
+            ).start()
+            
+        except Exception as e:
+            self.log_message(f"ARAICHAT送信処理の開始中にエラーが発生しました: {str(e)}")
+            logger.error(f"ARAICHAT送信処理開始エラー: {e}", exc_info=True)
+            messagebox.showerror("エラー", f"送信処理の開始に失敗しました:\n{str(e)}")
+            if hasattr(self, 'send_araichat_button'):
+                self.send_araichat_button.configure(state="normal", text="検査対象外ロットをARAICHATに送信")
+    
+    def send_non_inspection_lots_to_araichat(self):
+        """検査対象外ロット情報をARAICHATに送信（手動送信）"""
+        try:
+            # 送信処理を別スレッドで実行（UIをブロックしない）
+            self.send_araichat_button.configure(state="disabled", text="送信中...")
+            threading.Thread(
+                target=self._send_non_inspection_lots_to_araichat_thread,
+                daemon=True
+            ).start()
+            
+        except Exception as e:
+            self.log_message(f"ARAICHAT送信処理の開始中にエラーが発生しました: {str(e)}")
+            logger.error(f"ARAICHAT送信処理開始エラー: {e}", exc_info=True)
+            messagebox.showerror("エラー", f"送信処理の開始に失敗しました:\n{str(e)}")
+            if hasattr(self, 'send_araichat_button'):
+                self.send_araichat_button.configure(state="normal", text="検査対象外ロットをARAICHATに送信")
+    
+    def _send_non_inspection_lots_to_araichat_thread_with_df(self, target_df):
+        """ARAICHAT送信処理（スレッド実行、指定されたDataFrameを使用）"""
+        try:
+            # ARAICHAT通知サービスを初期化
+            if (not self.config or 
+                not self.config.araichat_base_url or 
+                not self.config.araichat_api_key):
+                self.log_message("ARAICHAT設定が不完全です。config.envを確認してください。")
+                messagebox.showwarning(
+                    "設定エラー",
+                    "ARAICHAT設定が不完全です。\n\n"
+                    "config.envに以下を設定してください：\n"
+                    "- ARAICHAT_BASE_URL\n"
+                    "- ARAICHAT_API_KEY\n"
+                    "- ARAICHAT_ROOM_CONFIG_PATH（オプション）"
+                )
+                return
+            
+            from app.services.chat_notification_service import ChatNotificationService
+            chat_service = ChatNotificationService(
+                base_url=self.config.araichat_base_url,
+                api_key=self.config.araichat_api_key,
+                room_config_path=self.config.araichat_room_config_path
+            )
+            
+            # 全体を1回で送信（ソート順を維持）
+            # ソート順を維持（出荷予定日 → 品番 → 指示日）
+            target_df_sorted = self._sort_non_inspection_lots_df(target_df)
+            
+            # 送信先の工程名を決定（最初に見つかった工程名、またはNone）
+            process_name_for_send = None
+            if '現在工程名' in target_df_sorted.columns:
+                # 最初の非空の工程名を取得
+                for process_name in target_df_sorted['現在工程名'].dropna().unique():
+                    if pd.notna(process_name) and str(process_name).strip():
+                        process_name_for_send = str(process_name).strip()
+                        break
+            
+            try:
+                success = chat_service.send_non_inspection_lots_notification(
+                    target_df_sorted,
+                    process_name_for_send
+                )
+                
+                if success:
+                    self.log_message(f"ARAICHAT通知を送信しました（{len(target_df_sorted)}件のロット）")
+                    messagebox.showinfo("送信完了", f"送信が完了しました。\n\n送信件数: {len(target_df_sorted)}件")
+                else:
+                    self.log_message("ARAICHAT通知の送信に失敗しました")
+                    messagebox.showerror("送信失敗", "ARAICHAT通知の送信に失敗しました。\n\nログを確認してください。")
+            except Exception as e:
+                error_msg = f"ARAICHAT通知送信中にエラーが発生しました: {str(e)}"
+                self.log_message(error_msg)
+                logger.error(f"ARAICHAT通知送信エラー: {e}", exc_info=True)
+                messagebox.showerror("送信エラー", error_msg)
+            
+        except Exception as e:
+            error_msg = f"ARAICHAT送信処理中にエラーが発生しました: {str(e)}"
+            self.log_message(error_msg)
+            logger.error(f"ARAICHAT送信処理エラー: {e}", exc_info=True)
+            messagebox.showerror("エラー", error_msg)
+        finally:
+            # ボタンの状態を復元
+            if hasattr(self, 'send_araichat_button'):
+                self.send_araichat_button.configure(state="normal", text="検査対象外ロットをARAICHATに送信")
+                self._update_araichat_button_state()
+    
+    def _send_non_inspection_lots_to_araichat_thread(self):
+        """ARAICHAT送信処理（スレッド実行）"""
+        try:
+            # ARAICHAT通知サービスを初期化
+            if (not self.config or 
+                not self.config.araichat_base_url or 
+                not self.config.araichat_api_key):
+                self.log_message("ARAICHAT設定が不完全です。config.envを確認してください。")
+                messagebox.showwarning(
+                    "設定エラー",
+                    "ARAICHAT設定が不完全です。\n\n"
+                    "config.envに以下を設定してください：\n"
+                    "- ARAICHAT_BASE_URL\n"
+                    "- ARAICHAT_API_KEY\n"
+                    "- ARAICHAT_ROOM_CONFIG_PATH（オプション）"
+                )
+                return
+            
+            from app.services.chat_notification_service import ChatNotificationService
+            chat_service = ChatNotificationService(
+                base_url=self.config.araichat_base_url,
+                api_key=self.config.araichat_api_key,
+                room_config_path=self.config.araichat_room_config_path
+            )
+            
+            # 全体を1回で送信（ソート順を維持）
+            # ソート順を維持（出荷予定日 → 品番 → 指示日）
+            target_df_sorted = self._sort_non_inspection_lots_df(self.non_inspection_lots_df)
+            
+            # 送信先の工程名を決定（最初に見つかった工程名、またはNone）
+            process_name_for_send = None
+            if '現在工程名' in target_df_sorted.columns:
+                # 最初の非空の工程名を取得
+                for process_name in target_df_sorted['現在工程名'].dropna().unique():
+                    if pd.notna(process_name) and str(process_name).strip():
+                        process_name_for_send = str(process_name).strip()
+                        break
+            
+            try:
+                success = chat_service.send_non_inspection_lots_notification(
+                    target_df_sorted,
+                    process_name_for_send
+                )
+                
+                if success:
+                    self.log_message(f"ARAICHAT通知を送信しました（{len(target_df_sorted)}件のロット）")
+                    messagebox.showinfo("送信完了", f"送信が完了しました。\n\n送信件数: {len(target_df_sorted)}件")
+                else:
+                    self.log_message("ARAICHAT通知の送信に失敗しました")
+                    messagebox.showerror("送信失敗", "ARAICHAT通知の送信に失敗しました。\n\nログを確認してください。")
+            except Exception as e:
+                error_msg = f"ARAICHAT通知送信中にエラーが発生しました: {str(e)}"
+                self.log_message(error_msg)
+                logger.error(f"ARAICHAT通知送信エラー: {e}", exc_info=True)
+                messagebox.showerror("送信エラー", error_msg)
+            
+        except Exception as e:
+            error_msg = f"ARAICHAT送信処理中にエラーが発生しました: {str(e)}"
+            self.log_message(error_msg)
+            logger.error(f"ARAICHAT送信処理エラー: {e}", exc_info=True)
+            messagebox.showerror("エラー", error_msg)
+        finally:
+            # ボタンの状態を復元
+            if hasattr(self, 'send_araichat_button'):
+                self.send_araichat_button.configure(state="normal", text="検査対象外ロットをARAICHATに送信")
+                self._update_araichat_button_state()
