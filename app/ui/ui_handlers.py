@@ -3124,7 +3124,7 @@ class ModernDataExtractorUI:
             # 必要な列: 品番, 品名, 客先, 出荷予定日, 出荷数量, 在庫数, 不足数
             # 「処理」列と「注文ID」列は不要のため除外
             # テーブルの列名は「出荷数量」「在庫数」のため、それを使用
-            required_columns = ["品番", "品名", "客先", "出荷予定日", "出荷数量", "在庫数", "不足数"]
+            required_columns = ["品番", "品名", "客先", "出荷予定日", "出荷数量", "在庫数", "不足数", "梱包完了合計"]
             available_columns = [col for col in required_columns if col in actual_columns]
             
             if not available_columns:
@@ -3174,21 +3174,27 @@ class ModernDataExtractorUI:
                 df['不足数'] = 0
                 self.log_message("不足数列が見つかりませんでした。0を設定しました。")
             
-            # t_現品票履歴から梱包工程の数量を取得
-            self.update_progress(0.35, "梱包工程データを取得中...")
-            with perf_timer(logger, "packaging_quantities"):
-                packaging_data = self.get_packaging_quantities(connection, df)
-            
-            # 梱包数量をメインデータに結合
-            self.update_progress(0.45, "データを処理中...")
-            if not packaging_data.empty and '品番' in df.columns:
-                df = df.merge(packaging_data, on='品番', how='left')
-                # 梱包数量が存在しない場合は0を設定
-                df['梱包・完了'] = df['梱包・完了'].fillna(0)
-                self.log_message(f"梱包工程データを結合しました: {len(packaging_data)}件")
+            # 在梱包数（梱包・完了）の取得
+            # 優先: T_出荷予定集計の「梱包完了合計」（不足数が既に加味済みの場合、二重計上を避けるため）
+            if '梱包完了合計' in df.columns:
+                df['梱包・完了'] = pd.to_numeric(df['梱包完了合計'], errors='coerce').fillna(0).astype(int)
+                self.log_message("在梱包数はT_出荷予定集計の「梱包完了合計」を使用しました")
             else:
-                df['梱包・完了'] = 0
-                self.log_message("梱包工程データが見つかりませんでした")
+                # フォールバック: t_現品票履歴から梱包工程の数量を集計して付与
+                self.update_progress(0.35, "梱包工程データを取得中...")
+                with perf_timer(logger, "packaging_quantities"):
+                    packaging_data = self.get_packaging_quantities(connection, df)
+
+                # 梱包数量をメインデータに結合
+                self.update_progress(0.45, "データを処理中...")
+                if not packaging_data.empty and '品番' in df.columns:
+                    df = df.merge(packaging_data, on='品番', how='left')
+                    # 梱包数量が存在しない場合は0を設定
+                    df['梱包・完了'] = df['梱包・完了'].fillna(0)
+                    self.log_message(f"梱包工程データを結合しました: {len(packaging_data)}件")
+                else:
+                    df['梱包・完了'] = 0
+                    self.log_message("梱包工程データが見つかりませんでした")
             
             # 梱包・完了を数値型に変換してから整数に変換
             df['梱包・完了'] = pd.to_numeric(df['梱包・完了'], errors='coerce').fillna(0).astype(int)
