@@ -116,6 +116,16 @@ class DatabaseConfig:
                     self.registered_products_path = self._get_resource_path(registered_products_path)
             else:
                 self.registered_products_path = None
+
+            # 抽出対象外（品番）マスタファイルのパスを取得（NAS共有対応）
+            excluded_products_path = os.getenv("EXTRACT_EXCLUDE_PRODUCTS_PATH")
+            if excluded_products_path:
+                if excluded_products_path.startswith('\\\\'):
+                    self.extract_exclude_products_path = excluded_products_path
+                else:
+                    self.extract_exclude_products_path = self._get_resource_path(excluded_products_path)
+            else:
+                self.extract_exclude_products_path = None
             
             # ログディレクトリのパスを取得
             # NAS上のUNCパスもそのまま使用可能（絶対パスの場合はそのまま返す）
@@ -472,7 +482,6 @@ class DatabaseConfig:
         except Exception as e:
             logger.error(f"設定の検証に失敗しました: {e}")
             return False
-
 
 
 

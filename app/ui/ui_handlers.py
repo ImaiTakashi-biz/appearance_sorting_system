@@ -137,6 +137,15 @@ class ModernDataExtractorUI:
         else:
             # 開発環境の場合、プロジェクトルートに保存
             self.registered_products_file = Path(__file__).parent.parent.parent / "registered_products.json"
+
+        # 抽出対象外（品番）マスタ
+        self.excluded_products: List[Dict[str, str]] = []  # [{品番, メモ}, ...]
+        if getattr(self.config, "extract_exclude_products_path", None):
+            self.excluded_products_file = Path(self.config.extract_exclude_products_path)
+        elif getattr(sys, 'frozen', False):
+            self.excluded_products_file = Path(sys.executable).parent / "extract_exclude_products.json"
+        else:
+            self.excluded_products_file = Path(__file__).parent.parent.parent / "extract_exclude_products.json"
         
         # カレンダー用の変数初期化
         today = date.today()
@@ -276,6 +285,9 @@ class ModernDataExtractorUI:
         
         # 登録済み品番リストの読み込み
         self.load_registered_products()
+
+        # 抽出対象外（品番）マスタの読み込み
+        self.load_excluded_products()
         
         # UI構築後に全画面表示を設定
         self.root.after(200, self.set_fullscreen)  # UI完全構築後に全画面表示
@@ -1531,6 +1543,112 @@ class ModernDataExtractorUI:
             logger.debug(f"登録済み品番リストを保存しました: {len(self.registered_products)}件")
         except Exception as e:
             logger.error(f"登録済み品番リストの保存に失敗しました: {str(e)}")
+
+    def _normalize_product_number(self, value: Any) -> str:
+        return str(value or "").strip()
+
+    def get_excluded_product_numbers_set(self) -> set[str]:
+        """抽出対象外（品番）のセットを返す（空白は除外）。"""
+        result: set[str] = set()
+        for item in (self.excluded_products or []):
+            if isinstance(item, dict):
+                pn = self._normalize_product_number(item.get("品番", ""))
+            else:
+                pn = self._normalize_product_number(item)
+            if pn:
+                result.add(pn)
+        return result
+
+    def load_excluded_products(self) -> None:
+        """抽出対象外（品番）マスタを読み込む"""
+        try:
+            self.excluded_products = []
+            if not self.excluded_products_file:
+                return
+
+            if not self.excluded_products_file.exists():
+                # 初回用に空ファイルを作成（失敗しても動作は継続）
+                try:
+                    self.excluded_products_file.parent.mkdir(parents=True, exist_ok=True)
+                    tmp_path = self.excluded_products_file.with_suffix(self.excluded_products_file.suffix + ".tmp")
+                    with open(tmp_path, "w", encoding="utf-8-sig") as f:
+                        json.dump([], f, ensure_ascii=False, indent=2)
+                    tmp_path.replace(self.excluded_products_file)
+                except Exception:
+                    pass
+                return
+
+            raw_bytes = self.excluded_products_file.read_bytes()
+            payload = None
+            last_error: Optional[Exception] = None
+            for enc in ("utf-8-sig", "utf-8", "cp932", "shift_jis"):
+                try:
+                    payload = json.loads(raw_bytes.decode(enc))
+                    last_error = None
+                    break
+                except Exception as e:
+                    last_error = e
+            if last_error is not None:
+                raise last_error
+
+            items: list[dict[str, str]] = []
+            if isinstance(payload, list):
+                for entry in payload:
+                    if isinstance(entry, dict):
+                        pn = self._normalize_product_number(entry.get("品番", ""))
+                        memo = self._normalize_product_number(entry.get("メモ", ""))
+                        if pn:
+                            items.append({"品番": pn, "メモ": memo})
+                    else:
+                        pn = self._normalize_product_number(entry)
+                        if pn:
+                            items.append({"品番": pn, "メモ": ""})
+
+            # 重複排除（順序維持）
+            seen: set[str] = set()
+            deduped: list[dict[str, str]] = []
+            for item in items:
+                pn = item.get("品番", "")
+                if pn and pn not in seen:
+                    seen.add(pn)
+                    deduped.append(item)
+
+            self.excluded_products = deduped
+            logger.bind(channel="SYS").info(f"抽出対象外（品番）マスタを読み込みました: {len(self.excluded_products)}件")
+        except Exception as e:
+            logger.error(f"抽出対象外（品番）マスタの読み込みに失敗しました: {str(e)}")
+            self.excluded_products = []
+
+    def save_excluded_products(self) -> None:
+        """抽出対象外（品番）マスタを保存"""
+        try:
+            if not self.excluded_products_file:
+                return
+            self.excluded_products_file.parent.mkdir(parents=True, exist_ok=True)
+
+            # 正規化＋重複排除
+            items: list[dict[str, str]] = []
+            seen: set[str] = set()
+            for entry in (self.excluded_products or []):
+                if isinstance(entry, dict):
+                    pn = self._normalize_product_number(entry.get("品番", ""))
+                    memo = self._normalize_product_number(entry.get("メモ", ""))
+                else:
+                    pn = self._normalize_product_number(entry)
+                    memo = ""
+                if not pn or pn in seen:
+                    continue
+                seen.add(pn)
+                items.append({"品番": pn, "メモ": memo})
+
+            tmp_path = self.excluded_products_file.with_suffix(self.excluded_products_file.suffix + ".tmp")
+            with open(tmp_path, "w", encoding="utf-8-sig") as f:
+                json.dump(items, f, ensure_ascii=False, indent=2)
+            tmp_path.replace(self.excluded_products_file)
+            self.excluded_products = items
+            logger.debug(f"抽出対象外（品番）マスタを保存しました: {len(self.excluded_products)}件")
+        except Exception as e:
+            logger.error(f"抽出対象外（品番）マスタの保存に失敗しました: {str(e)}")
     
     def create_period_selector(self, parent):
         """期間選択UIの作成"""
@@ -3034,6 +3152,18 @@ class ModernDataExtractorUI:
             # 列名をリネーム（出荷数量→出荷数）
             if '出荷数量' in df.columns:
                 df = df.rename(columns={'出荷数量': '出荷数'})
+
+            # 抽出対象外（品番）を除外（通常品：出荷予定日抽出の結果のみ）
+            try:
+                excluded_products = self.get_excluded_product_numbers_set()
+                if excluded_products and '品番' in df.columns:
+                    before = len(df)
+                    df = df[~df['品番'].fillna('').astype(str).str.strip().isin(excluded_products)].copy()
+                    removed = before - len(df)
+                    if removed > 0:
+                        self.log_message(f"抽出対象外（品番）で除外: {removed}件（{len(excluded_products)}品番）")
+            except Exception as e:
+                logger.debug(f"抽出対象外（品番）の除外に失敗: {e}")
             
             # 出荷数・在庫数・不足数が存在しない場合は0を設定（後方互換性のため）
             if '出荷数' not in df.columns:
@@ -9235,6 +9365,10 @@ class ModernDataExtractorUI:
                 label="検査対象CSVを開く",
                 command=self.open_inspection_target_csv_file
             )
+            master_menu.add_command(
+                label="抽出対象外（品番）マスタを編集",
+                command=self.show_excluded_products_dialog
+            )
 
             # 設定メニュー
             menubar.add_command(label="⚙️ 設定", command=self.show_settings_dialog)
@@ -9361,6 +9495,166 @@ class ModernDataExtractorUI:
             self.log_message(error_msg)
             logger.error(error_msg)
             messagebox.showerror("エラー", error_msg)
+
+    def show_excluded_products_dialog(self):
+        """抽出対象外（品番）マスタ編集ダイアログ"""
+        dialog = ctk.CTkToplevel(self.root)
+        dialog.title("抽出対象外（品番）マスタ")
+        dialog.geometry("650x520")
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        container = ctk.CTkFrame(dialog, fg_color="white")
+        container.pack(fill="both", expand=True, padx=16, pady=16)
+
+        title = ctk.CTkLabel(
+            container,
+            text="抽出対象外（品番）",
+            font=ctk.CTkFont(family="Yu Gothic", size=18, weight="bold"),
+            text_color="#111827",
+        )
+        title.pack(anchor="w", pady=(0, 8))
+
+        desc = ctk.CTkLabel(
+            container,
+            text="ここで登録した品番は、Accessからの抽出結果（出荷予定集計・不足・ロット取得）から除外されます。",
+            font=ctk.CTkFont(family="Yu Gothic", size=12),
+            text_color="#6B7280",
+            wraplength=610,
+            justify="left",
+        )
+        desc.pack(anchor="w", pady=(0, 12))
+
+        input_frame = ctk.CTkFrame(container, fg_color="#F9FAFB", corner_radius=10)
+        input_frame.pack(fill="x", pady=(0, 12))
+
+        product_entry = ctk.CTkEntry(
+            input_frame,
+            placeholder_text="品番を入力（例: 3D025-G4960）",
+            font=ctk.CTkFont(family="Yu Gothic", size=14),
+            height=36,
+        )
+        product_entry.pack(side="left", fill="x", expand=True, padx=(12, 8), pady=12)
+
+        memo_entry = ctk.CTkEntry(
+            input_frame,
+            placeholder_text="メモ（任意）",
+            font=ctk.CTkFont(family="Yu Gothic", size=14),
+            height=36,
+            width=220,
+        )
+        memo_entry.pack(side="left", padx=(0, 8), pady=12)
+
+        def refresh_list():
+            for w in list_frame.winfo_children():
+                w.destroy()
+
+            items = sorted(self.excluded_products, key=lambda x: (x.get("品番", ""), x.get("メモ", "")))
+            self.excluded_products = items
+
+            if not items:
+                empty = ctk.CTkLabel(
+                    list_frame,
+                    text="（未登録）",
+                    font=ctk.CTkFont(family="Yu Gothic", size=13),
+                    text_color="#6B7280",
+                )
+                empty.pack(anchor="w", padx=8, pady=8)
+                count_label.configure(text="登録数: 0")
+                return
+
+            count_label.configure(text=f"登録数: {len(items)}")
+            for item in items:
+                pn = item.get("品番", "")
+                memo = item.get("メモ", "")
+                row = ctk.CTkFrame(list_frame, fg_color="white", corner_radius=8, border_width=1, border_color="#E5E7EB")
+                row.pack(fill="x", padx=6, pady=4)
+
+                text = pn if not memo else f"{pn}  ({memo})"
+                label = ctk.CTkLabel(
+                    row,
+                    text=text,
+                    font=ctk.CTkFont(family="Yu Gothic", size=13),
+                    text_color="#111827",
+                    anchor="w",
+                )
+                label.pack(side="left", fill="x", expand=True, padx=10, pady=8)
+
+                def _remove(p=pn):
+                    self.excluded_products = [x for x in self.excluded_products if x.get("品番") != p]
+                    self.save_excluded_products()
+                    refresh_list()
+
+                btn = ctk.CTkButton(
+                    row,
+                    text="削除",
+                    width=70,
+                    height=28,
+                    fg_color="#EF4444",
+                    hover_color="#DC2626",
+                    font=ctk.CTkFont(family="Yu Gothic", size=12, weight="bold"),
+                    command=_remove,
+                )
+                btn.pack(side="right", padx=10, pady=6)
+
+        def add_item():
+            pn = self._normalize_product_number(product_entry.get())
+            memo = self._normalize_product_number(memo_entry.get())
+            if not pn:
+                messagebox.showwarning("入力", "品番を入力してください。")
+                return
+            current = self.get_excluded_product_numbers_set()
+            if pn in current:
+                messagebox.showinfo("情報", f"既に登録されています: {pn}")
+                return
+            self.excluded_products.append({"品番": pn, "メモ": memo})
+            self.save_excluded_products()
+            product_entry.delete(0, tk.END)
+            memo_entry.delete(0, tk.END)
+            refresh_list()
+
+        add_button = ctk.CTkButton(
+            input_frame,
+            text="追加",
+            width=80,
+            height=36,
+            fg_color="#3B82F6",
+            hover_color="#2563EB",
+            font=ctk.CTkFont(family="Yu Gothic", size=14, weight="bold"),
+            command=add_item,
+        )
+        add_button.pack(side="left", padx=(0, 12), pady=12)
+
+        product_entry.bind("<Return>", lambda _e: add_item())
+
+        header = ctk.CTkFrame(container, fg_color="transparent")
+        header.pack(fill="x", pady=(0, 6))
+        count_label = ctk.CTkLabel(
+            header,
+            text="登録数: 0",
+            font=ctk.CTkFont(family="Yu Gothic", size=12),
+            text_color="#6B7280",
+        )
+        count_label.pack(side="left")
+
+        list_frame = ctk.CTkScrollableFrame(container, fg_color="#F9FAFB", corner_radius=10)
+        list_frame.pack(fill="both", expand=True)
+
+        footer = ctk.CTkFrame(container, fg_color="transparent")
+        footer.pack(fill="x", pady=(12, 0))
+
+        close_button = ctk.CTkButton(
+            footer,
+            text="閉じる",
+            width=120,
+            fg_color="#111827",
+            hover_color="#374151",
+            font=ctk.CTkFont(family="Yu Gothic", size=14, weight="bold"),
+            command=dialog.destroy,
+        )
+        close_button.pack(side="right")
+
+        refresh_list()
     
     def _update_araichat_button_state(self):
         """ARAICHAT送信ボタンの有効/無効状態を更新"""
