@@ -173,6 +173,18 @@ class ModernDataExtractorUI:
         
         # 【追加】検査対象外ロット情報保存用
         self.non_inspection_lots_df = pd.DataFrame()
+        self._non_inspection_confirm_window = None
+        self._auto_open_non_inspection_window_done = False
+
+        # 進捗表示（スレッド処理中も「止まって見えない」ように補助する）
+        self._progress_value: float = 0.0
+        self._progress_message: str = ""
+        self._progress_monotonic_lock: bool = False
+        self._progress_pulse_job = None
+        self._progress_pulse_active: bool = False
+        self._progress_pulse_end: float = 0.0
+        self._progress_pulse_step: float = 0.001
+        self._progress_pulse_interval_ms: int = 120
         
         # スキル表示状態管理
         self.original_inspector_data = None  # 元のデータを保持
@@ -422,18 +434,30 @@ class ModernDataExtractorUI:
             if not user_name:
                 user_name = "Unknown"
             
-            # ログファイルが存在しない場合は作成し、ユーザー名を書き込む
+            import codecs
+
+            # 文字化け防止のため、UTF-8 BOM を先頭に付与（既存ファイルも含む）
+            # Windows の既定ツールで開いたときに UTF-8 として解釈されやすくする。
+            if log_file.exists():
+                try:
+                    raw = log_file.read_bytes()
+                    if raw and not raw.startswith(codecs.BOM_UTF8):
+                        log_file.write_bytes(codecs.BOM_UTF8 + raw)
+                except Exception:
+                    pass
+
+            # ログファイルが存在しない場合は作成し、ユーザー名を書き込む（BOM付きで作成）
             if not log_file.exists():
-                with open(log_file, 'w', encoding='utf-8') as f:
+                with open(log_file, 'w', encoding='utf-8-sig') as f:
                     f.write(f"user : {user_name}\n")
             else:
                 # 既存ファイルの場合は、既にユーザー名が記載されているかチェック
-                with open(log_file, 'r', encoding='utf-8') as f:
+                with open(log_file, 'r', encoding='utf-8', errors='replace') as f:
                     first_line = f.readline().strip()
                     # 既にユーザー名が記載されている場合は追加しない（重複を防ぐ）
                     if not first_line.startswith('user :'):
                         # ユーザー名が記載されていない場合のみ追加
-                        with open(log_file, 'r+', encoding='utf-8') as f2:
+                        with open(log_file, 'r+', encoding='utf-8', errors='replace') as f2:
                             content = f2.read()
                             f2.seek(0, 0)
                             f2.write(f"user : {user_name}\n")
@@ -2959,6 +2983,8 @@ class ModernDataExtractorUI:
         
         # バックグラウンドでデータ抽出を実行
         self.is_extracting = True
+        self._auto_open_non_inspection_window_done = False
+        self._progress_monotonic_lock = True
         self.extract_button.configure(state="disabled", text="抽出中...")
         self.progress_bar.set(0)
         self.progress_label.configure(text="データベースに接続中...")
@@ -2984,6 +3010,7 @@ class ModernDataExtractorUI:
             self.log_message(f"抽出期間: {start_date} ～ {end_date}")
             
             # 【追加】休暇予定を取得（データ抽出開始日付を使用）
+            # 進捗配分: 抽出 0.0-0.1 / ロット 0.1-0.4 / 検査員 0.4-0.9 / 表示 0.9-1.0
             self.update_progress(0.01, "休暇予定を取得中...")
             from app.services.vacation_schedule_service import load_vacation_schedule, get_vacation_for_date
             from datetime import date as date_type
@@ -3086,7 +3113,7 @@ class ModernDataExtractorUI:
                 pass
             
             # 検査対象.csvを読み込む（キャッシュ機能を使用）
-            self.update_progress(0.05, "検査対象CSVを読み込み中...")
+            self.update_progress(0.03, "検査対象CSVを読み込み中...")
             with perf_timer(logger, "inspection_target_csv.load_cached"):
                 self.inspection_target_keywords = self.load_inspection_target_csv_cached()
             
@@ -3104,7 +3131,7 @@ class ModernDataExtractorUI:
             
             # キャッシュが無効な場合は取得
             if actual_columns is None:
-                self.update_progress(0.08, "テーブル構造を確認中...")
+                self.update_progress(0.04, "テーブル構造を確認中...")
                 columns_query = f"SELECT TOP 1 * FROM [{self.config.access_table_name}]"
                 with perf_timer(logger, "access.table_structure.read_sql"):
                     sample_df = pd.read_sql(columns_query, connection)
@@ -3143,10 +3170,12 @@ class ModernDataExtractorUI:
             else:
                 query = f"SELECT {columns_str} FROM [{self.config.access_table_name}]"
             
-            # データの抽出
+            # データの抽出（読み込み中に進捗が止まって見えないようにパルス表示）
+            self.update_progress(0.05, "データを抽出中...")
+            self.start_progress_pulse(0.05, 0.07, "データを抽出中...")
             with perf_timer(logger, "access.main_query.read_sql"):
                 df = pd.read_sql(query, connection)
-            self.update_progress(0.15, "データを抽出中...")
+            self.stop_progress_pulse(final_value=0.07, message=f"データ抽出完了: {len(df)}件")
             self.log_message(f"データ抽出完了: {len(df)}件")
             
             # 列名をリネーム（出荷数量→出荷数）
@@ -3181,12 +3210,12 @@ class ModernDataExtractorUI:
                 self.log_message("在梱包数はT_出荷予定集計の「梱包完了合計」を使用しました")
             else:
                 # フォールバック: t_現品票履歴から梱包工程の数量を集計して付与
-                self.update_progress(0.35, "梱包工程データを取得中...")
+                self.update_progress(0.075, "梱包工程データを取得中...")
                 with perf_timer(logger, "packaging_quantities"):
                     packaging_data = self.get_packaging_quantities(connection, df)
 
                 # 梱包数量をメインデータに結合
-                self.update_progress(0.45, "データを処理中...")
+                self.update_progress(0.085, "データを処理中...")
                 if not packaging_data.empty and '品番' in df.columns:
                     df = df.merge(packaging_data, on='品番', how='left')
                     # 梱包数量が存在しない場合は0を設定
@@ -3200,7 +3229,7 @@ class ModernDataExtractorUI:
             df['梱包・完了'] = pd.to_numeric(df['梱包・完了'], errors='coerce').fillna(0).astype(int)
             
             # 出荷数・在庫数・不足数を数値型に変換（不足数は直接取得した値を使用）
-            self.update_progress(0.55, "データを数値型に変換中...")
+            self.update_progress(0.095, "データを数値型に変換中...")
             if '出荷数' in df.columns:
                 df['出荷数'] = pd.to_numeric(df['出荷数'], errors='coerce').fillna(0)
             if '在庫数' in df.columns:
@@ -3245,11 +3274,12 @@ class ModernDataExtractorUI:
             
             # 不足数がマイナスの品番に対してロット割り当てを実行
             # 出荷予定日からデータが無い場合でも、先行検査品と洗浄品の処理を実行
-            self.update_progress(0.65, "ロット割り当て処理中...")
+            self.update_progress(0.10, "ロット割り当て処理中...")
             with perf_timer(logger, "lot_assignment"):
-                self.process_lot_assignment(connection, df, start_progress=0.65)
+                self.process_lot_assignment(connection, df, start_progress=0.10)
             
-            # 完了
+            # 表示（0.9-1.0）
+            self.update_progress(0.95, "表示を更新中...")
             self.update_progress(1.0, "データ抽出が完了しました")
             if df.empty:
                 self.log_message(f"処理完了! 出荷予定日からのデータはありませんでしたが、先行検査品と洗浄品の処理を実行しました")
@@ -3282,7 +3312,7 @@ class ModernDataExtractorUI:
                     f"検査員割振り結果を自動表示しました"
                 )
             
-            self.root.after(0, lambda msg=message: messagebox.showinfo("完了", msg))
+            self.root.after(0, lambda msg=message: self._on_extraction_complete(msg))
             
             success = True  # 成功フラグを設定
             
@@ -3312,6 +3342,7 @@ class ModernDataExtractorUI:
                 # 成功時はボタンのみ有効化（ステータスバーは維持）
                 self.root.after(0, lambda: self.extract_button.configure(state="normal", text="データ抽出開始"))
                 self.root.after(0, lambda: setattr(self, 'is_extracting', False))
+                self.root.after(0, lambda: setattr(self, '_progress_monotonic_lock', False))
     
     def update_progress(self, value: float, message: str) -> None:
         """
@@ -3321,8 +3352,111 @@ class ModernDataExtractorUI:
             value: 進捗値（0.0～1.0）
             message: 進捗メッセージ
         """
-        self.root.after(0, lambda: self.progress_bar.set(value))
-        self.root.after(0, lambda: self.progress_label.configure(text=message))
+        # 明示更新が来たら、進捗パルス（疑似的な徐々に進む表示）は停止する
+        self.root.after(0, self._stop_progress_pulse)
+        next_value = float(value) if value is not None else 0.0
+        # 抽出中は進捗が「戻る」表示を防ぐ（パルスが先行→明示更新で後退、等）
+        if self._progress_monotonic_lock and next_value < self._progress_value:
+            next_value = self._progress_value
+
+        self._progress_value = next_value
+        self._progress_message = str(message) if message is not None else ""
+        self.root.after(0, lambda v=self._progress_value: self.progress_bar.set(v))
+        self.root.after(0, lambda m=self._progress_message: self.progress_label.configure(text=m))
+
+    def start_progress_pulse(self, start_value: float, end_value: float, message: str) -> None:
+        """長時間処理中、進捗が止まって見えないように段階的に進める（UIスレッドで動作）。"""
+        self.root.after(
+            0,
+            lambda: self._start_progress_pulse(float(start_value), float(end_value), str(message)),
+        )
+
+    def stop_progress_pulse(self, final_value: Optional[float] = None, message: Optional[str] = None) -> None:
+        """進捗パルスを停止し、必要なら最終値をセットする（UIスレッドで動作）。"""
+        self.root.after(0, lambda: self._stop_progress_pulse(final_value=final_value, message=message))
+
+    def _start_progress_pulse(self, start_value: float, end_value: float, message: str) -> None:
+        self._stop_progress_pulse()
+
+        start = max(0.0, min(1.0, float(start_value)))
+        end = max(0.0, min(1.0, float(end_value)))
+        if end <= start:
+            end = min(1.0, start + 0.02)
+
+        # 既に進捗が進んでいる場合は巻き戻さない
+        current = max(self._progress_value, start)
+        # end まで到達しきらない（終端は明示更新で合わせる）
+        end_cap = max(start, min(end, end - 0.002))
+
+        # おおよそ 30 秒で end_cap 付近まで進む速度
+        span = max(0.01, end_cap - current)
+        step = max(0.0005, span / 250.0)
+
+        self._progress_pulse_active = True
+        self._progress_pulse_end = end_cap
+        self._progress_pulse_step = step
+        self._progress_pulse_interval_ms = 120
+
+        self._progress_value = current
+        self._progress_message = message
+        try:
+            self.progress_bar.set(current)
+            self.progress_label.configure(text=message)
+        except Exception:
+            pass
+
+        self._progress_pulse_job = self.root.after(self._progress_pulse_interval_ms, self._progress_pulse_tick)
+
+    def _progress_pulse_tick(self) -> None:
+        if not self._progress_pulse_active:
+            return
+
+        next_value = min(self._progress_value + self._progress_pulse_step, self._progress_pulse_end)
+        if next_value <= self._progress_value:
+            next_value = min(self._progress_pulse_end, self._progress_value + 0.0003)
+
+        self._progress_value = next_value
+        try:
+            self.progress_bar.set(next_value)
+        except Exception:
+            pass
+
+        if self._progress_value >= self._progress_pulse_end:
+            # end_cap に到達したら少し待機（明示更新待ち）
+            self._progress_pulse_job = self.root.after(300, self._progress_pulse_tick)
+            return
+
+        self._progress_pulse_job = self.root.after(self._progress_pulse_interval_ms, self._progress_pulse_tick)
+
+    def _stop_progress_pulse(self, final_value: Optional[float] = None, message: Optional[str] = None) -> None:
+        self._progress_pulse_active = False
+        if self._progress_pulse_job is not None:
+            try:
+                self.root.after_cancel(self._progress_pulse_job)
+            except Exception:
+                pass
+            self._progress_pulse_job = None
+
+        if final_value is not None or message is not None:
+            if final_value is not None:
+                self._progress_value = max(0.0, min(1.0, float(final_value)))
+                try:
+                    self.progress_bar.set(self._progress_value)
+                except Exception:
+                    pass
+            if message is not None:
+                self._progress_message = str(message)
+                try:
+                    self.progress_label.configure(text=self._progress_message)
+                except Exception:
+                    pass
+
+    def _on_extraction_complete(self, message: str) -> None:
+        """抽出完了の通知を表示する。"""
+        try:
+            messagebox.showinfo("完了", message)
+        except Exception:
+            pass
     
     def log_message(self, message: str, level: str = "info", channel: str = "UI") -> None:
         """
@@ -4448,43 +4582,18 @@ class ModernDataExtractorUI:
             if non_inspection_lots_df.empty:
                 self.log_message("検査対象外ロットは見つかりませんでした")
                 return
-            
+
+            # 取得完了時点で確認ウィンドウを自動表示（1回のみ）
+            if not self._auto_open_non_inspection_window_done:
+                self._auto_open_non_inspection_window_done = True
+                self.root.after(0, self.show_non_inspection_lots_confirmation)
+             
             # ログに出力
-            self.log_message("=" * 80)
-            self.log_message("【検査対象外ロット（参考情報）】")
-            self.log_message(f"合計: {len(non_inspection_lots_df)}件")
-            self.log_message("=" * 80)
+            self.log_message(f"【検査対象外ロット（参考情報）】合計: {len(non_inspection_lots_df)}件")
             
-            # 工程ごとにグループ化してログ出力
-            if '現在工程名' in non_inspection_lots_df.columns:
-                for process_name, process_group_df in non_inspection_lots_df.groupby('現在工程名'):
-                    process_name_clean = str(process_name).strip() if pd.notna(process_name) else None
-                    
-                    self.log_message(f"\n工程: {process_name_clean or '工程名不明'}")
-                    # 既存の出力は最終行の情報のみを表示しているため、無駄なループを避けて同等の結果を生成
-                    last_row = process_group_df.iloc[-1]
-                    lot_quantity = last_row.get('ロット数量', '')
-                    current_process = last_row.get('現在工程名', '')
-                    instruction_date = last_row.get('指示日', '')
-                    machine_number = last_row.get('号機', '')
-                    
-                    info_parts = []
-                    if lot_quantity:
-                        info_parts.append(f"ロット数量: {lot_quantity}")
-                    if current_process:
-                        info_parts.append(f"現在工程: {current_process}")
-                    if instruction_date:
-                        info_parts.append(f"指示日: {instruction_date}")
-                    if machine_number:
-                        info_parts.append(f"号機: {machine_number}")
-                    
-                    self.log_message(f"  - {', '.join(info_parts)}")
-                    
-                    # 工程情報の出力は不要（削除）
+            # 工程別の詳細はログに出さない（冗長になるため）
             
-            self.log_message("=" * 80)
-            self.log_message("")
-            self.log_message("💡 右上の「検査対象外ロットをARAICHATに送信」ボタンから送信できます")
+            # （ログは最小化）
             
         except Exception as e:
             self.log_message(f"検査対象外ロット情報の出力中にエラーが発生しました: {str(e)}")
@@ -5502,7 +5611,7 @@ class ModernDataExtractorUI:
         try:
             cleaning_lots_df = pd.DataFrame()
             # 不足数がマイナスのデータを抽出
-            self.update_progress(start_progress + 0.05, "不足データを抽出中...")
+            self.update_progress(start_progress + 0.03, "不足データを抽出中...")
             # main_dfが空の場合でも処理を続行できるようにする
             if main_df.empty or '不足数' not in main_df.columns:
                 shortage_df = pd.DataFrame()
@@ -5518,17 +5627,25 @@ class ModernDataExtractorUI:
             else:
                 self.log_message(f"不足数がマイナスのデータ: {len(shortage_df)}件")
                 
-                # 通常の在庫ロットを取得
-                self.update_progress(start_progress + 0.10, "利用可能なロットを取得中...")
+                # 通常の在庫ロットを取得（取得中に進捗が止まって見えないようにパルス表示）
+                self.update_progress(start_progress + 0.08, "利用可能なロットを取得中...")
+                self.start_progress_pulse(start_progress + 0.08, start_progress + 0.22, "利用可能なロットを取得中...")
 
                 with perf_timer(logger, "lots.get_available_for_shortage"):
                     lots_df = self.get_available_lots_for_shortage(connection, shortage_df)
-                
+
+                self.stop_progress_pulse(
+                    final_value=start_progress + 0.22,
+                    message=f"利用可能なロット取得完了: {len(lots_df)}件",
+                )
+                 
                 # 【追加】検査対象外ロット情報を取得（参考情報として）
                 try:
-                    self.update_progress(start_progress + 0.105, "検査対象外ロット情報を取得中...")
+                    self.update_progress(start_progress + 0.22, "検査対象外ロット情報を取得中...")
+                    self.start_progress_pulse(start_progress + 0.22, start_progress + 0.25, "検査対象外ロット情報を取得中...")
                     with perf_timer(logger, "lots.get_non_inspection_target"):
                         self.log_non_inspection_lots_info(connection, shortage_df)
+                    self.stop_progress_pulse(final_value=start_progress + 0.25, message="検査対象外ロット情報の取得が完了しました")
                 except Exception as e:
                     self.log_message(f"検査対象外ロット情報の取得中にエラーが発生しました: {str(e)}")
                     logger.error(f"検査対象外ロット情報取得エラー: {e}", exc_info=True)
@@ -5541,7 +5658,8 @@ class ModernDataExtractorUI:
                 and self.config.google_sheets_credentials_path
             ):
                 try:
-                    self.update_progress(start_progress + 0.12, "洗浄二次処理依頼からロットを取得中...")
+                    self.update_progress(start_progress + 0.25, "洗浄二次処理依頼からロットを取得中...")
+                    self.start_progress_pulse(start_progress + 0.25, start_progress + 0.33, "洗浄二次処理依頼からロットを取得中...")
                     with perf_timer(logger, "lots.get_cleaning_lots"):
                         cleaning_lots_df = get_cleaning_lots(
                             connection,
@@ -5552,6 +5670,7 @@ class ModernDataExtractorUI:
                             process_master_path=self.config.process_master_path if self.config else None,
                             inspection_target_keywords=self.inspection_target_keywords
                         )
+                    self.stop_progress_pulse(final_value=start_progress + 0.33, message="洗浄二次処理依頼ロットの取得が完了しました")
                     if not cleaning_lots_df.empty:
                         self.log_message(f"洗浄二次処理依頼から {len(cleaning_lots_df)}件のロットを取得しました")
                     else:
@@ -5671,7 +5790,7 @@ class ModernDataExtractorUI:
             # ロット割り当てを実行（不足数がマイナスのデータがある場合のみ）
             assignment_df = pd.DataFrame()
             if not shortage_df.empty and not lots_df.empty:
-                self.update_progress(start_progress + 0.15, "ロットを割り当て中...")
+                self.update_progress(start_progress + 0.35, "ロットを割り当て中...")
                 with perf_timer(logger, "lot_assignment.assign_lots_to_shortage"):
                     assignment_df = self.assign_lots_to_shortage(shortage_df, lots_df)
             elif lots_df.empty and shortage_df.empty:
@@ -5681,7 +5800,7 @@ class ModernDataExtractorUI:
             
             # 登録済み品番のロットを割り当て（追加）
             if self.registered_products:
-                self.update_progress(start_progress + 0.17, "登録済み品番のロットを割り当て中...")
+                self.update_progress(start_progress + 0.37, "登録済み品番のロットを割り当て中...")
                 with perf_timer(logger, "lots.assign_registered_products"):
                     assignment_df = self.assign_registered_products_lots(connection, main_df, assignment_df)
             
@@ -5810,10 +5929,11 @@ class ModernDataExtractorUI:
                 self.current_assignment_data = assignment_df
                 
                 # 検査員割振り処理を実行（進捗は連続させる）
-                # ロット割り当て: 0.65-0.85 (0.2の範囲)
-                # 検査員割振り: 0.85-1.0 (0.15の範囲)
+                # ロット割り当て: start_progress〜start_progress+0.20
+                # 検査員割振り: 0.40〜0.90
                 with perf_timer(logger, "inspector_assignment"):
-                    self.process_inspector_assignment(assignment_df, start_progress=0.85)
+                    self.update_progress(0.40, "検査員割振り処理中...")
+                    self.process_inspector_assignment(assignment_df, start_progress=0.40)
             else:
                 self.log_message("ロット割り当て結果がありません")
                 
@@ -5827,24 +5947,26 @@ class ModernDataExtractorUI:
                 self.log_message("ロット割り当て結果がありません")
                 return
             
+            # 進捗配分（検査員割当 0.40-0.90）
+            phase_start = float(start_progress)
+            phase_end = 0.90
+            if phase_end <= phase_start:
+                phase_end = min(1.0, phase_start + 0.01)
+
+            master_end = min(phase_end, phase_start + 0.10)  # 0.40-0.50
+            table_end = min(phase_end, master_end + 0.05)    # 0.50-0.55
+            assign_start = table_end                          # 0.55-
+            assign_end = phase_end                            # -0.90
+
             # マスタファイルを並列で読み込み（高速化）
-            # 進捗範囲を調整：start_progressから終了まで（マスタ読み込み用）
-            progress_base = start_progress
-            # start_progressに応じて進捗範囲を動的に調整
-            # 目標: マスタ読み込み完了後、0.95-0.97の範囲に到達
-            if start_progress >= 0.85:
-                # 0.85以降から始まる場合: 0.85→0.92（0.07の範囲）
-                progress_range_master = 0.07
-            elif start_progress >= 0.1:
-                # 0.1以降から始まる場合: start_progress→0.9（残りの範囲）
-                progress_range_master = 0.9 - start_progress
-            else:
-                # 通常: 0.1→0.9（0.8の範囲）
-                progress_range_master = 0.8
-            
+            progress_base = phase_start
+            progress_range_master = max(0.01, master_end - phase_start)
+
             self.update_progress(progress_base, "マスタファイルを読み込み中...")
+            self.start_progress_pulse(progress_base, master_end - 0.001, "マスタファイルを読み込み中...")
             with perf_timer(logger, "masters.load_parallel"):
                 masters = self.load_masters_parallel(progress_base=progress_base, progress_range=progress_range_master)
+            self.stop_progress_pulse()
             
             product_master_df = masters.get('product')
             inspector_master_df = masters.get('inspector')
@@ -5884,14 +6006,8 @@ class ModernDataExtractorUI:
             self.skill_master_data = skill_master_df
             
             # 検査員割振りテーブルを作成（製品マスタパスを渡す）
-            # マスタ読み込み完了後の進捗を計算
-            master_end_progress = progress_base + progress_range_master
-            # テーブル作成と割り当ての進捗範囲を調整（残りを1.0まで）
-            remaining_progress = 1.0 - master_end_progress
-            table_progress = master_end_progress + (remaining_progress * 0.3)  # 残りの30%
-            assign_progress = master_end_progress + (remaining_progress * 0.7)  # 残りの70%
-            
-            self.update_progress(table_progress, "検査員割振りテーブルを作成中...")
+            self.update_progress(master_end, "検査員割振りテーブルを作成中...")
+            self.start_progress_pulse(master_end, table_end - 0.001, "検査員割振りテーブルを作成中...")
             product_master_path = self.config.product_master_path if self.config else None
             process_master_path = self.config.process_master_path if self.config else None
             with perf_timer(logger, "inspection_target_csv.load"):
@@ -5908,6 +6024,7 @@ class ModernDataExtractorUI:
             if inspector_df is None:
                 self.log_message("検査員割振りテーブルの作成に失敗しました")
                 return
+            self.stop_progress_pulse(final_value=table_end, message="検査員割振りテーブルの作成が完了しました")
             
             # 製品マスタが更新された場合は再読み込み
             if product_master_path and Path(product_master_path).exists():
@@ -5923,7 +6040,8 @@ class ModernDataExtractorUI:
             self._set_fixed_inspectors_to_manager()
             
             # 検査員を割り当て（スキル値付きで保存）
-            self.update_progress(assign_progress, "検査員を割り当て中...")
+            self.update_progress(assign_start, "検査員を割り当て中...")
+            self.start_progress_pulse(assign_start, assign_end - 0.01, "検査員を割り当て中...")
             with perf_timer(logger, "inspector_assignment.assign_inspectors"):
                 inspector_df_with_skills = self.inspector_manager.assign_inspectors(
                     inspector_df, 
@@ -5933,6 +6051,7 @@ class ModernDataExtractorUI:
                     process_master_df=process_master_df,
                     inspection_target_keywords=inspection_target_keywords
                 )
+            self.stop_progress_pulse()
             
             # 表示用のデータは氏名のみ
             with perf_timer(logger, "inspector_assignment.display_name_strip"):
@@ -5947,7 +6066,8 @@ class ModernDataExtractorUI:
             self.current_inspector_data = inspector_df
             self.original_inspector_data = inspector_df_with_skills.copy()  # スキル値付きの元データを保持
             
-            self.update_progress(1.0, "検査員割振り処理が完了しました")
+            # 表示フェーズへ（0.90-1.00）は呼び出し元側で進める
+            self.update_progress(assign_end, "検査員割振り処理が完了しました")
             self.log_message(f"検査員割振り処理が完了しました: {len(inspector_df)}件")
             
             # メインスレッドでテーブル表示を指示
@@ -6177,6 +6297,8 @@ class ModernDataExtractorUI:
         """UIの状態をリセット"""
         self.is_extracting = False
         self.extract_button.configure(state="normal", text="データ抽出開始")
+        self.root.after(0, self._stop_progress_pulse)
+        self._progress_monotonic_lock = False
         self.progress_bar.set(0)
         self.progress_label.configure(text="待機中...")
     
@@ -9697,8 +9819,18 @@ class ModernDataExtractorUI:
                 )
                 return
             
+            # 既に開いている場合は前面化
+            try:
+                if self._non_inspection_confirm_window is not None and self._non_inspection_confirm_window.winfo_exists():
+                    self._non_inspection_confirm_window.lift()
+                    self._non_inspection_confirm_window.focus_set()
+                    return
+            except Exception:
+                self._non_inspection_confirm_window = None
+
             # 確認ウィンドウを作成（サイズは後で動的に調整）
             confirm_window = ctk.CTkToplevel(self.root)
+            self._non_inspection_confirm_window = confirm_window
             confirm_window.title("検査対象外ロット情報 - 送信確認")
             confirm_window.transient(self.root)
             confirm_window.grab_set()
@@ -9754,6 +9886,10 @@ class ModernDataExtractorUI:
                             widget.unbind(event)
                     except:
                         pass
+                try:
+                    self._non_inspection_confirm_window = None
+                except Exception:
+                    pass
                 confirm_window.destroy()
             
             confirm_window.protocol("WM_DELETE_WINDOW", on_window_close)

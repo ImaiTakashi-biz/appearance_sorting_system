@@ -26,6 +26,7 @@ _REMARKS_SEGMENT_SPLIT_PATTERN = re.compile(r"[、､,，;\n]+")
 
 # テーブル構造のキャッシュ（高速化のため）
 _table_structure_cache = None
+_process_infer_logged: set = set()
 
 
 def _normalize_instruction_date(value: object) -> Optional[str]:
@@ -727,10 +728,20 @@ def _infer_process_info(
         for keyword in keywords:
             if keyword in cell_str:
                 process_number = str(process_master_df.columns[col_idx]).strip()
-                log_callback(
-                    f"工程マスタから工程番号を推定: 品番='{product_number}', "
-                    f"工程番号='{process_number}', 工程名='{cell_str}', キーワード='{keyword}'"
-                )
+                # 同一品番で何度もログが出ると冗長になるため、初回のみINFOで出す
+                try:
+                    key = (str(product_number), str(process_number), str(keyword))
+                    if key not in _process_infer_logged:
+                        _process_infer_logged.add(key)
+                        log_callback(
+                            f"工程マスタから工程番号を推定: 品番='{product_number}', "
+                            f"工程番号='{process_number}', 工程名='{cell_str}', キーワード='{keyword}'"
+                        )
+                except Exception:
+                    log_callback(
+                        f"工程マスタから工程番号を推定: 品番='{product_number}', "
+                        f"工程番号='{process_number}', 工程名='{cell_str}', キーワード='{keyword}'"
+                    )
                 return process_number, cell_str
     return None, None
 
