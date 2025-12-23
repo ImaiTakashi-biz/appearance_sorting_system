@@ -482,6 +482,3 @@ class DatabaseConfig:
         except Exception as e:
             logger.error(f"設定の検証に失敗しました: {e}")
             return False
-
-
-

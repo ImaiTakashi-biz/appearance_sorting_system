@@ -243,29 +243,39 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       .grid-area {
         background: #fff;
         border-radius: 1rem;
-        padding: 1rem 1.25rem 1.5rem;
+        padding: 0.9rem 1rem 1.1rem;
         box-shadow: 0 18px 40px rgba(0, 0, 0, 0.08);
         position: relative;
-        overflow: auto;
+        overflow: hidden;
         max-width: 100%;
         min-height: 420px;
+        display: flex;
+        flex-direction: column;
+        gap: 0.9rem;
       }
       .grid-header {
         display: flex;
         align-items: center;
         justify-content: space-between;
         gap: 1rem;
-        margin-bottom: 0.8rem;
+        padding: 0.35rem 0.25rem 0.75rem;
+        position: sticky;
+        top: 0;
+        z-index: 20;
+        background: rgba(255, 255, 255, 0.92);
+        backdrop-filter: blur(10px);
+        border-bottom: 1px solid rgba(0, 0, 0, 0.06);
       }
-      .rule-block {
-        display: flex;
-        flex-direction: column;
-        gap: 0.75rem;
-        align-items: flex-start;
-        margin-left: 0.5rem;
+      .grid-body {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 260px;
+        gap: 1rem;
+        align-items: start;
+        width: 100%;
+        min-height: 420px;
       }
-      body.editing .rule-block {
-        display: none;
+      body.editing .grid-body {
+        grid-template-columns: 1fr;
       }
       .legend-panel {
         border-radius: 0.9rem;
@@ -312,18 +322,31 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         content: " "; 
         display: block;
       }
+      .side-panel {
+        display: flex;
+        flex-direction: column;
+        gap: 0.75rem;
+        position: sticky;
+        top: 0.9rem;
+        max-height: calc(100vh - 2.2rem);
+        min-height: 0;
+        overflow: hidden;
+      }
+      body.editing .side-panel {
+        display: none;
+      }
       .unassigned-area {
         border: 1px solid #d9d9d9;
         border-radius: 0.8rem;
         padding: 0.4rem 0.9rem;
         background: #fff;
-        min-width: 260px;
-        min-height: 90px;
         display: flex;
         flex-direction: column;
         gap: 0.25rem;
+        min-height: 0;
+        flex: 1 1 auto;
       }
-      .unassigned-area.unassigned-drop-target {
+      .unassigned-drop-target {
         border-color: #1f7aef;
         box-shadow: 0 0 0 2px rgba(31, 122, 239, 0.25);
       }
@@ -331,12 +354,24 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         font-size: 0.85rem;
         font-weight: 700;
         margin: 0;
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 0.5rem;
+      }
+      .unassigned-count {
+        font-size: 0.78rem;
+        color: #666;
+        font-weight: 700;
       }
       .unassigned-lots {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 0.35rem;
-        min-height: 32px;
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 0.4rem;
+        min-height: 0;
+        overflow: auto;
+        padding: 0.2rem 0.1rem 0.1rem;
+        flex: 1 1 auto;
       }
       .unassigned-empty-state {
         font-size: 0.78rem;
@@ -362,12 +397,22 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         gap: 0.5rem;
         align-items: center;
       }
-      #seat-grid {
+      #seat-grid-area {
+        border: 1px solid rgba(0, 0, 0, 0.08);
+        border-radius: 1rem;
+        background: linear-gradient(180deg, rgba(246, 248, 251, 0.8), rgba(255, 255, 255, 1));
+        overflow: auto;
+        height: clamp(480px, calc(100vh - 250px), 820px);
         min-height: 420px;
+        max-height: 900px;
+      }
+      #seat-grid {
+        min-height: 520px;
         width: 100%;
         position: relative;
-        margin-bottom: 2rem;
+        margin-bottom: 0;
         max-width: 100%;
+        padding: 0.75rem;
       }
       .seat-card {
         position: absolute;
@@ -384,7 +429,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         font-size: 0.95rem;
         transition: border-color 0.2s ease, transform 0.2s ease;
         cursor: pointer;
-        overflow: visible;
+        overflow: hidden;
       }
       .seat-card.selected {
         border-color: #1f7aef;
@@ -415,21 +460,28 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       .seat-name {
         font-size: 0.92rem;
         font-weight: 700;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: clip;
+        max-width: 72%;
+        min-width: 0;
+        word-break: keep-all;
+        line-height: 1.1;
       }
       .total-time {
         font-size: 0.78rem;
         color: #555;
+        flex: 0 0 auto;
       }
       .lot-list {
         display: flex;
         flex-direction: column;
         gap: 0.25rem;
         width: 100%;
-        flex: 1;
-        min-height: 110px;
-        max-height: clamp(140px, 22vh, 260px);
-        overflow-y: auto;
-        overflow-x: auto;
+        flex: 1 1 auto;
+        min-height: 0;
+        max-height: none;
+        overflow: auto;
         scrollbar-width: thin;
         -ms-overflow-style: auto;
       }
@@ -447,8 +499,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         display: inline-flex;
         align-items: center;
         gap: 0.25rem;
-        width: max-content;
-        min-width: 120px;
+        width: 100%;
+        min-width: 0;
         white-space: nowrap;
         box-sizing: border-box;
       }
@@ -548,6 +600,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
+        min-width: 0;
+        flex: 1 1 auto;
       }
       .editor-panel {
         background: #fff;
@@ -662,6 +716,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           flex-direction: column;
           align-items: flex-start;
         }
+        .grid-body {
+          grid-template-columns: 1fr;
+        }
         .grid-actions {
           flex-wrap: wrap;
           justify-content: flex-end;
@@ -681,6 +738,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         .grid-area {
           padding: 0.6rem 0.75rem 1rem;
         }
+        #seat-grid-area {
+          height: clamp(420px, calc(100vh - 280px), 720px);
+        }
         .editor-panel {
           width: 100%;
         }
@@ -690,12 +750,21 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   <body>
     <main>
       <section class="grid-area">
-        <div class="grid-header">
+        <div class="grid-header" role="banner">
           <div class="title-block">
             <h1 id="board-title">検査ロット振分けレイアウト</h1>
             <p class="edit-instruction">座席編集モード: 座席位置の入れ替えのみ。ロット編集モード: ロットカードをドラッグで別席に移動できます。</p>
           </div>
-          <div class="rule-block">
+          <div class="grid-actions">
+            <button id="save-json" class="primary mode-toggle" type="button">変更を保存</button>
+            <button id="toggle-edit" class="secondary mode-toggle" type="button">座席編集モード</button>
+          </div>
+        </div>
+        <div class="grid-body">
+          <div id="seat-grid-area" aria-label="座席表">
+            <div id="seat-grid" aria-live="polite"></div>
+          </div>
+          <aside class="side-panel" aria-label="未割当ロット">
             <div class="legend-panel">
               <span class="legend-text">
                 表示ルール：
@@ -708,16 +777,14 @@ HTML_TEMPLATE = """<!DOCTYPE html>
               </span>
             </div>
             <div class="unassigned-area" id="unassigned-area">
-              <div class="unassigned-title">未割当ロット</div>
+              <div class="unassigned-title">
+                未割当ロット
+                <span id="unassigned-count" class="unassigned-count"></span>
+              </div>
               <div id="unassigned-lots" class="unassigned-lots"></div>
             </div>
-          </div>
-          <div class="grid-actions">
-            <button id="save-json" class="primary mode-toggle" type="button">変更を保存</button>
-            <button id="toggle-edit" class="secondary mode-toggle" type="button">座席編集モード</button>
-          </div>
+          </aside>
         </div>
-        <div id="seat-grid" aria-live="polite"></div>
         <div id="lot-split-menu" class="lot-context-menu hidden" aria-hidden="true">
           <label for="lot-split-count">何分割しますか？</label>
           <input id="lot-split-count" type="number" min="2" value="2" />
@@ -770,6 +837,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       const inspectorList = document.getElementById("inspector-list");
       const inspectorDatalist = document.getElementById("inspector-names");
       const unassignedContainer = document.getElementById("unassigned-lots");
+      const unassignedArea = document.getElementById("unassigned-area");
+      const unassignedCount = document.getElementById("unassigned-count");
       const lotSplitMenu = document.getElementById("lot-split-menu");
       const lotSplitCountInput = document.getElementById("lot-split-count");
       const lotSplitApplyButton = document.getElementById("lot-split-apply");
@@ -794,16 +863,17 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       };
       const boardTitle = document.getElementById("board-title");
       const gridArea = document.querySelector(".grid-area");
+      const seatGridArea = document.getElementById("seat-grid-area");
       let activeSplitTarget = null;
       if (unassignedContainer) {
         unassignedContainer.addEventListener("dragover", (event) => {
           if (!editingMode && draggingLot) {
             event.preventDefault();
-            unassignedContainer.classList.add("unassigned-drop-target");
+            (unassignedArea || unassignedContainer).classList.add("unassigned-drop-target");
           }
         });
         unassignedContainer.addEventListener("dragleave", () => {
-          unassignedContainer.classList.remove("unassigned-drop-target");
+          (unassignedArea || unassignedContainer).classList.remove("unassigned-drop-target");
         });
         unassignedContainer.addEventListener("drop", (event) => {
           event.preventDefault();
@@ -812,7 +882,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           }
           moveLot(draggingLot.seatId, "unassigned", draggingLot.lotId);
           draggingLot = null;
-          unassignedContainer.classList.remove("unassigned-drop-target");
+          (unassignedArea || unassignedContainer).classList.remove("unassigned-drop-target");
           clearDropStyles();
         });
       }
@@ -902,13 +972,14 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         currentSlotGap = baseGap;
         currentSlotWidth = baseWidth;
         currentSlotHeight = baseHeight;
-        if (!gridArea) {
+        const widthSource = seatGridArea || gridArea;
+        if (!widthSource) {
           return;
         }
         const { maxCol } = getGridExtent();
         const safeCols = Math.max(1, Math.ceil(maxCol || 1));
         const horizontalPadding = 32;
-        const availableWidth = Math.max(gridArea.clientWidth - horizontalPadding, 0);
+        const availableWidth = Math.max(widthSource.clientWidth - horizontalPadding, 0);
         const computedWidth = Math.floor((availableWidth - (safeCols - 1) * currentSlotGap) / safeCols);
         const normalizedWidth = Number.isFinite(computedWidth) ? computedWidth : baseWidth;
         const targetWidth = Math.max(110, Math.min(baseWidth * 1.4, normalizedWidth));
@@ -1037,7 +1108,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       const clearDropStyles = () => {
         grid.querySelectorAll(".seat-card").forEach((card) => card.classList.remove("drop-target"));
         if (unassignedContainer) {
-          unassignedContainer.classList.remove("unassigned-drop-target");
+          (unassignedArea || unassignedContainer).classList.remove("unassigned-drop-target");
         }
       };
 
@@ -1071,6 +1142,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       };
 
       const renderUnassignedLots = () => {
+        if (unassignedCount) {
+          unassignedCount.textContent = unassignedLots.length ? `${unassignedLots.length}件` : "";
+        }
         if (!unassignedContainer) {
           return;
         }
@@ -1625,6 +1699,45 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           .forEach((seat) => grid.appendChild(createSeatCard(seat)));
         updateGridDimensions();
         renderUnassignedLots();
+        fitSeatNames();
+      };
+
+      const fitSeatNames = () => {
+        // 検査員名を省略ではなく縮小して1行に収める
+        const headers = grid.querySelectorAll(".seat-header");
+        headers.forEach((header) => {
+          const nameEl = header.querySelector(".seat-name");
+          if (!nameEl) {
+            return;
+          }
+          nameEl.style.removeProperty("font-size");
+          nameEl.title = nameEl.textContent || "";
+
+          const totalEl = header.querySelector(".total-time");
+          const headerWidth = header.clientWidth || 0;
+          const totalWidth = totalEl ? (totalEl.getBoundingClientRect().width || 0) : 0;
+          const gap = 10;
+          const available = Math.max(0, headerWidth - totalWidth - gap);
+          if (!available) {
+            return;
+          }
+
+          // 現在のフォントサイズから最小まで段階的に縮小
+          const computed = window.getComputedStyle(nameEl);
+          const basePx = Math.max(10, parseFloat(computed.fontSize || "14"));
+          const minPx = 7;
+
+          let current = basePx;
+          nameEl.style.fontSize = `${current}px`;
+          let safe = 0;
+          while (safe < 20 && nameEl.scrollWidth > available && current > minPx) {
+            current = Math.max(minPx, current - 0.5);
+            nameEl.style.fontSize = `${current}px`;
+            safe += 1;
+          }
+          // 省略ではなく縮小を優先（どうしても収まらない場合でも、切れは発生し得るが省略記号は出さない）
+          nameEl.style.textOverflow = "clip";
+        });
       };
 
       const setEditingMode = (enabled) => {
