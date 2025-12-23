@@ -2949,6 +2949,23 @@ class ModernDataExtractorUI:
             with perf_timer(logger, "db.connect"):
                 connection = self.config.get_connection()
             self.log_message("データベース接続が完了しました")
+
+            # 実際に参照しているAccessファイル（UNC→ローカルスナップショット含む）をログに出す
+            try:
+                from datetime import datetime
+                from app.config import DatabaseConfig
+                import os as _os
+
+                effective_access_path = DatabaseConfig.get_last_effective_access_path() or ""
+                if effective_access_path and _os.path.exists(effective_access_path):
+                    stat = _os.stat(effective_access_path)
+                    mtime = datetime.fromtimestamp(getattr(stat, "st_mtime", 0))
+                    size = int(getattr(stat, "st_size", 0))
+                    self.log_message(
+                        f"Accessファイル: {effective_access_path} (更新: {mtime:%Y-%m-%d %H:%M:%S}, サイズ: {size:,} bytes)"
+                    )
+            except Exception:
+                pass
             
             # 検査対象.csvを読み込む（キャッシュ機能を使用）
             self.update_progress(0.05, "検査対象CSVを読み込み中...")
@@ -3063,6 +3080,20 @@ class ModernDataExtractorUI:
             # 出荷予定日をdatetime型に変換（既にSQL側でソート済み）
             if not df.empty and '出荷予定日' in df.columns:
                 df['出荷予定日'] = pd.to_datetime(df['出荷予定日'], errors='coerce')
+
+                # 指定期間に対してデータの最大日付が大きく手前の場合、Accessファイル未更新/古いコピーの可能性を通知
+                try:
+                    max_date = df['出荷予定日'].max()
+                    end_date_dt = pd.to_datetime(end_date)
+                    if pd.notna(max_date) and pd.notna(end_date_dt):
+                        # 2日以上手前なら警告（夜間更新・午前更新の揺れを考慮して緩め）
+                        if max_date < (end_date_dt - pd.Timedelta(days=2)):
+                            self.log_message(
+                                f"注意: 抽出データの出荷予定日最大値({max_date:%Y-%m-%d})が指定終了日({end_date_dt:%Y-%m-%d})より前です。"
+                                "Accessファイルが未更新、または古いローカルコピーを参照している可能性があります。"
+                            )
+                except Exception:
+                    pass
             
             # 出荷予定日からデータが無い場合でも、先行検査品と洗浄品の処理を続行
             if df is None or df.empty:

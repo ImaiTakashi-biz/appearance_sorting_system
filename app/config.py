@@ -29,6 +29,8 @@ class DatabaseConfig:
     # クラス変数として接続をキャッシュ（高速化）
     _connection_cache = None
     _connection_cache_timestamp = None
+    _connection_cache_access_sig = None
+    _connection_cache_access_src_path = None
     _connection_cache_ttl = CONNECTION_CACHE_TTL
     _last_effective_access_path: Optional[str] = None
 
@@ -354,6 +356,19 @@ class DatabaseConfig:
             ConnectionError: すべてのドライバーで接続に失敗した場合
         """
         import time
+
+        def _safe_stat_sig(path: str) -> Optional[str]:
+            try:
+                stat = os.stat(path)
+                return f"{int(getattr(stat, 'st_mtime', 0))}_{int(getattr(stat, 'st_size', 0))}"
+            except Exception:
+                return None
+
+        def _get_source_access_sig() -> Optional[str]:
+            src = str(self.access_file_path or "").strip()
+            if not src:
+                return None
+            return _safe_stat_sig(src)
         
         # キャッシュが有効な場合は再利用（高速化）
         if (DatabaseConfig._connection_cache is not None and 
@@ -361,6 +376,23 @@ class DatabaseConfig:
             elapsed = time.time() - DatabaseConfig._connection_cache_timestamp
             if elapsed < DatabaseConfig.CONNECTION_CACHE_TTL:
                 try:
+                    # Accessファイル更新を検知したら、古い接続（ローカルコピー含む）を破棄して再接続する
+                    current_sig = _get_source_access_sig()
+                    cached_sig = DatabaseConfig._connection_cache_access_sig
+                    cached_src = DatabaseConfig._connection_cache_access_src_path
+                    current_src = str(self.access_file_path or "").strip() or None
+                    if current_sig and cached_sig and current_sig != cached_sig and cached_src == current_src:
+                        try:
+                            DatabaseConfig._connection_cache.close()
+                        except Exception:
+                            pass
+                        DatabaseConfig._connection_cache = None
+                        DatabaseConfig._connection_cache_timestamp = None
+                        DatabaseConfig._connection_cache_access_sig = None
+                        DatabaseConfig._connection_cache_access_src_path = None
+                        logger.info("Accessファイル更新を検知したため、DB接続キャッシュを破棄して再接続します")
+                        raise RuntimeError("access_updated_reconnect")
+
                     # 接続が有効か確認（高速チェック）
                     DatabaseConfig._connection_cache.execute("SELECT 1")
                     return DatabaseConfig._connection_cache
@@ -368,6 +400,8 @@ class DatabaseConfig:
                     # 接続が無効な場合はキャッシュをクリア
                     DatabaseConfig._connection_cache = None
                     DatabaseConfig._connection_cache_timestamp = None
+                    DatabaseConfig._connection_cache_access_sig = None
+                    DatabaseConfig._connection_cache_access_src_path = None
         
         # 新しい接続を取得
         candidates = self._get_driver_candidates()
@@ -381,6 +415,8 @@ class DatabaseConfig:
                 # キャッシュに保存（高速化のため）
                 DatabaseConfig._connection_cache = connection
                 DatabaseConfig._connection_cache_timestamp = time.time()
+                DatabaseConfig._connection_cache_access_sig = _get_source_access_sig()
+                DatabaseConfig._connection_cache_access_src_path = str(self.access_file_path or "").strip() or None
                 
                 return connection
             except pyodbc.Error as e:
@@ -417,6 +453,8 @@ class DatabaseConfig:
             finally:
                 DatabaseConfig._connection_cache = None
                 DatabaseConfig._connection_cache_timestamp = None
+                DatabaseConfig._connection_cache_access_sig = None
+                DatabaseConfig._connection_cache_access_src_path = None
 
     def validate_config(self) -> bool:
         """設定の妥当性を検証"""
@@ -434,9 +472,6 @@ class DatabaseConfig:
         except Exception as e:
             logger.error(f"設定の検証に失敗しました: {e}")
             return False
-
-
-
 
 
 
