@@ -279,12 +279,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       }
       .legend-panel {
         border-radius: 0.9rem;
-        padding: 0.4rem 1rem;
+        padding: 0.35rem 0.85rem;
         display: inline-flex;
         align-items: center;
         gap: 0.5rem;
         background: #fff;
-        font-size: 0.85rem;
+        font-size: clamp(0.72rem, 0.9vw, 0.85rem);
         color: #333;
         font-weight: 600;
         border: 1px solid transparent;
@@ -294,11 +294,14 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         background-origin: border-box;
         background-clip: padding-box, border-box;
         box-shadow: 0 0 0 2px rgba(255, 76, 76, 0.35);
+        white-space: nowrap;
       }
       .legend-text {
         display: flex;
-        gap: 0.6rem;
+        gap: 0.5rem;
         align-items: center;
+        flex-wrap: nowrap;
+        white-space: nowrap;
       }
       .legend-label {
         display: inline-flex;
@@ -379,7 +382,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       }
       .grid-header h1 {
         margin: 0;
-        font-size: 2rem;
+        font-size: 1.6rem;
       }
       .title-block {
         display: flex;
@@ -388,7 +391,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       }
       .edit-instruction {
         margin: 0;
-        font-size: 0.95rem;
+        font-size: 0.85rem;
         color: #555;
         white-space: pre-line;
       }
@@ -401,10 +404,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         border: 1px solid rgba(0, 0, 0, 0.08);
         border-radius: 1rem;
         background: linear-gradient(180deg, rgba(246, 248, 251, 0.8), rgba(255, 255, 255, 1));
-        overflow: auto;
-        height: clamp(480px, calc(100vh - 250px), 820px);
+        overflow-x: auto;
+        overflow-y: visible;
+        height: auto;
         min-height: 420px;
-        max-height: 900px;
+        max-height: none;
       }
       #seat-grid {
         min-height: 520px;
@@ -724,6 +728,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           justify-content: flex-end;
           width: 100%;
         }
+        .legend-panel {
+          font-size: 0.74rem;
+          padding: 0.3rem 0.75rem;
+        }
+        .legend-text {
+          gap: 0.45rem;
+        }
         .mode-toggle {
           min-width: 120px;
         }
@@ -733,13 +744,19 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       }
       @media screen and (max-width: 700px) {
         .grid-header h1 {
-          font-size: 1.6rem;
+          font-size: 1.3rem;
+        }
+        .edit-instruction {
+          font-size: 0.8rem;
         }
         .grid-area {
           padding: 0.6rem 0.75rem 1rem;
         }
+        .legend-panel {
+          font-size: 0.72rem;
+        }
         #seat-grid-area {
-          height: clamp(420px, calc(100vh - 280px), 720px);
+          height: auto;
         }
         .editor-panel {
           width: 100%;
