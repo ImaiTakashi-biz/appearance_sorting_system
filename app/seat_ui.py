@@ -226,7 +226,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         font-family: "Noto Sans JP", "Segoe UI", system-ui, sans-serif;
       }
       body.editing main {
-        grid-template-columns: minmax(0, 1fr) 340px;
+        grid-template-columns: minmax(0, 1fr) minmax(220px, 240px);
       }
       body:not(.editing) .editor-panel {
         display: none;
@@ -382,7 +382,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       }
       .grid-header h1 {
         margin: 0;
-        font-size: 1.6rem;
+        font-size: 1.4rem;
       }
       .title-block {
         display: flex;
@@ -399,6 +399,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         display: flex;
         gap: 0.5rem;
         align-items: center;
+      }
+      body.editing .grid-actions .legend-panel {
+        display: none;
       }
       #seat-grid-area {
         border: 1px solid rgba(0, 0, 0, 0.08);
@@ -467,7 +470,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         white-space: nowrap;
         overflow: hidden;
         text-overflow: clip;
-        max-width: 72%;
+        flex: 1 1 auto;
+        max-width: none;
         min-width: 0;
         word-break: keep-all;
         line-height: 1.1;
@@ -618,7 +622,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       }
       .editor-panel h2 {
         margin: 0;
-        font-size: 1.4rem;
+        font-size: 1.2rem;
       }
       label {
         font-size: 0.9rem;
@@ -744,7 +748,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       }
       @media screen and (max-width: 700px) {
         .grid-header h1 {
-          font-size: 1.3rem;
+          font-size: 1.1rem;
         }
         .edit-instruction {
           font-size: 0.8rem;
@@ -782,7 +786,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             <div id="seat-grid" aria-live="polite"></div>
           </div>
           <aside class="side-panel" aria-label="未割当ロット">
-            <div class="legend-panel">
+            <div class="legend-panel" id="display-rules-legend">
               <span class="legend-text">
                 表示ルール：
                 <span class="legend-label">
@@ -850,6 +854,18 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       const clearButton = document.getElementById("clear-seat");
       const saveButton = document.getElementById("save-json");
       const toggleEditButton = document.getElementById("toggle-edit");
+      const gridActions = document.querySelector(".grid-actions");
+      const displayRulesLegend = document.getElementById("display-rules-legend");
+      const placeDisplayRulesLegend = () => {
+        if (!gridActions || !displayRulesLegend || !saveButton) {
+          return;
+        }
+        if (gridActions.contains(displayRulesLegend)) {
+          return;
+        }
+        gridActions.insertBefore(displayRulesLegend, saveButton);
+      };
+      placeDisplayRulesLegend();
       const inspectorDropdown = document.getElementById("inspector-dropdown");
       const inspectorList = document.getElementById("inspector-list");
       const inspectorDatalist = document.getElementById("inspector-names");
@@ -862,7 +878,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       const lotSplitCancelButton = document.getElementById("lot-split-cancel");
       const modeSizes = {
         view: { width: 180, height: 150, gap: 8 },
-        editing: { width: 135, height: 100, gap: 8 },
+        editing: { width: 160, height: 120, gap: 8 },
       };
       let currentSlotWidth = modeSizes.view.width;
       let currentSlotHeight = modeSizes.view.height;
@@ -1728,6 +1744,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             return;
           }
           nameEl.style.removeProperty("font-size");
+          nameEl.style.removeProperty("white-space");
+          nameEl.style.removeProperty("display");
+          nameEl.style.removeProperty("-webkit-line-clamp");
+          nameEl.style.removeProperty("-webkit-box-orient");
+          nameEl.style.removeProperty("overflow");
           nameEl.title = nameEl.textContent || "";
 
           const totalEl = header.querySelector(".total-time");
@@ -1742,7 +1763,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           // 現在のフォントサイズから最小まで段階的に縮小
           const computed = window.getComputedStyle(nameEl);
           const basePx = Math.max(10, parseFloat(computed.fontSize || "14"));
-          const minPx = 7;
+          const minPx = Math.max(12, Math.min(basePx, basePx * 0.86));
 
           let current = basePx;
           nameEl.style.fontSize = `${current}px`;
