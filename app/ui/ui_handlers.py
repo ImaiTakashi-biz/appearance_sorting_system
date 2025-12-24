@@ -5,6 +5,7 @@
 
 import os
 import sys
+import hashlib
 from pathlib import Path
 from collections import defaultdict, deque
 import warnings  # 警告抑制のため
@@ -76,6 +77,236 @@ class ModernDataExtractorUI:
     
     # シート出力用の未割当ロットキー
     UNASSIGNED_LOTS_KEY = "__UNASSIGNED_LOTS__"
+
+    @staticmethod
+    def _hash_dataframe_v1(
+        df: pd.DataFrame,
+        *,
+        sort_keys: Optional[List[str]] = None,
+        include_columns: Optional[List[str]] = None,
+        order_invariant: bool = False,
+    ) -> str:
+        """
+        DataFrameの内容を比較用にハッシュ化する（個人名などをログに出さずに差分検知するため）
+        """
+        if df is None:
+            return "none"
+        if df.empty:
+            return "empty"
+
+        work_df = df
+        if include_columns:
+            cols = [c for c in include_columns if c in work_df.columns]
+            if cols:
+                work_df = work_df[cols]
+
+        if order_invariant:
+            keys = [k for k in (sort_keys or []) if k in work_df.columns]
+            if keys:
+                try:
+                    work_df = work_df.sort_values(by=keys, kind="mergesort", na_position="last")
+                except Exception:
+                    pass
+
+        try:
+            h = pd.util.hash_pandas_object(work_df, index=True)
+            return hashlib.sha256(h.values.tobytes()).hexdigest()
+        except Exception:
+            try:
+                payload = work_df.to_csv(index=True).encode("utf-8", errors="replace")
+                return hashlib.sha256(payload).hexdigest()
+            except Exception:
+                return "error"
+
+    def _log_df_signature(
+        self,
+        label: str,
+        df: pd.DataFrame,
+        *,
+        sort_keys: Optional[List[str]] = None,
+        include_columns: Optional[List[str]] = None,
+    ) -> None:
+        """
+        実行結果が不変かどうかをログから機械的に比較できるよう、DataFrameのハッシュを出力する。
+        """
+        if os.environ.get("DEBUG_SIGNATURE_LOG_ENABLED", "1") != "1":
+            return
+        try:
+            rows = int(len(df)) if df is not None else 0
+            cols = int(len(df.columns)) if df is not None and hasattr(df, "columns") else 0
+            h_os = self._hash_dataframe_v1(df, include_columns=include_columns, order_invariant=False)
+            h_oi = self._hash_dataframe_v1(
+                df,
+                sort_keys=sort_keys,
+                include_columns=include_columns,
+                order_invariant=True,
+            )
+            self.log_message(f"[HASH v1] {label}: rows={rows} cols={cols} order_sensitive={h_os} order_invariant={h_oi}")
+        except Exception:
+            pass
+
+    @staticmethod
+    def _normalize_key_value(val: Any) -> str:
+        if val is None or (isinstance(val, float) and np.isnan(val)):
+            return ""
+        try:
+            if isinstance(val, pd.Timestamp):
+                if pd.isna(val):
+                    return ""
+                return val.isoformat()
+        except Exception:
+            pass
+        try:
+            return str(val).strip()
+        except Exception:
+            return ""
+
+    def _build_lot_key_set(self, df: pd.DataFrame) -> Tuple[str, List[str]]:
+        """
+        ロットを識別するためのキー集合を作る（ログ比較用）。
+        """
+        if df is None or df.empty:
+            return ("empty", [])
+
+        # 優先: 生産ロットIDがある場合はそれをキーに含める
+        cols = set(df.columns)
+        has_lot_id = "生産ロットID" in cols
+        has_product = "品番" in cols
+        has_ship = "出荷予定日" in cols
+
+        keys: List[str] = []
+        try:
+            for row in df.itertuples(index=False):
+                row_dict = row._asdict() if hasattr(row, "_asdict") else {}
+                lot_id = self._normalize_key_value(row_dict.get("生産ロットID")) if has_lot_id else ""
+                prod = self._normalize_key_value(row_dict.get("品番")) if has_product else ""
+                ship = self._normalize_key_value(row_dict.get("出荷予定日")) if has_ship else ""
+                keys.append(f"{lot_id}|{prod}|{ship}")
+        except Exception:
+            # フォールバック（遅いが確実）
+            for _, row in df.iterrows():
+                lot_id = self._normalize_key_value(row.get("生産ロットID")) if has_lot_id else ""
+                prod = self._normalize_key_value(row.get("品番")) if has_product else ""
+                ship = self._normalize_key_value(row.get("出荷予定日")) if has_ship else ""
+                keys.append(f"{lot_id}|{prod}|{ship}")
+
+        keys = sorted(set(keys))
+        schema = "生産ロットID|品番|出荷予定日" if has_lot_id else "品番|出荷予定日"
+        return (schema, keys)
+
+    def _save_and_log_snapshot(self, snapshot_label: str, df: pd.DataFrame) -> None:
+        """
+        直前実行との差分（増減ロット）をログに出すために、キー一覧をローカルに保存し比較する。
+        """
+        if os.environ.get("DEBUG_SNAPSHOT_DIFF_ENABLED", "1") != "1":
+            return
+        try:
+            schema, keys = self._build_lot_key_set(df)
+            max_keys_env = os.environ.get("DEBUG_SNAPSHOT_KEYS_MAX", "")
+            try:
+                max_keys = int(max_keys_env) if max_keys_env else 0
+            except Exception:
+                max_keys = 0
+
+            if max_keys and len(keys) > max_keys:
+                self.log_message(f"[DIFF] {snapshot_label}: skipped (keys={len(keys)} exceeds DEBUG_SNAPSHOT_KEYS_MAX={max_keys})")
+                return
+
+            self._save_and_log_snapshot_keys(
+                snapshot_label,
+                schema=schema,
+                keys=keys,
+                rows=int(len(df)) if df is not None else 0,
+            )
+        except Exception:
+            pass
+
+    def _save_and_log_snapshot_keys(self, snapshot_label: str, *, schema: str, keys: List[str], rows: int) -> None:
+        base_dir = Path(os.environ.get("LOCALAPPDATA", ".")) / "appearance_sorting_system" / "debug_snapshots"
+        base_dir.mkdir(parents=True, exist_ok=True)
+        path = base_dir / f"last_{snapshot_label}.json"
+
+        prev_keys: Optional[set] = None
+        prev_schema: Optional[str] = None
+        if path.exists():
+            try:
+                prev = json.loads(path.read_text(encoding="utf-8"))
+                prev_schema = prev.get("schema")
+                prev_keys = set(prev.get("keys") or [])
+            except Exception:
+                prev_keys = None
+
+        payload = {
+            "label": snapshot_label,
+            "schema": schema,
+            "rows": rows,
+            "keys": keys,
+            "saved_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        if prev_keys is not None and prev_schema == schema:
+            current = set(keys)
+            removed = sorted(prev_keys - current)
+            added = sorted(current - prev_keys)
+            if removed or added:
+                self.log_message(f"[DIFF] {snapshot_label}: removed={len(removed)} added={len(added)} (schema={schema})")
+                try:
+                    max_lines = int(os.environ.get("DEBUG_SNAPSHOT_DIFF_MAX_LINES", "20"))
+                except Exception:
+                    max_lines = 20
+                for k in removed[:max_lines]:
+                    self.log_message(f"[DIFF] removed: {k}")
+                for k in added[:max_lines]:
+                    self.log_message(f"[DIFF] added: {k}")
+            else:
+                self.log_message(f"[DIFF] {snapshot_label}: no_change (schema={schema})")
+        else:
+            self.log_message(f"[DIFF] {snapshot_label}: baseline_saved (schema={schema})")
+
+    @staticmethod
+    def _hash_token_v1(text: str) -> str:
+        if not text:
+            return ""
+        return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()[:12]
+
+    def _save_and_log_assignment_diff_snapshot(self, snapshot_label: str, df: pd.DataFrame) -> None:
+        """
+        振分結果の差分（どのロットで割当が変わったか）を、個人名を出さずに比較できる形で保存・出力する。
+        """
+        if os.environ.get("DEBUG_ASSIGNMENT_DIFF_ENABLED", "1") != "1":
+            return
+        if os.environ.get("DEBUG_SNAPSHOT_DIFF_ENABLED", "1") != "1":
+            return
+        if df is None or df.empty:
+            return
+
+        cols = set(df.columns)
+        required = {"生産ロットID", "品番", "出荷予定日"}
+        if not required.issubset(cols):
+            return
+
+        inspector_cols = [c for c in ["検査員1", "検査員2", "検査員3", "検査員4", "検査員5"] if c in cols]
+        if not inspector_cols:
+            return
+
+        keys: List[str] = []
+        for row in df.itertuples(index=False):
+            row_dict = row._asdict() if hasattr(row, "_asdict") else {}
+            lot_id = self._normalize_key_value(row_dict.get("生産ロットID"))
+            prod = self._normalize_key_value(row_dict.get("品番"))
+            ship = self._normalize_key_value(row_dict.get("出荷予定日"))
+            tokens: List[str] = []
+            for c in inspector_cols:
+                raw = self._normalize_key_value(row_dict.get(c))
+                if "(" in raw:
+                    raw = raw.split("(")[0].strip()
+                tokens.append(self._hash_token_v1(raw))
+            keys.append(f"{lot_id}|{prod}|{ship}|" + ",".join(tokens))
+
+        keys = sorted(set(keys))
+        schema = "生産ロットID|品番|出荷予定日|検査員hash1..5"
+        self._save_and_log_snapshot_keys(snapshot_label, schema=schema, keys=keys, rows=int(len(df)))
     
     # クラス変数としてテーブル構造をキャッシュ（高速化）
     _table_structure_cache = None
@@ -3271,7 +3502,16 @@ class ModernDataExtractorUI:
             
             # データを保存（エクスポート用）
             self.current_main_data = df
-            
+
+            # 抽出結果の不変性チェック用（内容は出さずハッシュのみ出力）
+            self._log_df_signature(
+                "extract.main_df",
+                df,
+                sort_keys=["品番", "出荷予定日", "客先", "品名"],
+            )
+            # 差分（前回実行比）をログに出すためのスナップショット
+            self._save_and_log_snapshot("extract.main_df", df)
+             
             # 不足数がマイナスの品番に対してロット割り当てを実行
             # 出荷予定日からデータが無い場合でも、先行検査品と洗浄品の処理を実行
             self.update_progress(0.10, "ロット割り当て処理中...")
@@ -4098,6 +4338,13 @@ class ModernDataExtractorUI:
                 self.log_message("Accessのロットデータをキャッシュから再利用しました")
                 return cached_lots
 
+            # 対象外ロット（参考情報）は必須なので、同一クエリ結果から派生させてAccess二重クエリを避ける
+            non_inspection_cache_key = self._build_access_cache_key(
+                "non_inspection",
+                shortage_products,
+                self.inspection_target_keywords,
+            )
+
             # ローカルディスクキャッシュ（実行を跨いで再利用）
             # Accessファイルの更新状態（mtime/size）に紐づけているため、結果は不変のまま揺れを低減できる。
             disk_cache_path = None
@@ -4117,8 +4364,10 @@ class ModernDataExtractorUI:
                 self.log_message("t_現品票履歴テーブルにデータが見つかりません")
                 return pd.DataFrame()
 
+            # 対象外ロット（参考情報）も同一クエリから生成するため、表示に必要な列も可能なら同時取得する
             available_columns = [col for col in actual_columns if col in [
-                "品番", "数量", "指示日", "号機", "現在工程番号", "現在工程名", "現在工程二次処理", "生産ロットID"
+                "品番", "品名", "客先", "数量", "ロット数量", "指示日", "号機",
+                "現在工程番号", "現在工程名", "現在工程二次処理", "生産ロットID"
             ]]
             if not available_columns:
                 self.log_message("必要な列が見つかりません。全列を取得します。")
@@ -4163,10 +4412,13 @@ class ModernDataExtractorUI:
                 try:
                     cached_shortage_df = disk_cached_payload.get("shortage_lots_df")
                     cached_registered_df = disk_cached_payload.get("registered_lots_df")
+                    cached_non_inspection_df = disk_cached_payload.get("non_inspection_lots_df")
 
                     if isinstance(cached_shortage_df, pd.DataFrame):
                         logger.bind(channel="PERF").debug("PERF {}: cache_hit", "access.lots_for_shortage.disk_cache")
                         self._store_access_cache(cache_key, cached_shortage_df)
+                        if isinstance(cached_non_inspection_df, pd.DataFrame):
+                            self._store_access_cache(non_inspection_cache_key, cached_non_inspection_df)
 
                         if registered_product_numbers and isinstance(cached_registered_df, pd.DataFrame):
                             registered_cache_key = self._build_access_cache_key(
@@ -4181,9 +4433,15 @@ class ModernDataExtractorUI:
 
             columns_str = ", ".join([f"[{col}]" for col in available_columns])
 
-            shortage_placeholders = ", ".join("?" for _ in shortage_products)
-            shortage_conditions = [f"品番 IN ({shortage_placeholders})"]
-            params = list(shortage_products)
+            # Access側のOR条件は最適化されにくいことがあるため、品番は不足品番＋登録済み品番の集合でINに統合する
+            all_product_numbers = list(shortage_products)
+            if registered_product_numbers:
+                all_product_numbers.extend(registered_product_numbers)
+            all_product_numbers = sorted({str(pn).strip() for pn in all_product_numbers if str(pn).strip()})
+
+            placeholders = ", ".join("?" for _ in all_product_numbers)
+            base_product_clause = f"品番 IN ({placeholders})"
+            params = list(all_product_numbers)
 
             if "現在工程名" in available_columns:
                 # NULL の場合に NOT LIKE が NULL となり除外されてしまうため、NULL は許容して後段で扱う
@@ -4201,18 +4459,7 @@ class ModernDataExtractorUI:
             else:
                 base_conditions = []
 
-            shortage_clause = " AND ".join(shortage_conditions)
-
-            # 不足ロット取得と登録済み品番ロット取得を同一クエリで実行（登録済み側は後段のキーワード絞り込み対象外）
-            if registered_product_numbers:
-                registered_placeholders = ", ".join("?" for _ in registered_product_numbers)
-                registered_clause = f"品番 IN ({registered_placeholders})"
-                params.extend(registered_product_numbers)
-                product_clause = f"(({shortage_clause}) OR ({registered_clause}))"
-            else:
-                product_clause = f"({shortage_clause})"
-
-            where_conditions = [product_clause] + base_conditions
+            where_conditions = [base_product_clause] + base_conditions
             where_clause = " AND ".join(where_conditions)
 
             lots_query = f"""
@@ -4221,8 +4468,18 @@ class ModernDataExtractorUI:
             WHERE {where_clause}
             """
 
+            def _read_sql_via_cursor(query_text: str, query_params: list[str]) -> pd.DataFrame:
+                cursor = connection.cursor()
+                cursor.execute(query_text, query_params)
+                column_names = [desc[0] for desc in cursor.description]
+                rows = cursor.fetchall()
+                if not rows:
+                    return pd.DataFrame(columns=column_names)
+                return pd.DataFrame.from_records(rows, columns=column_names)
+
             with perf_timer(logger, "access.lots_for_shortage.read_sql"):
-                lots_df = pd.read_sql(lots_query, connection, params=params)
+                # pd.read_sql は環境によって型推論/パースが重くなるため、pyodbcカーソルで直接取得して高速化する
+                lots_df = _read_sql_via_cursor(lots_query, params)
 
             # Access側の ORDER BY を避け、同等の安定ソートをpandas側で実施（結果の選択順序を維持）
             sort_cols = []
@@ -4238,6 +4495,26 @@ class ModernDataExtractorUI:
             if lots_df.empty:
                 self.log_message("利用可能なロットが見つかりませんでした")
                 return pd.DataFrame()
+
+            # 対象外ロット（参考情報）を同一lots_dfから派生（結果は同一・Accessクエリ回数を削減）
+            non_inspection_lots_df = pd.DataFrame()
+            try:
+                shortage_all_lots_df = lots_df[lots_df["品番"].isin(shortage_products)].copy()
+                if (
+                    not shortage_all_lots_df.empty
+                    and self.inspection_target_keywords
+                    and "現在工程名" in shortage_all_lots_df.columns
+                ):
+                    with perf_timer(logger, "lots.non_inspection.keyword_filter"):
+                        process_series = shortage_all_lots_df["現在工程名"].astype(str)
+                        keyword_mask = pd.Series(False, index=shortage_all_lots_df.index, dtype=bool)
+                        for keyword in self.inspection_target_keywords:
+                            if not isinstance(keyword, str) or not keyword.strip():
+                                continue
+                            keyword_mask |= process_series.str.contains(keyword.strip(), na=False, regex=False)
+                        non_inspection_lots_df = shortage_all_lots_df[~keyword_mask].copy()
+            except Exception:
+                non_inspection_lots_df = pd.DataFrame()
 
             # 不足品番だけ返す（登録済み品番分はキャッシュに保持して二重クエリを回避）
             shortage_lots_df = lots_df[lots_df["品番"].isin(shortage_products)].copy()
@@ -4258,6 +4535,8 @@ class ModernDataExtractorUI:
                     shortage_lots_df = shortage_lots_df[keyword_mask].copy()
 
             self._store_access_cache(cache_key, shortage_lots_df)
+            if isinstance(non_inspection_lots_df, pd.DataFrame) and not non_inspection_lots_df.empty:
+                self._store_access_cache(non_inspection_cache_key, non_inspection_lots_df)
 
             if registered_product_numbers:
                 registered_cache_key = self._build_access_cache_key(
@@ -4275,6 +4554,7 @@ class ModernDataExtractorUI:
                     payload = {
                         "shortage_lots_df": shortage_lots_df,
                         "registered_lots_df": registered_lots_df if registered_product_numbers else pd.DataFrame(),
+                        "non_inspection_lots_df": non_inspection_lots_df if isinstance(non_inspection_lots_df, pd.DataFrame) else pd.DataFrame(),
                     }
                     with open(disk_cache_path, "wb") as f:
                         pickle.dump(payload, f, protocol=4)
@@ -4308,13 +4588,32 @@ class ModernDataExtractorUI:
         try:
             if shortage_df.empty:
                 return pd.DataFrame()
-            
+             
             shortage_products = shortage_df[shortage_df['不足数'] < 0]['品番'].dropna().unique().tolist()
             if not shortage_products:
                 return pd.DataFrame()
-            
+             
             self.log_message(f"検査対象外ロットを取得中: {len(shortage_products)}品番")
-            
+
+            # get_available_lots_for_shortage() と同一クエリ結果から派生したキャッシュがあれば再利用（Access二重クエリ回避）
+            cache_key = self._build_access_cache_key(
+                "non_inspection",
+                shortage_products,
+                self.inspection_target_keywords,
+            )
+            cached = self._try_get_access_cache(cache_key)
+            if cached is not None:
+                logger.bind(channel="PERF").debug("PERF {}: cache_hit", "access.non_inspection_lots.memory_cache")
+                non_inspection_lots_df = cached
+
+                # 出荷予定日をshortage_dfからマージ（品番で結合、高速化）
+                if not shortage_df.empty and '出荷予定日' in shortage_df.columns and '品番' in shortage_df.columns:
+                    shipping_date_map = shortage_df.groupby('品番')['出荷予定日'].first().to_dict()
+                    if shipping_date_map and '品番' in non_inspection_lots_df.columns:
+                        non_inspection_lots_df['出荷予定日'] = non_inspection_lots_df['品番'].map(shipping_date_map)
+
+                return non_inspection_lots_df
+
             # テーブル構造を取得
             actual_columns, has_rows = self._get_inventory_table_structure(connection)
             if not has_rows:
@@ -5927,7 +6226,15 @@ class ModernDataExtractorUI:
                 
                 # ロット割り当てデータを保存（エクスポート用）
                 self.current_assignment_data = assignment_df
-                
+
+                # ロット抽出（割当）結果の不変性チェック用
+                self._log_df_signature(
+                    "lot_assignment.assignment_df",
+                    assignment_df,
+                    sort_keys=["生産ロットID", "品番", "出荷予定日"],
+                )
+                self._save_and_log_snapshot("lot_assignment.assignment_df", assignment_df)
+                 
                 # 検査員割振り処理を実行（進捗は連続させる）
                 # ロット割り当て: start_progress〜start_progress+0.20
                 # 検査員割振り: 0.40〜0.90
@@ -6052,7 +6359,38 @@ class ModernDataExtractorUI:
                     inspection_target_keywords=inspection_target_keywords
                 )
             self.stop_progress_pulse()
-            
+
+            # 振分結果（スキル値付き）の不変性チェック用
+            self._log_df_signature(
+                "inspector_assignment.result_with_skills",
+                inspector_df_with_skills,
+                sort_keys=["生産ロットID", "品番", "出荷予定日"],
+                include_columns=[
+                    "生産ロットID",
+                    "品番",
+                    "品名",
+                    "客先",
+                    "出荷予定日",
+                    "検査時間",
+                    "分割検査時間",
+                    "検査員1",
+                    "検査員2",
+                    "検査員3",
+                    "検査員4",
+                    "検査員5",
+                    "検査員人数",
+                    "remaining_work_hours",
+                    "assignability_status",
+                    "チーム情報",
+                ],
+            )
+            self._save_and_log_snapshot("inspector_assignment.result_with_skills", inspector_df_with_skills)
+            # 振分結果（検査員割当の差分）をロット単位で特定できるようにスナップショット化（氏名はハッシュ化）
+            self._save_and_log_assignment_diff_snapshot(
+                "inspector_assignment.assignment_diff_with_skills",
+                inspector_df_with_skills,
+            )
+             
             # 表示用のデータは氏名のみ
             with perf_timer(logger, "inspector_assignment.display_name_strip"):
                 inspector_df = inspector_df_with_skills.copy()
@@ -6061,6 +6399,36 @@ class ModernDataExtractorUI:
                         inspector_df[col] = inspector_df[col].astype(str).apply(
                             lambda x: x.split('(')[0].strip() if '(' in x and ')' in x else x
                         )
+
+            # 振分結果（表示用）の不変性チェック用
+            self._log_df_signature(
+                "inspector_assignment.result_display",
+                inspector_df,
+                sort_keys=["生産ロットID", "品番", "出荷予定日"],
+                include_columns=[
+                    "生産ロットID",
+                    "品番",
+                    "品名",
+                    "客先",
+                    "出荷予定日",
+                    "検査時間",
+                    "分割検査時間",
+                    "検査員1",
+                    "検査員2",
+                    "検査員3",
+                    "検査員4",
+                    "検査員5",
+                    "検査員人数",
+                    "remaining_work_hours",
+                    "assignability_status",
+                    "チーム情報",
+                ],
+            )
+            self._save_and_log_snapshot("inspector_assignment.result_display", inspector_df)
+            self._save_and_log_assignment_diff_snapshot(
+                "inspector_assignment.assignment_diff_display",
+                inspector_df,
+            )
             
             # 検査員割振りデータを保存（エクスポート用）
             self.current_inspector_data = inspector_df

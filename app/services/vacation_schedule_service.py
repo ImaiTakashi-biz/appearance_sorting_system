@@ -4,6 +4,8 @@ Googleスプレッドシートから休暇予定を読み込む
 """
 
 import os
+import time
+import copy
 from datetime import datetime, date
 from pathlib import Path
 from loguru import logger
@@ -80,6 +82,41 @@ VACATION_DEFINITIONS = {
     }
 }
 
+_VACATION_SHEETS_CACHE: dict[tuple[str, str, str], tuple[float, dict]] = {}
+
+
+def _get_vacation_cache_ttl_seconds() -> float:
+    """
+    休暇予定のGoogle Sheets取得結果をメモリで再利用するTTL（秒）。
+    デフォルトは0（キャッシュ無効）で、結果不変の運用を維持する。
+    """
+    raw = str(os.getenv("VACATION_SHEETS_CACHE_TTL_SECONDS", "0")).strip()
+    try:
+        return max(0.0, float(raw))
+    except Exception:
+        return 0.0
+
+
+def _vacation_cache_get(key: tuple[str, str, str]) -> dict | None:
+    ttl = _get_vacation_cache_ttl_seconds()
+    if ttl <= 0:
+        return None
+    item = _VACATION_SHEETS_CACHE.get(key)
+    if not item:
+        return None
+    ts, payload = item
+    if (time.monotonic() - ts) > ttl:
+        _VACATION_SHEETS_CACHE.pop(key, None)
+        return None
+    return copy.deepcopy(payload)
+
+
+def _vacation_cache_set(key: tuple[str, str, str], payload: dict) -> None:
+    ttl = _get_vacation_cache_ttl_seconds()
+    if ttl <= 0:
+        return
+    _VACATION_SHEETS_CACHE[key] = (time.monotonic(), copy.deepcopy(payload))
+
 
 def get_vacation_info(vacation_code: str) -> dict:
     """
@@ -140,6 +177,16 @@ def load_vacation_schedule(sheets_url: str, credentials_path: str, sheet_name: s
         dict: {従業員名: {日付: 休暇情報}} の形式の辞書
     """
     try:
+        # シート名が指定されていない場合は現在の年月のシート名を生成（キャッシュキー確定のため先に実施）
+        if sheet_name is None:
+            sheet_name = get_current_month_sheet_name(year, month)
+
+        cache_key = (str(sheets_url or ""), str(credentials_path or ""), str(sheet_name or ""))
+        cached = _vacation_cache_get(cache_key)
+        if cached is not None:
+            logger.bind(channel="PERF").debug("PERF vacation.load: cache_hit")
+            return cached
+
         logger.info("休暇予定スプレッドシートへの接続を開始します")
         
         # GoogleSheetsExporterを初期化
@@ -156,10 +203,7 @@ def load_vacation_schedule(sheets_url: str, credentials_path: str, sheet_name: s
         
         logger.info(f"スプレッドシート名: {spreadsheet.title}")
         
-        # シート名が指定されていない場合は現在の年月のシート名を生成
-        if sheet_name is None:
-            sheet_name = get_current_month_sheet_name(year, month)
-            logger.info(f"シート名を自動生成: {sheet_name}")
+        logger.info(f"シート名: {sheet_name}")
         
         # 年月をシート名から取得
         if year is None or month is None:
@@ -236,6 +280,7 @@ def load_vacation_schedule(sheets_url: str, credentials_path: str, sheet_name: s
                 vacation_data[employee_name] = employee_schedule
         
         logger.info(f"休暇予定データを {len(vacation_data)} 名分読み込みました")
+        _vacation_cache_set(cache_key, vacation_data)
         return vacation_data
         
     except Exception as e:

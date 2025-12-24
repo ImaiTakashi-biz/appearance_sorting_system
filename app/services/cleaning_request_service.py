@@ -4,6 +4,8 @@
 
 import os
 import re
+import time
+import copy
 import pyodbc
 import pandas as pd
 import concurrent.futures
@@ -27,6 +29,40 @@ _REMARKS_SEGMENT_SPLIT_PATTERN = re.compile(r"[、､,，;\n]+")
 # テーブル構造のキャッシュ（高速化のため）
 _table_structure_cache = None
 _process_infer_logged: set = set()
+_CLEANING_SHEETS_CACHE: dict[tuple[str, str, str], tuple[float, object]] = {}
+
+
+def _get_cleaning_sheets_cache_ttl_seconds() -> float:
+    """
+    洗浄関連のGoogle Sheets取得結果をメモリで再利用するTTL（秒）。
+    デフォルトは0（キャッシュ無効）で、結果不変の運用を維持する。
+    """
+    raw = str(os.getenv("CLEANING_SHEETS_CACHE_TTL_SECONDS", "0")).strip()
+    try:
+        return max(0.0, float(raw))
+    except Exception:
+        return 0.0
+
+
+def _cleaning_cache_get(key: tuple[str, str, str]) -> object | None:
+    ttl = _get_cleaning_sheets_cache_ttl_seconds()
+    if ttl <= 0:
+        return None
+    item = _CLEANING_SHEETS_CACHE.get(key)
+    if not item:
+        return None
+    ts, payload = item
+    if (time.monotonic() - ts) > ttl:
+        _CLEANING_SHEETS_CACHE.pop(key, None)
+        return None
+    return copy.deepcopy(payload)
+
+
+def _cleaning_cache_set(key: tuple[str, str, str], payload: object) -> None:
+    ttl = _get_cleaning_sheets_cache_ttl_seconds()
+    if ttl <= 0:
+        return
+    _CLEANING_SHEETS_CACHE[key] = (time.monotonic(), copy.deepcopy(payload))
 
 
 def _normalize_instruction_date(value: object) -> Optional[str]:
@@ -279,13 +315,49 @@ def _get_lots_from_access_batch(connection, requests: List[Dict]) -> pd.DataFram
                 machine_dates[machine] = set()
             machine_dates[machine].update(normalized_dates)
 
-        use_envelope = bool(machine_dates) and ("号機" in available_columns)
-        if use_envelope:
-            per_machine_conditions: List[str] = []
-            for machine, dates in sorted(machine_dates.items(), key=lambda x: x[0]):
-                dates_sorted = sorted({d for d in dates if isinstance(d, str) and d})
-                if not dates_sorted:
-                    continue
+        # Accessは巨大なOR条件で極端に遅くなることがあるため、
+        # 号機IN + 指示日範囲の「包絡条件」で広めに取得して、後段（呼び出し側）で厳密に絞る。
+        # ※呼び出し側で _指示日_normalized / 号機 で必ず絞り込んでいるため、結果は不変。
+        use_simple_range_query = (
+            bool(machine_dates)
+            and not no_machine_reqs
+            and ("号機" in available_columns)
+            and ("指示日" in available_columns)
+            and bool(all_dates_set)
+        )
+
+        if use_simple_range_query:
+            machines_sorted = sorted({str(m).strip() for m in machine_dates.keys() if str(m).strip()})
+            dates_sorted = sorted(all_dates_set)
+            if not machines_sorted or not dates_sorted:
+                use_simple_range_query = False
+
+        if use_simple_range_query:
+            escaped_machines: List[str] = []
+            for machine in machines_sorted:
+                escaped = str(machine).replace("'", "''")
+                escaped_machines.append(f"'{escaped}'")
+            machine_literals = ", ".join(escaped_machines)
+            where_clause = f"[号機] IN ({machine_literals}) AND [指示日] >= #{dates_sorted[0]}# AND [指示日] <= #{dates_sorted[-1]}#"
+
+            # 材料識別でフィルタリング（5のみを対象）
+            if "材料識別" in available_columns:
+                where_clause = f"({where_clause}) AND [材料識別] = 5"
+
+            query = f"""
+            SELECT {columns_str}
+            FROM [t_現品票履歴]
+            WHERE {where_clause}
+            """
+        else:
+            use_envelope = bool(machine_dates) and ("号機" in available_columns)
+
+            if use_envelope:
+                per_machine_conditions: List[str] = []
+                for machine, dates in sorted(machine_dates.items(), key=lambda x: x[0]):
+                    dates_sorted = sorted({d for d in dates if isinstance(d, str) and d})
+                    if not dates_sorted:
+                        continue
 
                 escaped_machine = machine.replace("'", "''")
 
@@ -330,63 +402,63 @@ def _get_lots_from_access_batch(connection, requests: List[Dict]) -> pd.DataFram
             combined = per_machine_conditions + extra_conditions
             all_conditions = [f"({' OR '.join(combined)})"] if combined else []
 
-        if not all_conditions:
-            # 従来方式（OR条件）
-            for req in requests:
-                conditions = []
+            if not all_conditions:
+                # 従来方式（OR条件）
+                for req in requests:
+                    conditions = []
 
-                if req.get("instruction_date"):
-                    normalized = _normalize_instruction_date(req["instruction_date"])
-                    if normalized:
-                        try:
-                            date_obj = datetime.strptime(normalized, "%Y-%m-%d")
-                            date_str = date_obj.strftime('#%Y-%m-%d#')
-                            conditions.append(f"[指示日] = {date_str}")
-                        except Exception:
-                            logger.warning(f"指示日の正規化に失敗したためスキップします: {req['instruction_date']}")
+                    if req.get("instruction_date"):
+                        normalized = _normalize_instruction_date(req["instruction_date"])
+                        if normalized:
+                            try:
+                                date_obj = datetime.strptime(normalized, "%Y-%m-%d")
+                                date_str = date_obj.strftime('#%Y-%m-%d#')
+                                conditions.append(f"[指示日] = {date_str}")
+                            except Exception:
+                                logger.warning(f"指示日の正規化に失敗したためスキップします: {req['instruction_date']}")
 
-                if req.get("date_list"):
-                    date_list = req["date_list"]
-                    if len(date_list) > 0:
-                        sorted_dates_str = sorted(date_list)
-                        start_date = pd.to_datetime(sorted_dates_str[0])
-                        end_date = pd.to_datetime(sorted_dates_str[-1])
-                        start_str = start_date.strftime('#%Y-%m-%d#')
-                        end_str = end_date.strftime('#%Y-%m-%d#')
-                        conditions.append(f"[指示日] >= {start_str} AND [指示日] <= {end_str}")
+                    if req.get("date_list"):
+                        date_list = req["date_list"]
+                        if len(date_list) > 0:
+                            sorted_dates_str = sorted(date_list)
+                            start_date = pd.to_datetime(sorted_dates_str[0])
+                            end_date = pd.to_datetime(sorted_dates_str[-1])
+                            start_str = start_date.strftime('#%Y-%m-%d#')
+                            end_str = end_date.strftime('#%Y-%m-%d#')
+                            conditions.append(f"[指示日] >= {start_str} AND [指示日] <= {end_str}")
 
-                if req.get("machine") and "号機" in available_columns:
-                    escaped_machine = req["machine"].replace("'", "''")
-                    conditions.append(f"[号機] = '{escaped_machine}'")
+                    if req.get("machine") and "号機" in available_columns:
+                        escaped_machine = req["machine"].replace("'", "''")
+                        conditions.append(f"[号機] = '{escaped_machine}'")
 
-                if conditions:
-                    all_conditions.append(f"({' AND '.join(conditions)})")
-        
-        if not all_conditions:
-            return pd.DataFrame()
-        
-        where_clause = " OR ".join(all_conditions)
-        
-        # 材料識別でフィルタリング（5のみを対象）
-        if "材料識別" in available_columns:
-            where_clause = f"({where_clause}) AND [材料識別] = 5"
+                    if conditions:
+                        all_conditions.append(f"({' AND '.join(conditions)})")
+         
+            if not all_conditions:
+                return pd.DataFrame()
+            
+            where_clause = " OR ".join(all_conditions)
+            
+            # 材料識別でフィルタリング（5のみを対象）
+            if "材料識別" in available_columns:
+                where_clause = f"({where_clause}) AND [材料識別] = 5"
 
-        # 全体の指示日範囲で追加絞り込み（結果は不変・Access側の検索範囲を狭める）
-        if all_dates_set:
-            try:
-                dates_sorted = sorted(all_dates_set)
-                where_clause = f"({where_clause}) AND [指示日] >= #{dates_sorted[0]}# AND [指示日] <= #{dates_sorted[-1]}#"
-            except Exception:
-                pass
-        
-        # バッチクエリを実行
-        # CStr([指示日]) はAccess側でインデックスを使いにくくなる場合があるため、
-        # 可能な限り生のDate型で取得し、Python側で文字列化して扱う（結果は同一）。
-        query = f"""
-        SELECT {columns_str}
-        FROM [t_現品票履歴]
-        WHERE {where_clause}
-        """
+            # 全体の指示日範囲で追加絞り込み（結果は不変・Access側の検索範囲を狭める）
+            if all_dates_set:
+                try:
+                    dates_sorted = sorted(all_dates_set)
+                    where_clause = f"({where_clause}) AND [指示日] >= #{dates_sorted[0]}# AND [指示日] <= #{dates_sorted[-1]}#"
+                except Exception:
+                    pass
+            
+            # バッチクエリを実行
+            # CStr([指示日]) はAccess側でインデックスを使いにくくなる場合があるため、
+            # 可能な限り生のDate型で取得し、Python側で文字列化して扱う（結果は同一）。
+            query = f"""
+            SELECT {columns_str}
+            FROM [t_現品票履歴]
+            WHERE {where_clause}
+            """
         
         try:
             from time import perf_counter
@@ -831,38 +903,61 @@ def get_cleaning_lots(
         normalized_keywords = ["外観"]
 
     try:
-        # GoogleSheetsExporterを初期化
-        exporter_cleaning = GoogleSheetsExporter(
-            sheets_url=google_sheets_url_cleaning,
-            credentials_path=google_sheets_credentials_path
-        )
-        
-        exporter_instructions = GoogleSheetsExporter(
-            sheets_url=google_sheets_url_cleaning_instructions,
-            credentials_path=google_sheets_credentials_path
-        )
-        
         # 今日の日付からシート名を生成（MMDD形式）
         today = datetime.now()
         sheet_name_today = today.strftime('%m%d')
-        
-        # データ取得（独立処理なので並列化して待ち時間を短縮）
-        def _fetch_today_requests():
-            log("洗浄二次処理依頼からデータを取得中...")
-            with perf_timer(logger, "cleaning.sheets.today_requests"):
-                return _get_today_requests_from_sheets(exporter_cleaning, "依頼一覧", log_callback=log)
 
-        def _fetch_instructions():
-            log("洗浄指示からデータを取得中...")
-            with perf_timer(logger, "cleaning.sheets.instructions"):
-                return _get_cleaning_instructions_from_sheets(exporter_instructions, sheet_name_today)
+        today_key = (str(google_sheets_url_cleaning or ""), "依頼一覧", today.strftime("%Y-%m-%d"))
+        instructions_key = (str(google_sheets_url_cleaning_instructions or ""), sheet_name_today, today.strftime("%Y-%m-%d"))
 
-        with perf_timer(logger, "cleaning.sheets.parallel_total"):
-            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-                future_today = executor.submit(_fetch_today_requests)
-                future_instructions = executor.submit(_fetch_instructions)
-                today_data = future_today.result()
-                cleaning_instructions = future_instructions.result()
+        cached_today = _cleaning_cache_get(today_key)
+        cached_instructions = _cleaning_cache_get(instructions_key)
+        if cached_today is not None and cached_instructions is not None:
+            logger.bind(channel="PERF").debug("PERF cleaning.sheets.today_requests: cache_hit")
+            logger.bind(channel="PERF").debug("PERF cleaning.sheets.instructions: cache_hit")
+            today_data = cached_today
+            cleaning_instructions = cached_instructions
+        else:
+            # GoogleSheetsExporterを初期化（キャッシュミス時のみ）
+            exporter_cleaning = GoogleSheetsExporter(
+                sheets_url=google_sheets_url_cleaning,
+                credentials_path=google_sheets_credentials_path
+            )
+            
+            exporter_instructions = GoogleSheetsExporter(
+                sheets_url=google_sheets_url_cleaning_instructions,
+                credentials_path=google_sheets_credentials_path
+            )
+
+            # データ取得（独立処理なので並列化して待ち時間を短縮）
+            def _fetch_today_requests():
+                cached = _cleaning_cache_get(today_key)
+                if cached is not None:
+                    logger.bind(channel="PERF").debug("PERF cleaning.sheets.today_requests: cache_hit")
+                    return cached
+                log("洗浄二次処理依頼からデータを取得中...")
+                with perf_timer(logger, "cleaning.sheets.today_requests"):
+                    data = _get_today_requests_from_sheets(exporter_cleaning, "依頼一覧", log_callback=log)
+                _cleaning_cache_set(today_key, data)
+                return data
+
+            def _fetch_instructions():
+                cached = _cleaning_cache_get(instructions_key)
+                if cached is not None:
+                    logger.bind(channel="PERF").debug("PERF cleaning.sheets.instructions: cache_hit")
+                    return cached
+                log("洗浄指示からデータを取得中...")
+                with perf_timer(logger, "cleaning.sheets.instructions"):
+                    data = _get_cleaning_instructions_from_sheets(exporter_instructions, sheet_name_today)
+                _cleaning_cache_set(instructions_key, data)
+                return data
+
+            with perf_timer(logger, "cleaning.sheets.parallel_total"):
+                with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                    future_today = executor.submit(_fetch_today_requests)
+                    future_instructions = executor.submit(_fetch_instructions)
+                    today_data = future_today.result()
+                    cleaning_instructions = future_instructions.result()
         
         # today_dataが空でも洗浄指示があれば処理を続行
         if not today_data and not cleaning_instructions:

@@ -11,6 +11,7 @@ import pandas as pd
 import numpy as np
 import logging
 import copy
+import os
 import openpyxl
 from pathlib import Path
 import re
@@ -159,6 +160,15 @@ class InspectorAssignmentManager:
         self.log_buffer = []  # ログをバッファリング
         self.log_batch_size = 10  # バッチサイズ
 
+        # 通常運用はログ量が多くなりやすいため、UI更新/ファイル書き込み負荷を軽減する目的でバッチ化を有効化（任意でOFF可）
+        try:
+            enabled = os.getenv("ASSIGN_LOG_BATCH_ENABLED", "1").strip().lower() not in {"0", "false", "off", "no"}
+            batch_size = int(os.getenv("ASSIGN_LOG_BATCH_SIZE", "50").strip() or "50")
+            if enabled and not self.debug_mode:
+                self.enable_log_batching(batch_size=max(1, batch_size))
+        except Exception:
+            pass
+
         # ログ削減: 频出メッセージを集計して最終だけ出す（通常運用のログ量を減らす）
         self._suppressed_relax_assign_total = 0
         self._suppressed_relax_assign_by_product = defaultdict(int)
@@ -212,13 +222,13 @@ class InspectorAssignmentManager:
                     self.log_callback(message)
                     return
 
-            loguru_logger = logger.bind(channel="ASSIGN")
+            loguru_logger_bound = loguru_logger.bind(channel="ASSIGN")
             if level == 'warning':
-                loguru_logger.warning(message)
+                loguru_logger_bound.warning(message)
             elif level == 'error':
-                loguru_logger.error(message)
+                loguru_logger_bound.error(message)
             else:
-                loguru_logger.info(message)
+                loguru_logger_bound.info(message)
 
     @staticmethod
     def _sanitize_log_message(message: str) -> str:
@@ -248,25 +258,37 @@ class InspectorAssignmentManager:
         """ログバッファをフラッシュ（まとめて出力）"""
         if not self.log_buffer:
             return
-        
-        # バッファ内のログをまとめて出力
-        for message, level in self.log_buffer:
+
+        def _emit_block(messages: list[str], level: str) -> None:
+            combined = "\n".join(messages)
             if self.log_callback:
                 try:
-                    self.log_callback(message, level=level, channel="ASSIGN")
-                    continue
+                    self.log_callback(combined, level=level, channel="ASSIGN")
+                    return
                 except TypeError:
-                    self.log_callback(message)
-                    continue
+                    self.log_callback(combined)
+                    return
 
-            loguru_logger = logger.bind(channel="ASSIGN")
+            loguru_logger_bound = loguru_logger.bind(channel="ASSIGN")
             if level == 'warning':
-                loguru_logger.warning(message)
+                loguru_logger_bound.warning(combined)
             elif level == 'error':
-                loguru_logger.error(message)
+                loguru_logger_bound.error(combined)
             else:
-                loguru_logger.info(message)
-        
+                loguru_logger_bound.info(combined)
+
+        # 連続する同一レベルはまとめて出力（UI更新とI/Oを削減しつつ、順序は維持）
+        current_level = self.log_buffer[0][1]
+        chunk: list[str] = []
+        for message, level in self.log_buffer:
+            if level != current_level and chunk:
+                _emit_block(chunk, current_level)
+                chunk = []
+                current_level = level
+            chunk.append(message)
+        if chunk:
+            _emit_block(chunk, current_level)
+
         # バッファをクリア
         self.log_buffer.clear()
 
@@ -1740,9 +1762,26 @@ class InspectorAssignmentManager:
                     workloads = fixed_workload_hours.setdefault(fixed_balance_key, {name: 0.0 for name in fixed_inspector_names})
                     for name in fixed_inspector_names:
                         workloads.setdefault(name, 0.0)
+
+                    def _inspector_code_sort_key_from_name(n: str) -> Tuple[int, Any]:
+                        try:
+                            row = self.inspector_name_to_row.get(str(n).strip())
+                            raw = row.get('#ID') if row is not None else ''
+                        except Exception:
+                            raw = ''
+                        try:
+                            code_str = str(raw).strip()
+                        except Exception:
+                            code_str = ''
+                        try:
+                            code_int = int(code_str) if code_str.isdigit() else None
+                        except Exception:
+                            code_int = None
+                        return (0, code_int) if code_int is not None else (1, code_str)
+
                     fixed_primary_name = min(
                         fixed_inspector_names,
-                        key=lambda name: (workloads.get(name, 0.0), fixed_inspector_names.index(name)),
+                        key=lambda name: (workloads.get(name, 0.0), _inspector_code_sort_key_from_name(name), str(name).strip()),
                     )
                     # 固定検査員は制約を多少破っても必ず入れる
                     force_fixed_assignment = True
@@ -1826,7 +1865,7 @@ class InspectorAssignmentManager:
                                 workloads = fixed_workload_hours.get(fixed_balance_key or ("", tuple()), {})
                                 fixed_primary_name = min(
                                     fixed_names_available,
-                                    key=lambda name: (workloads.get(name, 0.0), fixed_names_available.index(name)),
+                                    key=lambda name: (workloads.get(name, 0.0), _inspector_code_sort_key_from_name(name), str(name).strip()),
                                 ) if fixed_names_available else None
 
                         # 1ロットに固定検査員を複数人入れない：主担当固定検査員のみ候補として残す
@@ -4697,14 +4736,28 @@ class InspectorAssignmentManager:
 
     def _priority_sort_key(self, candidate_tuple: Tuple[object, Dict[str, Any], Any]) -> Tuple:
         priority = candidate_tuple[0]
+        inspector = candidate_tuple[1] if len(candidate_tuple) > 1 else {}
+
+        # 同点ブレーカー（検査員コード昇順）: 同じ優先度の候補が複数ある場合でも割当がブレないようにする
+        raw_code = inspector.get('コード', '')
+        try:
+            code_str = str(raw_code).strip()
+        except Exception:
+            code_str = ''
+        try:
+            code_int = int(code_str) if code_str.isdigit() else None
+        except Exception:
+            code_int = None
+        code_key: Tuple[int, Any] = (0, code_int) if code_int is not None else (1, code_str)
+
         if isinstance(priority, tuple):
-            return priority
+            return priority + (code_key,)
         if isinstance(priority, list):
-            return tuple(priority)
+            return tuple(priority) + (code_key,)
         if isinstance(priority, dict):
             # Fallback: sort by string representation if stuck
-            return (repr(priority),)
-        return (priority,)
+            return (repr(priority), code_key)
+        return (priority, code_key)
 
     def filter_available_inspectors(
         self,
@@ -5308,9 +5361,85 @@ class InspectorAssignmentManager:
         try:
             # 【高速化】検査員マスタのインデックスを構築
             self._build_inspector_index(inspector_master_df)
-            
+
+            # 【高速化】検査員名 -> 検査員ID のローカル辞書を作成（DataFrame生成を避ける）
+            inspector_name_to_id: Dict[str, Any] = {}
+            try:
+                for name_key, row in self.inspector_name_to_row.items():
+                    if row is None:
+                        continue
+                    inspector_id = row.get('#ID')
+                    if pd.notna(inspector_id):
+                        inspector_name_to_id[str(name_key).strip()] = inspector_id
+            except Exception:
+                inspector_name_to_id = {}
+
+            # 【高速化】固定検査員判定のローカルキャッシュ（本関数内では不変を前提）
+            fixed_names_cache: Dict[Tuple[str, str], Set[str]] = {}
+            on_vacation_cache: Dict[str, bool] = {}
+
+            def _is_on_vacation_cached(inspector_name: str) -> bool:
+                cached = on_vacation_cache.get(inspector_name)
+                if cached is not None:
+                    return cached
+                value = self.is_inspector_on_vacation(inspector_name)
+                on_vacation_cache[inspector_name] = value
+                return value
+
+            def _is_fixed_inspector_for_lot_cached(
+                product_number_val: Any,
+                process_name_context_val: Optional[str],
+                inspector_name_val: Any,
+            ) -> bool:
+                if not product_number_val or pd.isna(product_number_val):
+                    return False
+                if not inspector_name_val or pd.isna(inspector_name_val):
+                    return False
+
+                product_number_str = str(product_number_val).strip()
+                inspector_name_str = str(inspector_name_val).strip()
+                if not product_number_str or not inspector_name_str:
+                    return False
+
+                if '(' in inspector_name_str:
+                    inspector_name_str = inspector_name_str.split('(')[0].strip()
+                if not inspector_name_str:
+                    return False
+
+                if _is_on_vacation_cached(inspector_name_str):
+                    return False
+
+                process_key = str(process_name_context_val).strip() if process_name_context_val is not None else ''
+                cache_key = (product_number_str, process_key)
+                fixed_names = fixed_names_cache.get(cache_key)
+                if fixed_names is None:
+                    fixed_names = set(self._collect_fixed_inspector_names(product_number_str, process_key))
+                    fixed_names_cache[cache_key] = fixed_names
+                return inspector_name_str in fixed_names
+
+            # 【高速化】スキルマスタに存在する品番セット（新規品判定）
+            skill_product_values: Set[Any] = set()
+            skill_allowed_inspectors_by_product: Dict[Any, Set[Any]] = {}
+            try:
+                if skill_master_df is not None and not skill_master_df.empty:
+                    skill_product_values = set(skill_master_df.iloc[:, 0].dropna().tolist())
+                    # 品番 -> 検査員コード集合（スキルチェック高速化）
+                    for row in skill_master_df.itertuples(index=False):
+                        if len(row) < 2:
+                            continue
+                        prod = row[0]
+                        code = row[1]
+                        if pd.isna(prod) or pd.isna(code):
+                            continue
+                        skill_allowed_inspectors_by_product.setdefault(prod, set()).add(code)
+            except Exception:
+                skill_product_values = set()
+                skill_allowed_inspectors_by_product = {}
+             
             self.log_message("全体最適化フェーズ0: result_dfから実際の割り当てを再計算")
-            
+            perf_logger = loguru_logger.bind(channel="PERF")
+            _t_perf_phase0 = perf_counter()
+             
             # 最優先ルール: 出荷予定日の古い順にソート（処理の最初に必ず実行）
             # 出荷予定日を変換（当日洗浄品は文字列として保持）
             result_df['出荷予定日'] = result_df['出荷予定日'].apply(self._convert_shipping_date)
@@ -5437,10 +5566,14 @@ class InspectorAssignmentManager:
                             if not inspector_name:
                                 continue
                             
-                            # 検査員コードを取得
-                            inspector_info = self._get_inspector_by_name(inspector_name, inspector_master_df)
-                            if not inspector_info.empty:
-                                inspector_code = inspector_info.iloc[0]['#ID']
+                            # 検査員コードを取得（辞書 -> フォールバック）
+                            inspector_code = inspector_name_to_id.get(inspector_name)
+                            if inspector_code is None:
+                                inspector_info = self._get_inspector_by_name(inspector_name, inspector_master_df)
+                                if not inspector_info.empty:
+                                    inspector_code = inspector_info.iloc[0]['#ID']
+                                else:
+                                    continue
                                 
                                 # 履歴を初期化
                                 if inspector_code not in self.inspector_daily_assignments:
@@ -5462,25 +5595,72 @@ class InspectorAssignmentManager:
                         continue
             
             self.log_message("履歴の再計算が完了しました")
-            
+            perf_logger.debug(
+                "PERF {}: {:.1f} ms",
+                "inspector_assignment.optimize.phase0.rebuild_histories",
+                (perf_counter() - _t_perf_phase0) * 1000.0,
+            )
+             
             # 各検査員の最大勤務時間を取得
+            _t_perf_max_hours = perf_counter()
             inspector_max_hours = {}
             inspector_cols = {col: idx for idx, col in enumerate(inspector_master_df.columns)}
             for row in inspector_master_df.itertuples(index=False):
                 code = row[inspector_cols['#ID']]
                 max_hours = self.get_inspector_max_hours(code, inspector_master_df)
                 inspector_max_hours[code] = self._apply_work_hours_overrun(max_hours)
+            perf_logger.debug(
+                "PERF {}: {:.1f} ms",
+                "inspector_assignment.optimize.inspector_max_hours",
+                (perf_counter() - _t_perf_max_hours) * 1000.0,
+            )
             
             # 改善ポイント: フェーズ間スラッシング防止用のタブーリストを初期化
             self.tabu_list = {}
             
             # フェーズ1: 勤務時間超過と同一品番の時間上限超過を検出・是正（繰り返し処理）
             self.log_message(f"全体最適化フェーズ1: 勤務時間超過と同一品番{self.product_limit_hard_threshold:.1f}時間超過の検出と是正を開始")
-            
+            _t_perf_phase1_total = perf_counter()
+             
             max_iterations = 10  # 最大10回繰り返し
             iteration = 0
-            
+
+            # 列名のインデックスマップ（フェーズ1以降で繰り返し使う）
+            sorted_cols = {col: idx for idx, col in enumerate(result_df.columns)}
+            process_name_idx = sorted_cols.get('現在工程名', -1)
+            divided_time_idx = sorted_cols.get('分割検査時間', -1)
+            inspection_time_idx = sorted_cols.get('検査時間', -1)
+            inspector_col_idxs = [sorted_cols.get(f'検査員{i}', -1) for i in range(1, 6)]
+            two_weeks_later = current_date + timedelta(days=14)
+            shipping_date_date_cache: Dict[int, Optional[date]] = {}
+            violation_date_cache: Dict[int, date] = {}
+
+            def _get_shipping_date_date_cached(row_index: int) -> Optional[date]:
+                cached = shipping_date_date_cache.get(row_index, None)
+                if row_index in shipping_date_date_cache:
+                    return cached
+
+                shipping_date = result_df.at[row_index, '出荷予定日'] if row_index < len(result_df) else None
+                if shipping_date is None or pd.isna(shipping_date):
+                    shipping_date_date_cache[row_index] = None
+                    return None
+
+                try:
+                    if isinstance(shipping_date, pd.Timestamp):
+                        value = shipping_date.date()
+                    elif isinstance(shipping_date, str):
+                        parsed = pd.to_datetime(shipping_date, errors='coerce')
+                        value = parsed.date() if pd.notna(parsed) else None
+                    else:
+                        value = shipping_date.date() if hasattr(shipping_date, 'date') else shipping_date
+                    shipping_date_date_cache[row_index] = value
+                    return value
+                except Exception:
+                    shipping_date_date_cache[row_index] = None
+                    return None
+             
             while iteration < max_iterations:
+                _t_perf_iter_total = perf_counter()
                 iteration += 1
                 self.log_message(f"是正処理 イテレーション {iteration}")
                 
@@ -5490,113 +5670,53 @@ class InspectorAssignmentManager:
                 violations_found = False
                 overworked_assignments = []
                 product_limit_violations = []
+
+                # 出荷予定日の変換とソートは最初に一度だけ実施済み（出荷予定日は最適化中に変化しないため）
+                # 以降の処理は常に「出荷予定日順（最優先ルール）」を維持した result_df を前提とする。
+                result_df_sorted = result_df
                 
-                # 最優先ルール: 出荷予定日の古い順にソート（毎回のイテレーションで確実に）
-                # 出荷予定日を変換（当日洗浄品は文字列として保持）
-                result_df['出荷予定日'] = result_df['出荷予定日'].apply(self._convert_shipping_date)
-                
-                # ソート用のキー関数: 新しい優先順位に従う
-                current_date = pd.Timestamp.now().date()
-                
-                def get_next_business_day(date_val):
-                    """翌営業日を取得（金曜日の場合は翌週の月曜日）"""
-                    weekday = date_val.weekday()  # 0=月曜日, 4=金曜日
-                    if weekday == 4:  # 金曜日
-                        return date_val + timedelta(days=3)  # 翌週の月曜日
-                    else:
-                        return date_val + timedelta(days=1)  # 翌日
-                
-                next_business_day = get_next_business_day(current_date)
-                
-                def sort_key(val):
-                    if pd.isna(val):
-                        return (5, None)  # 最後に
-                    val_str = str(val).strip()
-                    
-                    # 1. 当日の日付（優先度0）
-                    try:
-                        date_val = pd.to_datetime(val, errors='coerce')
-                        if pd.notna(date_val):
-                            date_date = date_val.date()
-                            if date_date == current_date:
-                                return (0, date_val)
-                    except:
-                        pass
-                    
-                    # 2. 当日洗浄上がり品（優先度1）
-                    if (val_str == "当日洗浄上がり品" or 
-                        val_str == "当日洗浄品" or
-                        "当日洗浄" in val_str):
-                        return (1, val_str)
-                    
-                    # 3. 先行検査品（優先度2）
-                    if (val_str == "先行検査" or
-                        val_str == "当日先行検査"):
-                        return (2, val_str)
-                    
-                    # 4. 翌日または翌営業日（優先度3）
-                    try:
-                        date_val = pd.to_datetime(val, errors='coerce')
-                        if pd.notna(date_val):
-                            date_date = date_val.date()
-                            if date_date == next_business_day:
-                                return (3, date_val)
-                    except:
-                        pass
-                    
-                    # 5. それ以降の日付（優先度4）
-                    try:
-                        date_val = pd.to_datetime(val, errors='coerce')
-                        if pd.notna(date_val):
-                            return (4, date_val)
-                    except:
-                        pass
-                    
-                    return (5, val_str)  # その他文字列
-                
-                # ソートキーを追加
-                result_df['_sort_key'] = result_df['出荷予定日'].apply(sort_key)
-                result_df_sorted = result_df.sort_values('_sort_key', na_position='last').reset_index(drop=True)
-                result_df_sorted = result_df_sorted.drop(columns=['_sort_key'], errors='ignore')
-                
-                # 列名のインデックスマップを作成（itertuples用）
-                sorted_cols = {col: idx for idx, col in enumerate(result_df_sorted.columns)}
-                
+                _t_perf_iter_detect = perf_counter()
                 for row_idx, row in enumerate(result_df_sorted.itertuples(index=False)):
                     index = result_df_sorted.index[row_idx]
                     product_number = row[sorted_cols['品番']]
-                    process_name_context = row[sorted_cols.get('現在工程名', -1)] if '現在工程名' in sorted_cols else ''
-                    divided_time = row[sorted_cols.get('分割検査時間', -1)] if '分割検査時間' in sorted_cols else 0.0
+                    process_name_context = row[process_name_idx] if process_name_idx != -1 else ''
+                    if pd.isna(process_name_context):
+                        process_name_context = ''
+                    process_name_context_str = str(process_name_context).strip()
+
+                    divided_time = row[divided_time_idx] if divided_time_idx != -1 else 0.0
                     if divided_time == -1:
                         divided_time = 0.0
-                    inspection_time = row[sorted_cols.get('検査時間', -1)] if '検査時間' in sorted_cols else divided_time
+                    inspection_time = row[inspection_time_idx] if inspection_time_idx != -1 else divided_time
                     if inspection_time == -1:
                         inspection_time = divided_time
                     
                     # 各検査員の割り当てを確認
-                    for i in range(1, 6):
-                        inspector_col = f'検査員{i}'
-                        inspector_col_idx = sorted_cols.get(inspector_col, -1)
-                        if inspector_col_idx != -1:
-                            inspector_name_raw = row[inspector_col_idx]
-                            if pd.notna(inspector_name_raw) and str(inspector_name_raw).strip() != '':
-                                inspector_name = str(inspector_name_raw).strip()
-                                # スキル値や(新)を除去
-                                if '(' in inspector_name:
-                                    inspector_name = inspector_name.split('(')[0].strip()
-                                
-                                if not inspector_name:
-                                    continue
+                    for i, inspector_col_idx in enumerate(inspector_col_idxs, start=1):
+                        if inspector_col_idx == -1:
+                            continue
+                        inspector_name_raw = row[inspector_col_idx]
+                        if pd.notna(inspector_name_raw) and str(inspector_name_raw).strip() != '':
+                            inspector_name = str(inspector_name_raw).strip()
+                            if '(' in inspector_name:
+                                inspector_name = inspector_name.split('(')[0].strip()
 
-                                # 固定検査員が割当済みのロットは、勤務時間/同一品番上限の違反検出・是正対象から除外する
-                                if self._is_fixed_inspector_for_lot(product_number, str(process_name_context).strip(), inspector_name):
-                                    continue
-                                
-                                # 検査員コードを取得
+                            if not inspector_name:
+                                continue
+
+                            # 固定検査員が割当済みのロットは、勤務時間/同一品番上限の違反検出・是正対象から除外する
+                            if _is_fixed_inspector_for_lot_cached(product_number, process_name_context_str, inspector_name):
+                                continue
+
+                            # 検査員コードを取得（辞書 -> フォールバック）
+                            inspector_code = inspector_name_to_id.get(inspector_name)
+                            if inspector_code is None:
                                 inspector_info = self._get_inspector_by_name(inspector_name, inspector_master_df)
                                 if not inspector_info.empty:
                                     inspector_code = inspector_info.iloc[0]['#ID']
-                                    
+                                else:
+                                    continue
+                                     
                                     # 現在の履歴を取得
                                     daily_hours = self.inspector_daily_assignments.get(inspector_code, {}).get(current_date, 0.0)
                                     max_hours = inspector_max_hours.get(inspector_code, 8.0)
@@ -5616,11 +5736,21 @@ class InspectorAssignmentManager:
                                         product_limit_violations.append((index, inspector_code, inspector_name, excess, divided_time, product_number, inspection_time, i))
                                         violations_found = True
                                         self.log_message(f"⚠️ 同一品番{self.product_limit_hard_threshold:.1f}時間超過: 検査員 '{inspector_name}' (コード: {inspector_code}) 品番 {product_number} {product_hours:.1f}h > {self.product_limit_hard_threshold:.1f}h (超過: {excess:.1f}h, ロットインデックス: {index})", level='warning')
+                perf_logger.debug(
+                    "PERF {}: {:.1f} ms",
+                    f"inspector_assignment.optimize.phase1.iter{iteration}.detect_violations",
+                    (perf_counter() - _t_perf_iter_detect) * 1000.0,
+                )
                 
                 # 違反が見つからない場合は終了
                 if not violations_found:
                     self.log_message(f"全てのルール違反が解消されました（{iteration}回目のイテレーションで完了）")
                     result_df = result_df_sorted
+                    perf_logger.debug(
+                        "PERF {}: {:.1f} ms",
+                        f"inspector_assignment.optimize.phase1.iter{iteration}.total",
+                        (perf_counter() - _t_perf_iter_total) * 1000.0,
+                    )
                     break
                 
                 # 違反を是正（当日洗浄上がり品を優先）
@@ -5644,8 +5774,7 @@ class InspectorAssignmentManager:
                 for violation in unique_violations.values():
                     violation_index = violation[0]
                     if violation_index < len(result_df_sorted):
-                        violation_row = result_df_sorted.iloc[violation_index]
-                        shipping_date_raw = violation_row.get('出荷予定日', None)
+                        shipping_date_raw = result_df_sorted.at[violation_index, '出荷予定日']
                         shipping_date_str = str(shipping_date_raw).strip() if pd.notna(shipping_date_raw) else ''
                         is_same_day_cleaning = (
                             shipping_date_str == "当日洗浄上がり品" or
@@ -5665,26 +5794,23 @@ class InspectorAssignmentManager:
                     try:
                         violation_index = violation[0]
                         if violation_index < len(result_df_sorted):
-                            violation_date_raw = result_df_sorted.at[violation_index, '出荷予定日']
-                            if pd.notna(violation_date_raw):
-                                # pd.Timestampをdatetime.dateに変換して比較エラーを防ぐ
-                                if isinstance(violation_date_raw, pd.Timestamp):
-                                    violation_date = violation_date_raw.date()
-                                elif isinstance(violation_date_raw, str):
-                                    violation_date_parsed = pd.to_datetime(violation_date_raw, errors='coerce')
-                                    if pd.notna(violation_date_parsed):
-                                        violation_date = violation_date_parsed.date()
-                                    else:  # 変換失敗時
-                                        violation_date = pd.Timestamp.max.date()
+                            violation_date = violation_date_cache.get(violation_index)
+                            if violation_date is None:
+                                shipping_date_raw = result_df_sorted.at[violation_index, '出荷予定日']
+                                if pd.notna(shipping_date_raw):
+                                    if isinstance(shipping_date_raw, pd.Timestamp):
+                                        violation_date = shipping_date_raw.date()
+                                    elif isinstance(shipping_date_raw, str):
+                                        parsed = pd.to_datetime(shipping_date_raw, errors='coerce')
+                                        violation_date = parsed.date() if pd.notna(parsed) else pd.Timestamp.max.date()
+                                    else:
+                                        try:
+                                            violation_date = shipping_date_raw.date() if hasattr(shipping_date_raw, 'date') else shipping_date_raw
+                                        except Exception:
+                                            violation_date = pd.Timestamp.max.date()
                                 else:
-                                    # その他の型（datetime.date等）の場合はそのまま使用
-                                    try:
-                                        violation_date = violation_date_raw.date() if hasattr(violation_date_raw, 'date') else violation_date_raw
-                                    except Exception as e:
-                                        logger.debug(f"違反日付の変換でエラーが発生しました（デフォルト値を使用）: {e}")
-                                        violation_date = pd.Timestamp.max.date()
-                            else:
-                                violation_date = pd.Timestamp.max.date()
+                                    violation_date = pd.Timestamp.max.date()
+                                violation_date_cache[violation_index] = violation_date
                         else:
                             violation_date = pd.Timestamp.min.date()
                         inspector_code = violation[1]
@@ -5714,6 +5840,7 @@ class InspectorAssignmentManager:
                 self.log_message(f"違反ロット数: {len(sorted_violations)}件を是正します")
                 
                 # 各違反を是正
+                _t_perf_iter_fix = perf_counter()
                 fixed_any = False
                 fixed_indices = set()
                 for violation in sorted_violations:
@@ -5731,32 +5858,10 @@ class InspectorAssignmentManager:
                         continue
                     
                     # 改善ポイント: 新規品（出荷予定日2週以内）は保護対象として移動対象外にする
-                    shipping_date = result_df_sorted.at[index, '出荷予定日'] if index < len(result_df_sorted) else None
-                    if shipping_date is not None and pd.notna(shipping_date):
-                        # 日付型を統一して比較エラーを防ぐ
-                        try:
-                            if isinstance(shipping_date, pd.Timestamp):
-                                shipping_date_date = shipping_date.date()
-                            elif isinstance(shipping_date, str):
-                                shipping_date_date = pd.to_datetime(shipping_date, errors='coerce').date()
-                                if pd.isna(shipping_date_date):
-                                    shipping_date_date = None
-                            else:
-                                shipping_date_date = shipping_date.date() if hasattr(shipping_date, 'date') else shipping_date
-                            
-                            if shipping_date_date is not None:
-                                two_weeks_later = current_date + timedelta(days=14)
-                                is_within_two_weeks = shipping_date_date <= two_weeks_later
-                            else:
-                                is_within_two_weeks = False
-                        except Exception as e:
-                            self.log_message(f"出荷予定日の比較エラー: {str(e)} (ロットインデックス: {index})", level='warning')
-                            is_within_two_weeks = False
-                    else:
-                        is_within_two_weeks = False
-                    
-                    skill_rows = skill_master_df[skill_master_df.iloc[:, 0] == product_number]
-                    is_new_product = skill_rows.empty
+                    shipping_date_date = _get_shipping_date_date_cached(index)
+                    is_within_two_weeks = bool(shipping_date_date is not None and shipping_date_date <= two_weeks_later)
+
+                    is_new_product = product_number not in skill_product_values
                     if is_new_product and is_within_two_weeks:
                         self.log_message(f"⚠️ 新規品（出荷予定日2週以内）のため保護: ロットインデックス {index} (品番: {product_number}) - 違反があっても再割当てをスキップします", level='warning')
                         continue
@@ -5873,8 +5978,15 @@ class InspectorAssignmentManager:
                             result_df_sorted.at[index, '分割検査時間'] = round(actual_divided_time, 1)
                     # 履歴再計算は、イテレーションの最後に1回だけ実行する（重複を避ける）
                     # continue は削除し、履歴再計算をイテレーションの最後に統合
+
+                perf_logger.debug(
+                    "PERF {}: {:.1f} ms",
+                    f"inspector_assignment.optimize.phase1.iter{iteration}.fix_violations",
+                    (perf_counter() - _t_perf_iter_fix) * 1000.0,
+                )
                 
                 # 【改善】履歴を再計算（是正後の状態を反映）- 是正できなかった違反の処理後も含めて1回だけ実行
+                _t_perf_iter_rebuild = perf_counter()
                 self.inspector_daily_assignments = {}
                 self.inspector_work_hours = {}
                 self.inspector_product_hours = {}
@@ -5901,10 +6013,14 @@ class InspectorAssignmentManager:
                                     inspector_name = inspector_name.split('(')[0].strip()
                                 if not inspector_name:
                                     continue
-                                
-                                inspector_info = self._get_inspector_by_name(inspector_name, inspector_master_df)
-                                if not inspector_info.empty:
-                                    inspector_code = inspector_info.iloc[0]['#ID']
+
+                                inspector_code = inspector_name_to_id.get(inspector_name)
+                                if inspector_code is None:
+                                    inspector_info = self._get_inspector_by_name(inspector_name, inspector_master_df)
+                                    if not inspector_info.empty:
+                                        inspector_code = inspector_info.iloc[0]['#ID']
+                                    else:
+                                        continue
                                     
                                     if inspector_code not in self.inspector_daily_assignments:
                                         self.inspector_daily_assignments[inspector_code] = {}
@@ -5922,6 +6038,22 @@ class InspectorAssignmentManager:
                                     self.inspector_product_hours[inspector_code][product_number] += divided_time
                 
                 result_df = result_df_sorted
+                perf_logger.debug(
+                    "PERF {}: {:.1f} ms",
+                    f"inspector_assignment.optimize.phase1.iter{iteration}.rebuild_histories",
+                    (perf_counter() - _t_perf_iter_rebuild) * 1000.0,
+                )
+                perf_logger.debug(
+                    "PERF {}: {:.1f} ms",
+                    f"inspector_assignment.optimize.phase1.iter{iteration}.total",
+                    (perf_counter() - _t_perf_iter_total) * 1000.0,
+                )
+
+            perf_logger.debug(
+                "PERF {}: {:.1f} ms",
+                "inspector_assignment.optimize.phase1.total",
+                (perf_counter() - _t_perf_phase1_total) * 1000.0,
+            )
             
             # フェーズ1.5: 最終違反チェック（是正が完全に機能したか確認）
             self.log_message("全体最適化フェーズ1.5: 最終違反チェックを開始")
@@ -5950,10 +6082,14 @@ class InspectorAssignmentManager:
                                 inspector_name = inspector_name.split('(')[0].strip()
                             if not inspector_name:
                                 continue
-                            
-                            inspector_info = self._get_inspector_by_name(inspector_name, inspector_master_df)
-                            if not inspector_info.empty:
-                                inspector_code = inspector_info.iloc[0]['#ID']
+
+                            inspector_code = inspector_name_to_id.get(inspector_name)
+                            if inspector_code is None:
+                                inspector_info = self._get_inspector_by_name(inspector_name, inspector_master_df)
+                                if not inspector_info.empty:
+                                    inspector_code = inspector_info.iloc[0]['#ID']
+                                else:
+                                    continue
                                 
                                 if inspector_code not in self.inspector_daily_assignments:
                                     self.inspector_daily_assignments[inspector_code] = {}
@@ -5994,12 +6130,16 @@ class InspectorAssignmentManager:
                                 continue
 
                             # 固定検査員が割当済みのロットは、勤務時間/同一品番上限の最終違反チェック対象から除外する
-                            if self._is_fixed_inspector_for_lot(product_number, str(process_name_context).strip(), inspector_name):
+                            if _is_fixed_inspector_for_lot_cached(product_number, str(process_name_context).strip(), inspector_name):
                                 continue
                             
-                            inspector_info = self._get_inspector_by_name(inspector_name, inspector_master_df)
-                            if not inspector_info.empty:
-                                inspector_code = inspector_info.iloc[0]['#ID']
+                            inspector_code = inspector_name_to_id.get(inspector_name)
+                            if inspector_code is None:
+                                inspector_info = self._get_inspector_by_name(inspector_name, inspector_master_df)
+                                if not inspector_info.empty:
+                                    inspector_code = inspector_info.iloc[0]['#ID']
+                                else:
+                                    continue
                                 daily_hours = self.inspector_daily_assignments.get(inspector_code, {}).get(current_date, 0.0)
                                 max_hours = inspector_max_hours.get(inspector_code, 8.0)
                                 product_hours = self.inspector_product_hours.get(inspector_code, {}).get(product_number, 0.0)
@@ -6282,6 +6422,7 @@ class InspectorAssignmentManager:
             
             # フェーズ2: 偏りの是正（総勤務時間の偏りを調整）
             self.log_message("全体最適化フェーズ2: 偏りの是正を開始")
+            _t_perf_phase2_total = perf_counter()
             
             # 平均勤務時間を計算
             total_hours = sum(self.inspector_work_hours.values())
@@ -6753,8 +6894,15 @@ class InspectorAssignmentManager:
                         
                         self.log_message(f"偏り是正: {reassignment_count}件の再割当てを実行しました")
             
+            perf_logger.debug(
+                "PERF {}: {:.1f} ms",
+                "inspector_assignment.optimize.phase2.total",
+                (perf_counter() - _t_perf_phase2_total) * 1000.0,
+            )
+
             # フェーズ2.5: 偏り是正後の最終検証（勤務時間超過の再チェック）
             self.log_message("全体最適化フェーズ2.5: 偏り是正後の最終検証を開始")
+            _t_perf_phase2_5_total = perf_counter()
             
             # 履歴を再計算
             self.inspector_daily_assignments = {}
@@ -6780,10 +6928,14 @@ class InspectorAssignmentManager:
                             inspector_name = inspector_name.split('(')[0].strip()
                         if not inspector_name:
                             continue
-                        
-                        inspector_info = self._get_inspector_by_name(inspector_name, inspector_master_df)
-                        if not inspector_info.empty:
-                            inspector_code = inspector_info.iloc[0]['#ID']
+
+                        inspector_code = inspector_name_to_id.get(inspector_name)
+                        if inspector_code is None:
+                            inspector_info = self._get_inspector_by_name(inspector_name, inspector_master_df)
+                            if not inspector_info.empty:
+                                inspector_code = inspector_info.iloc[0]['#ID']
+                            else:
+                                continue
                             
                             if inspector_code not in self.inspector_daily_assignments:
                                 self.inspector_daily_assignments[inspector_code] = {}
@@ -6819,12 +6971,16 @@ class InspectorAssignmentManager:
                             continue
 
                         # 固定検査員が割当済みのロットは、勤務時間/同一品番上限の違反チェック対象から除外する
-                        if self._is_fixed_inspector_for_lot(product_number, str(process_name_context).strip(), inspector_name):
+                        if _is_fixed_inspector_for_lot_cached(product_number, str(process_name_context).strip(), inspector_name):
                             continue
                         
-                        inspector_info = self._get_inspector_by_name(inspector_name, inspector_master_df)
-                        if not inspector_info.empty:
-                            inspector_code = inspector_info.iloc[0]['#ID']
+                        inspector_code = inspector_name_to_id.get(inspector_name)
+                        if inspector_code is None:
+                            inspector_info = self._get_inspector_by_name(inspector_name, inspector_master_df)
+                            if not inspector_info.empty:
+                                inspector_code = inspector_info.iloc[0]['#ID']
+                            else:
+                                continue
                             daily_hours = self.inspector_daily_assignments.get(inspector_code, {}).get(current_date, 0.0)
                             max_hours = inspector_max_hours.get(inspector_code, 8.0)
                             product_hours = self.inspector_product_hours.get(inspector_code, {}).get(product_number, 0.0)
@@ -6881,8 +7037,7 @@ class InspectorAssignmentManager:
                                 continue
                             
                             # 2週間以内の新規品かどうかを判定
-                            skill_rows = skill_master_df[skill_master_df.iloc[:, 0] == product_number]
-                            is_new_product = skill_rows.empty
+                            is_new_product = product_number not in skill_product_values
                             is_within_two_weeks = False
                             
                             if is_new_product and pd.notna(shipping_date):
@@ -7211,10 +7366,14 @@ class InspectorAssignmentManager:
                                 inspector_name = inspector_name.split('(')[0].strip()
                             if not inspector_name:
                                 continue
-                            
-                            inspector_info = self._get_inspector_by_name(inspector_name, inspector_master_df)
-                            if not inspector_info.empty:
-                                inspector_code = inspector_info.iloc[0]['#ID']
+
+                            inspector_code = inspector_name_to_id.get(inspector_name)
+                            if inspector_code is None:
+                                inspector_info = self._get_inspector_by_name(inspector_name, inspector_master_df)
+                                if not inspector_info.empty:
+                                    inspector_code = inspector_info.iloc[0]['#ID']
+                                else:
+                                    continue
                                 
                                 if inspector_code not in self.inspector_daily_assignments:
                                     self.inspector_daily_assignments[inspector_code] = {}
@@ -7233,8 +7392,15 @@ class InspectorAssignmentManager:
             else:
                 self.log_message("✅ フェーズ2.5検証: 全てのルール違反が解消されました")
             
+            perf_logger.debug(
+                "PERF {}: {:.1f} ms",
+                "inspector_assignment.optimize.phase2_5.total",
+                (perf_counter() - _t_perf_phase2_5_total) * 1000.0,
+            )
+
             # フェーズ3: 未割当ロットの再処理（出荷予定日順、新規品優先）
             self.log_message("全体最適化フェーズ3: 未割当ロットの再処理を開始")
+            _t_perf_phase3_total = perf_counter()
             
             # 【改善】フェーズ3開始時に、当日洗浄上がり品の制約を再構築（result_dfから実際の割り当てを反映）
             self.log_message("フェーズ3: 当日洗浄上がり品の制約を再構築します")
@@ -7282,10 +7448,14 @@ class InspectorAssignmentManager:
                                 inspector_name = inspector_name.split('(')[0].strip()
                             if not inspector_name:
                                 continue
-                            
-                            inspector_info = self._get_inspector_by_name(inspector_name, inspector_master_df)
-                            if not inspector_info.empty:
-                                inspector_code = inspector_info.iloc[0]['#ID']
+
+                            inspector_code = inspector_name_to_id.get(inspector_name)
+                            if inspector_code is None:
+                                inspector_info = self._get_inspector_by_name(inspector_name, inspector_master_df)
+                                if not inspector_info.empty:
+                                    inspector_code = inspector_info.iloc[0]['#ID']
+                                else:
+                                    continue
                                 # 品番単位の制約を更新
                                 self.same_day_cleaning_inspectors.setdefault(product_number, set()).add(inspector_code)
                                 # 品名単位の制約を更新
@@ -7413,10 +7583,14 @@ class InspectorAssignmentManager:
                                     inspector_name = inspector_name.split('(')[0].strip()
                                 if not inspector_name:
                                     continue
-                                
-                                inspector_info = self._get_inspector_by_name(inspector_name, inspector_master_df)
-                                if not inspector_info.empty:
-                                    inspector_code = inspector_info.iloc[0]['#ID']
+                                    
+                                inspector_code = inspector_name_to_id.get(inspector_name)
+                                if inspector_code is None:
+                                    inspector_info = self._get_inspector_by_name(inspector_name, inspector_master_df)
+                                    if not inspector_info.empty:
+                                        inspector_code = inspector_info.iloc[0]['#ID']
+                                    else:
+                                        continue
                                     
                                     # 既に再割当て済みの検査員はスキップ
                                     if inspector_code in reassigned_codes:
@@ -7435,22 +7609,14 @@ class InspectorAssignmentManager:
                                             continue
                                     
                                     # 3. スキルチェック
-                                    skill_rows = skill_master_df[skill_master_df.iloc[:, 0] == unassigned_product_number]
-                                    is_new_product = skill_rows.empty
-                                    if not is_new_product:
-                                        # スキルマスタに登録がある場合、スキルをチェック
-                                        product_skill_rows = skill_master_df[skill_master_df.iloc[:, 0] == unassigned_product_number]
-                                        if not product_skill_rows.empty:
-                                            inspector_skill_rows = product_skill_rows[product_skill_rows.iloc[:, 1] == inspector_code]
-                                            if inspector_skill_rows.empty:
-                                                # スキルマスタに登録がない場合はスキップ（新規品対応チームは除く）
-                                                continue
+                                    allowed_codes = skill_allowed_inspectors_by_product.get(unassigned_product_number)
+                                    if allowed_codes is not None and inspector_code not in allowed_codes:
+                                        continue
                                     
                                     # 4. 勤務時間チェック
                                     divided_time = unassigned_inspection_time / required_inspectors
                                     daily_hours = self.inspector_daily_assignments.get(inspector_code, {}).get(current_date, 0.0)
-                                    max_daily_hours = self.get_inspector_max_hours(inspector_code, inspector_master_df)
-                                    allowed_max_hours = self._apply_work_hours_overrun(max_daily_hours)
+                                    allowed_max_hours = inspector_max_hours.get(inspector_code, 8.0)
                                     if relax_hours or is_same_day_unassigned_high_duration:
                                         allowed_max_hours = self._apply_same_day_work_hours_overrun(allowed_max_hours)
                                     if daily_hours + divided_time > allowed_max_hours:  # 100%まで許容
@@ -7590,7 +7756,8 @@ class InspectorAssignmentManager:
                     next_bd = next_business_day(today_date)
                     shipping_raw = result_df['出荷予定日']
                     shipping_str = shipping_raw.fillna('').astype(str).str.strip()
-                    shipping_dt = pd.to_datetime(shipping_raw, errors='coerce')
+                    # format='mixed' を指定して、推測失敗時の element-wise 解析の警告を抑制する
+                    shipping_dt = pd.to_datetime(shipping_raw, errors='coerce', format='mixed')
                     is_same_day_label = shipping_raw.apply(self._should_force_assign_same_day)
 
                     inspector_counts = pd.to_numeric(result_df['検査員人数'], errors='coerce').fillna(0).astype(int)
@@ -8228,8 +8395,15 @@ class InspectorAssignmentManager:
             else:
                 self.log_message("未割当ロットはありませんでした")
             
+            perf_logger.debug(
+                "PERF {}: {:.1f} ms",
+                "inspector_assignment.optimize.phase3.total",
+                (perf_counter() - _t_perf_phase3_total) * 1000.0,
+            )
+
             # フェーズ3.5: 未割当ロット再処理後の最終検証（勤務時間超過の再チェック）
             self.log_message("全体最適化フェーズ3.5: 未割当ロット再処理後の最終検証を開始")
+            _t_perf_phase3_5_total = perf_counter()
             
             # 履歴を再計算
             self.inspector_daily_assignments = {}
@@ -9117,7 +9291,14 @@ class InspectorAssignmentManager:
                 self.log_message("フェーズ3.5検証: 全てのルール違反が解消されました")
             
             # 最適化後に全体のチーム情報を再計算（確実に一致させるため）
+            perf_logger.debug(
+                "PERF {}: {:.1f} ms",
+                "inspector_assignment.optimize.phase3_5.total",
+                (perf_counter() - _t_perf_phase3_5_total) * 1000.0,
+            )
+
             self.log_message("全体最適化フェーズ4: チーム情報の再計算を開始")
+            _t_perf_phase4_total = perf_counter()
             
             # 最終的に出荷予定日順にソート（最優先ルールの維持）
             # 出荷予定日を変換（当日洗浄品は文字列として保持）
@@ -9277,6 +9458,17 @@ class InspectorAssignmentManager:
                         daily_hours = self.inspector_daily_assignments.get(code, {}).get(current_date, 0.0)
                         return (daily_hours, candidate.get('_fairness_score', 0), code)
 
+                    def _code_key(code: str) -> Tuple[int, Any]:
+                        try:
+                            code_str = str(code).strip()
+                        except Exception:
+                            code_str = ''
+                        try:
+                            code_int = int(code_str) if code_str.isdigit() else None
+                        except Exception:
+                            code_int = None
+                        return (0, code_int) if code_int is not None else (1, code_str)
+
                     def _normalize_name(value: Any) -> str:
                         if pd.isna(value):
                             return ''
@@ -9311,7 +9503,15 @@ class InspectorAssignmentManager:
                                 continue
                             if self.is_inspector_on_vacation(name):
                                 continue
-                            candidate_by_name[name] = c
+                            # 同名候補の上書き順で結果がブレないように、検査員コード昇順で代表を固定する
+                            existing = candidate_by_name.get(name)
+                            if existing is None:
+                                candidate_by_name[name] = c
+                            else:
+                                existing_code = _get_code(existing)
+                                new_code = _get_code(c)
+                                if _code_key(new_code) < _code_key(existing_code):
+                                    candidate_by_name[name] = c
 
                     candidates_sorted = sorted(candidate_by_name.values(), key=_cand_sort_key)
                     candidate_names_ordered = [_normalize_name(c.get('氏名', '')) for c in candidates_sorted if _normalize_name(c.get('氏名', ''))]
@@ -9489,7 +9689,13 @@ class InspectorAssignmentManager:
             else:
                 self.log_message("未割当ロットはありません")
             self.relaxed_product_limit_assignments.clear()
-            
+
+            perf_logger.debug(
+                "PERF {}: {:.1f} ms",
+                "inspector_assignment.optimize.phase4.total",
+                (perf_counter() - _t_perf_phase4_total) * 1000.0,
+            )
+             
             # 【高速化】ログバッファをフラッシュ
             if self.log_batch_enabled:
                 self._flush_log_buffer()
