@@ -3227,6 +3227,123 @@ class ModernDataExtractorUI:
         )
         thread.daemon = True
         thread.start()
+
+    @staticmethod
+    def _format_access_vba_date(value: date) -> str:
+        # 例: 2025/12/24, 2026/01/31（ゼロ埋めあり）
+        return f"{value.year}/{value.month:02d}/{value.day:02d}"
+
+    def _run_access_vba_shortage_aggregate(self, start_date: date, end_date: date) -> None:
+        """
+        Access の VBA マクロを実行し、T_出荷予定集計 を更新する。
+
+        実行: Application.Run("ShukkahusokuCalculate", start_date_str, end_date_str)
+        """
+        if os.environ.get("ACCESS_VBA_ENABLED", "1").strip() != "1":
+            self.log_message("Access VBA実行は無効化されています（ACCESS_VBA_ENABLED!=1）")
+            return
+
+        access_path = os.environ.get("ACCESS_VBA_FILE_PATH", "").strip()
+        macro_name = os.environ.get("ACCESS_VBA_MACRO_NAME", "ShukkahusokuCalculate").strip()
+        if not access_path:
+            raise RuntimeError("ACCESS_VBA_FILE_PATH が未設定です")
+        if not macro_name:
+            raise RuntimeError("ACCESS_VBA_MACRO_NAME が未設定です")
+
+        # 共有上の accdb を直接更新
+        start_str = self._format_access_vba_date(start_date)
+        end_str = self._format_access_vba_date(end_date)
+
+        self.log_message(f"Access VBAを実行します: {macro_name}({start_str}, {end_str})")
+        self.log_message(f"Access VBA対象DB: {access_path}")
+
+        try:
+            import pythoncom  # type: ignore
+            import win32com.client  # type: ignore
+        except Exception as e:
+            raise RuntimeError(f"Access VBAの実行に必要なモジュールが読み込めませんでした: {e}")
+
+        access_app = None
+        pythoncom.CoInitialize()
+        try:
+            access_app = win32com.client.Dispatch("Access.Application")
+            visible_enabled = os.environ.get("ACCESS_VBA_VISIBLE", "0").strip() == "1"
+            try:
+                access_app.Visible = bool(visible_enabled)
+            except Exception:
+                pass
+            try:
+                access_app.DisplayAlerts = False
+            except Exception:
+                pass
+            # マクロ実行のセキュリティ（環境によっては存在しないため失敗は無視）
+            try:
+                # msoAutomationSecurityLow = 1
+                access_app.AutomationSecurity = 1
+            except Exception:
+                pass
+
+            try:
+                access_app.OpenCurrentDatabase(access_path)
+            except Exception as e:
+                raise RuntimeError(f"Access.OpenCurrentDatabase に失敗しました: {e}") from e
+
+            try:
+                access_app.run(macro_name, start_str, end_str)
+            except Exception as e:
+                # COM例外の詳細をできるだけログへ（Access側のVBAエラー解析用）
+                try:
+                    import pywintypes  # type: ignore
+
+                    if isinstance(e, pywintypes.com_error):
+                        hresult = getattr(e, "hresult", None)
+                        excepinfo = getattr(e, "excepinfo", None)
+                        scode = None
+                        try:
+                            if excepinfo and len(excepinfo) >= 6:
+                                scode = excepinfo[5]
+                        except Exception:
+                            scode = None
+
+                        def _hex(val: Any) -> str:
+                            try:
+                                return hex(int(val) & 0xFFFFFFFF)
+                            except Exception:
+                                return ""
+
+                        self.log_message(
+                            "Access VBA COM例外: "
+                            f"hresult={hresult}({_hex(hresult)}), scode={scode}({_hex(scode)}), excepinfo={excepinfo}",
+                            level="error",
+                        )
+
+                        # DISP_E_BADPARAMCOUNT (0x8002000E) の場合は、マクロ側の引数不一致が濃厚
+                        try:
+                            if (int(scode) & 0xFFFFFFFF) == 0x8002000E:
+                                self.log_message(
+                                    "Access VBA: 引数数が一致しません（0x8002000E）。"
+                                    " Access側のプロシージャが (開始日, 終了日) の2引数を受け取る Public Sub/Function になっているか、"
+                                    " または ACCESS_VBA_MACRO_NAME を 'ModuleName.ShukkahusokuCalculate' 形式にする必要があります。",
+                                    level="error",
+                                )
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                raise RuntimeError(f"Access.Application.run に失敗しました: {e}") from e
+            try:
+                access_app.CloseCurrentDatabase()
+            except Exception:
+                pass
+        finally:
+            try:
+                if access_app is not None:
+                    try:
+                        access_app.Quit()
+                    except Exception:
+                        pass
+            finally:
+                pythoncom.CoUninitialize()
     
     def extract_data_thread(self, start_date, end_date):
         """データ抽出のスレッド処理"""
@@ -3239,7 +3356,18 @@ class ModernDataExtractorUI:
             
             self.log_message(f"データ抽出を開始します")
             self.log_message(f"抽出期間: {start_date} ～ {end_date}")
-            
+
+            # データ抽出開始直後に、Access側VBAで不足集計（T_出荷予定集計）を更新
+            try:
+                self.update_progress(0.005, "不足集計（Access VBA）を実行中...")
+                with perf_timer(logger, "access.vba.run"):
+                    self._run_access_vba_shortage_aggregate(start_date, end_date)
+                self.log_message("Access VBAの実行が完了しました")
+            except Exception as e:
+                self.log_message(f"Access VBAの実行に失敗しました: {e}", level="error")
+                # 失敗時は抽出を中断（更新前提のため）
+                raise
+             
             # 【追加】休暇予定を取得（データ抽出開始日付を使用）
             # 進捗配分: 抽出 0.0-0.1 / ロット 0.1-0.4 / 検査員 0.4-0.9 / 表示 0.9-1.0
             self.update_progress(0.01, "休暇予定を取得中...")

@@ -31,6 +31,11 @@ a = Analysis(
         'googleapiclient',
         'googleapiclient.discovery',
         'googleapiclient.errors',
+        # Access VBA 実行（pywin32）
+        'pythoncom',
+        'pywintypes',
+        'win32com',
+        'win32com.client',
     ],
     hookspath=[],
     hooksconfig={},
