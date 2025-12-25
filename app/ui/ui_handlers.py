@@ -419,8 +419,12 @@ class ModernDataExtractorUI:
         self._progress_pulse_end: float = 0.0
         self._progress_pulse_step: float = 0.001
         self._progress_pulse_interval_ms: int = 120
-        self._progress_display_phase_extract_end: float = 0.10
-        self._progress_display_phase_lot_end: float = 0.40
+        # 表示側の進捗配分（内部の0.0-0.1/0.1-0.4/0.4-0.9/0.9-1.0 は維持し、見た目だけ調整）
+        # 直近のperf計測結果（不足集計/抽出とロット取得が支配的、検査員フェーズは短め）に合わせたデフォルト値
+        # 目安: 抽出 0.0-0.45 / ロット 0.45-0.8 / 検査員 0.8-0.9 / 表示 0.9-1.0
+        # Access VBA（不足集計）が長く見えるため、抽出側を厚めにして体感整合を取る
+        self._progress_display_phase_extract_end: float = 0.45
+        self._progress_display_phase_lot_end: float = 0.80
         self._progress_display_phase_inspector_end: float = 0.90
         self._progress_display_mapping_enabled: bool = True
         
@@ -3369,10 +3373,22 @@ class ModernDataExtractorUI:
             try:
                 self.update_progress(0.005, "不足集計（Access VBA）を実行中...")
                 # Accessマクロは数十秒かかることがあるため、進捗が止まって見えないようにパルス表示
-                self.start_progress_pulse(0.005, 0.01, "不足集計（Access）を実行中...")
+                access_target_seconds = float(os.getenv("ACCESS_VBA_PROGRESS_TARGET_SECONDS", "60").strip() or "60")
+                self.start_progress_pulse(
+                    0.005,
+                    0.06,
+                    "不足集計（Access）を実行中...",
+                    target_seconds=access_target_seconds,
+                )
+                # パルス開始を確実に反映させるため、短時間だけUIスレッドへ実行権を譲る
+                try:
+                    import time
+                    time.sleep(0.3)
+                except Exception:
+                    pass
                 with perf_timer(logger, "access.vba.run"):
                     self._run_access_vba_shortage_aggregate(start_date, end_date)
-                    self.stop_progress_pulse(final_value=0.01, message="不足集計（Access）が完了しました")
+                    self.stop_progress_pulse(final_value=0.06, message="不足集計（Access）が完了しました")
                 self.log_message("Access VBAの実行が完了しました")
             except Exception as e:
                 self.log_message(f"Access VBAの実行に失敗しました: {e}", level="error")
@@ -3380,7 +3396,7 @@ class ModernDataExtractorUI:
                 raise
              
             # 【追加】休暇予定を取得（データ抽出開始日付を使用）
-            # 進捗配分: 抽出 0.0-0.1 / ロット 0.1-0.4 / 検査員 0.4-0.9 / 表示 0.9-1.0
+            # 進捗配分: 抽出 0.0-0.3 / ロット 0.3-0.6 / 検査員 0.6-0.9 / 表示 0.9-1.0
             self.update_progress(0.01, "休暇予定を取得中...")
             # ネットワーク状況で待ちが出るため、進捗が止まって見えないようにパルス表示
             self.start_progress_pulse(0.01, 0.02, "休暇予定を取得中...")
@@ -3824,18 +3840,37 @@ class ModernDataExtractorUI:
             return _lerp(raw, r2, r3, d2, d3)
         return _lerp(raw, r3, r4, d3, d4)
 
-    def start_progress_pulse(self, start_value: float, end_value: float, message: str) -> None:
+    def start_progress_pulse(
+        self,
+        start_value: float,
+        end_value: float,
+        message: str,
+        *,
+        target_seconds: Optional[float] = None,
+    ) -> None:
         """長時間処理中、進捗が止まって見えないように段階的に進める（UIスレッドで動作）。"""
         self.root.after(
             0,
-            lambda: self._start_progress_pulse(float(start_value), float(end_value), str(message)),
+            lambda: self._start_progress_pulse(
+                float(start_value),
+                float(end_value),
+                str(message),
+                target_seconds=target_seconds,
+            ),
         )
 
     def stop_progress_pulse(self, final_value: Optional[float] = None, message: Optional[str] = None) -> None:
         """進捗パルスを停止し、必要なら最終値をセットする（UIスレッドで動作）。"""
         self.root.after(0, lambda: self._stop_progress_pulse(final_value=final_value, message=message))
 
-    def _start_progress_pulse(self, start_value: float, end_value: float, message: str) -> None:
+    def _start_progress_pulse(
+        self,
+        start_value: float,
+        end_value: float,
+        message: str,
+        *,
+        target_seconds: Optional[float] = None,
+    ) -> None:
         self._stop_progress_pulse()
 
         start = max(0.0, min(1.0, float(start_value)))
@@ -3847,10 +3882,23 @@ class ModernDataExtractorUI:
         current = max(self._progress_value, start)
         # end まで到達しきらない（終端は明示更新で合わせる）
         end_cap = max(start, min(end, end - 0.002))
+        # 範囲が現在値より手前の場合は「後退」しないように少し先に伸ばす
+        if end_cap <= current:
+            if end > current:
+                end_cap = min(end, max(current + 0.01, end - 0.002))
+            else:
+                end_cap = min(1.0, current + 0.02)
 
-        # おおよそ 30 秒で end_cap 付近まで進む速度
+        # target_seconds（未指定は約30秒）で end_cap 付近まで進む速度
         span = max(0.01, end_cap - current)
-        step = max(0.0005, span / 250.0)
+        try:
+            seconds = float(target_seconds) if target_seconds is not None else 30.0
+        except Exception:
+            seconds = 30.0
+        seconds = max(5.0, min(180.0, seconds))
+        steps = max(50.0, (seconds * 1000.0) / float(self._progress_pulse_interval_ms))
+        # target_seconds を優先して小さな step も許容（上限到達で「止まって見える」のを防ぐ）
+        step = max(0.00002, span / steps)
 
         self._progress_pulse_active = True
         self._progress_pulse_end = end_cap

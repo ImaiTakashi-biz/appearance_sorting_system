@@ -361,6 +361,33 @@ class InspectorAssignmentManager:
         """
         return self._is_same_day_cleaning_label(shipping_date)
 
+    def _should_force_keep_assignment(self, shipping_date: Any) -> bool:
+        """
+        割当を「維持」する最優先対象かどうか。
+
+        - 当日洗浄上がり品（＋先行検査）
+        - 出荷予定日が「当日（または過去）」のロット（要日出荷品を含む）
+
+        ※ ここで True の場合、最終検証で違反が検出されても未割当へ落とさず、割当維持を優先する。
+        """
+        if self._should_force_assign_same_day(shipping_date):
+            return True
+
+        try:
+            if shipping_date is None or (isinstance(shipping_date, float) and pd.isna(shipping_date)):
+                return False
+            if isinstance(shipping_date, pd.Timestamp):
+                ship_date = shipping_date.date()
+            else:
+                ship_ts = pd.to_datetime(shipping_date, errors="coerce")
+                if pd.isna(ship_ts):
+                    return False
+                ship_date = ship_ts.date()
+            today = pd.Timestamp.now().date()
+            return ship_date <= today
+        except Exception:
+            return False
+
     def _rebuild_assignment_histories(self, result_df: pd.DataFrame, inspector_master_df: pd.DataFrame) -> None:
         """
         result_df の割当結果から、勤務時間・品番時間などの履歴を再構築する。
@@ -8890,7 +8917,7 @@ class InspectorAssignmentManager:
                     # 同一品番4.0h上限（product limit）違反は最終是正の対象から外す
                     violation_type = str(violation[3]) if len(violation) > 3 else ''
                     shipping_date_for_filter = row.get('出荷予定日', None)
-                    if self._should_force_assign_same_day(shipping_date_for_filter) and "同一品番" in violation_type:
+                    if self._should_force_keep_assignment(shipping_date_for_filter) and "同一品番" in violation_type:
                         continue
                     product_number = row.get('品番', '')
                     if product_number not in violations_by_product:
@@ -8913,8 +8940,8 @@ class InspectorAssignmentManager:
                         for violation, row in product_violations:
                             index = violation[0]
                             shipping_date = row.get('出荷予定日', pd.Timestamp.max)
-                            # 当日洗浄上がり品（＋先行検査）は未割当を避けるため、割当クリアを行わず保護する
-                            if self._should_force_assign_same_day(shipping_date):
+                            # 最優先ロットは未割当を避けるため、割当クリアを行わず保護する
+                            if self._should_force_keep_assignment(shipping_date):
                                 protected_indices.add(index)
                                 continue
                             
@@ -10712,9 +10739,32 @@ class InspectorAssignmentManager:
         try:
             current_date = pd.Timestamp.now().date()
             row = result_df.iloc[index]
+            shipping_date = row.get('出荷予定日', None)
             product_number = row.get('品番', '')
             divided_time = row.get('分割検査時間', 0.0)
             total_required = row.get('検査時間', divided_time)
+
+            # 要日出荷（当日/過去）・当日洗浄上がり品は、最終検証で違反が出ても未割当に落とさず割当維持を優先する
+            try:
+                has_any_assignment = False
+                for i in range(1, 6):
+                    inspector_col = f'検査員{i}'
+                    inspector_name = row.get(inspector_col, '')
+                    if pd.notna(inspector_name) and str(inspector_name).strip() != '':
+                        has_any_assignment = True
+                        break
+                if has_any_assignment and self._should_force_keep_assignment(shipping_date):
+                    current_team_info = result_df.at[index, 'チーム情報'] if 'チーム情報' in result_df.columns else ''
+                    if not (pd.notna(current_team_info) and "割当維持" in str(current_team_info)):
+                        if 'チーム情報' in result_df.columns:
+                            result_df.at[index, 'チーム情報'] = '要日優先のため割当維持(制約違反あり)'
+                    self.log_message(
+                        f"要日優先: ロットの割当解除をスキップしました: 品番 {product_number}, 出荷予定日 {shipping_date}",
+                        level='warning',
+                    )
+                    return
+            except Exception:
+                pass
             
             # 履歴からこのロットの時間を引く（割り当てされている検査員の時間を戻す）
             for i in range(1, 6):
