@@ -40,6 +40,9 @@ from loguru import logger
 # ログ分類（app_.logの視認性向上）
 logger = logger.bind(channel="UI")
 
+from version import APP_NAME, APP_VERSION, BUILD_DATE
+
+
 from app.utils.perf import perf_timer
 from app.config import DatabaseConfig
 import calendar
@@ -330,7 +333,7 @@ class ModernDataExtractorUI:
         
         # メインウィンドウの作成
         self.root = ctk.CTk()
-        self.root.title("外観検査振分支援システム")
+        self.root.title(f"{APP_NAME}  {APP_VERSION}")
         self.root.minsize(self.MIN_WINDOW_WIDTH, self.MIN_WINDOW_HEIGHT)
         
         # ウィンドウの背景色を白に設定
@@ -416,6 +419,10 @@ class ModernDataExtractorUI:
         self._progress_pulse_end: float = 0.0
         self._progress_pulse_step: float = 0.001
         self._progress_pulse_interval_ms: int = 120
+        self._progress_display_phase_extract_end: float = 0.10
+        self._progress_display_phase_lot_end: float = 0.40
+        self._progress_display_phase_inspector_end: float = 0.90
+        self._progress_display_mapping_enabled: bool = True
         
         # スキル表示状態管理
         self.original_inspector_data = None  # 元のデータを保持
@@ -3216,6 +3223,7 @@ class ModernDataExtractorUI:
         self.is_extracting = True
         self._auto_open_non_inspection_window_done = False
         self._progress_monotonic_lock = True
+        self._refresh_progress_display_mapping()
         self.extract_button.configure(state="disabled", text="抽出中...")
         self.progress_bar.set(0)
         self.progress_label.configure(text="データベースに接続中...")
@@ -3360,8 +3368,11 @@ class ModernDataExtractorUI:
             # データ抽出開始直後に、Access側VBAで不足集計（T_出荷予定集計）を更新
             try:
                 self.update_progress(0.005, "不足集計（Access VBA）を実行中...")
+                # Accessマクロは数十秒かかることがあるため、進捗が止まって見えないようにパルス表示
+                self.start_progress_pulse(0.005, 0.01, "不足集計（Access）を実行中...")
                 with perf_timer(logger, "access.vba.run"):
                     self._run_access_vba_shortage_aggregate(start_date, end_date)
+                    self.stop_progress_pulse(final_value=0.01, message="不足集計（Access）が完了しました")
                 self.log_message("Access VBAの実行が完了しました")
             except Exception as e:
                 self.log_message(f"Access VBAの実行に失敗しました: {e}", level="error")
@@ -3371,6 +3382,8 @@ class ModernDataExtractorUI:
             # 【追加】休暇予定を取得（データ抽出開始日付を使用）
             # 進捗配分: 抽出 0.0-0.1 / ロット 0.1-0.4 / 検査員 0.4-0.9 / 表示 0.9-1.0
             self.update_progress(0.01, "休暇予定を取得中...")
+            # ネットワーク状況で待ちが出るため、進捗が止まって見えないようにパルス表示
+            self.start_progress_pulse(0.01, 0.02, "休暇予定を取得中...")
             from app.services.vacation_schedule_service import load_vacation_schedule, get_vacation_for_date
             from datetime import date as date_type
             
@@ -3450,6 +3463,8 @@ class ModernDataExtractorUI:
             
             # データベース接続
             self.update_progress(0.02, "データベースに接続中...")
+            # UNC→ローカルキャッシュ作成で時間がかかることがあるためパルス表示
+            self.start_progress_pulse(0.02, 0.03, "データベースに接続中...")
             with perf_timer(logger, "db.connect"):
                 connection = self.config.get_connection()
             self.log_message("データベース接続が完了しました")
@@ -3729,8 +3744,85 @@ class ModernDataExtractorUI:
 
         self._progress_value = next_value
         self._progress_message = str(message) if message is not None else ""
-        self.root.after(0, lambda v=self._progress_value: self.progress_bar.set(v))
+        self.root.after(0, lambda v=self._progress_value: self.progress_bar.set(self._map_progress_for_display(v)))
         self.root.after(0, lambda m=self._progress_message: self.progress_label.configure(text=m))
+
+    def _refresh_progress_display_mapping(self) -> None:
+        """
+        進捗バーの表示配分を環境変数から読み込み（必要なら）更新する。
+
+        - 既存処理の progress 値（0.0-1.0）そのものは変更せず、表示だけを線形変換する。
+        - デフォルトは従来配分（抽出0.10 / ロット0.40 / 検査員0.90 / 表示1.00）＝見た目不変。
+        """
+        enabled = str(os.getenv("PROGRESS_DISPLAY_MAPPING_ENABLED", "1")).strip().lower() not in {
+            "0",
+            "false",
+            "off",
+            "no",
+        }
+        self._progress_display_mapping_enabled = bool(enabled)
+
+        def _f(key: str, default: float) -> float:
+            raw = os.getenv(key, "")
+            if raw is None or not str(raw).strip():
+                return float(default)
+            try:
+                return float(str(raw).strip())
+            except Exception:
+                return float(default)
+
+        # 表示側のフェーズ境界（0-1）。単調増加になるように補正する。
+        extract_end = _f("PROGRESS_PHASE_EXTRACT_END", 0.10)
+        lot_end = _f("PROGRESS_PHASE_LOT_END", 0.40)
+        inspector_end = _f("PROGRESS_PHASE_INSPECTOR_END", 0.90)
+
+        extract_end = max(0.01, min(0.95, extract_end))
+        lot_end = max(extract_end + 0.01, min(0.98, lot_end))
+        inspector_end = max(lot_end + 0.01, min(0.99, inspector_end))
+
+        self._progress_display_phase_extract_end = float(extract_end)
+        self._progress_display_phase_lot_end = float(lot_end)
+        self._progress_display_phase_inspector_end = float(inspector_end)
+
+    def _map_progress_for_display(self, raw_value: float) -> float:
+        """
+        進捗の「表示値」への線形変換。
+
+        raw は既存の進捗配分:
+        - 抽出:   0.00-0.10
+        - ロット: 0.10-0.40
+        - 検査員: 0.40-0.90
+        - 表示:   0.90-1.00
+        """
+        try:
+            raw = float(raw_value)
+        except Exception:
+            raw = 0.0
+        raw = max(0.0, min(1.0, raw))
+        if not getattr(self, "_progress_display_mapping_enabled", True):
+            return raw
+
+        e_end = float(getattr(self, "_progress_display_phase_extract_end", 0.10))
+        l_end = float(getattr(self, "_progress_display_phase_lot_end", 0.40))
+        i_end = float(getattr(self, "_progress_display_phase_inspector_end", 0.90))
+
+        r0, r1, r2, r3, r4 = 0.0, 0.10, 0.40, 0.90, 1.0
+        d0, d1, d2, d3, d4 = 0.0, e_end, l_end, i_end, 1.0
+
+        def _lerp(x: float, a0: float, a1: float, b0: float, b1: float) -> float:
+            if a1 <= a0:
+                return b1
+            t = (x - a0) / (a1 - a0)
+            t = max(0.0, min(1.0, t))
+            return b0 + (b1 - b0) * t
+
+        if raw <= r1:
+            return _lerp(raw, r0, r1, d0, d1)
+        if raw <= r2:
+            return _lerp(raw, r1, r2, d1, d2)
+        if raw <= r3:
+            return _lerp(raw, r2, r3, d2, d3)
+        return _lerp(raw, r3, r4, d3, d4)
 
     def start_progress_pulse(self, start_value: float, end_value: float, message: str) -> None:
         """長時間処理中、進捗が止まって見えないように段階的に進める（UIスレッドで動作）。"""
@@ -3768,7 +3860,7 @@ class ModernDataExtractorUI:
         self._progress_value = current
         self._progress_message = message
         try:
-            self.progress_bar.set(current)
+            self.progress_bar.set(self._map_progress_for_display(current))
             self.progress_label.configure(text=message)
         except Exception:
             pass
@@ -3785,7 +3877,7 @@ class ModernDataExtractorUI:
 
         self._progress_value = next_value
         try:
-            self.progress_bar.set(next_value)
+            self.progress_bar.set(self._map_progress_for_display(next_value))
         except Exception:
             pass
 
@@ -3809,7 +3901,7 @@ class ModernDataExtractorUI:
             if final_value is not None:
                 self._progress_value = max(0.0, min(1.0, float(final_value)))
                 try:
-                    self.progress_bar.set(self._progress_value)
+                    self.progress_bar.set(self._map_progress_for_display(self._progress_value))
                 except Exception:
                     pass
             if message is not None:
@@ -6086,7 +6178,7 @@ class ModernDataExtractorUI:
             ):
                 try:
                     self.update_progress(start_progress + 0.25, "洗浄二次処理依頼からロットを取得中...")
-                    self.start_progress_pulse(start_progress + 0.25, start_progress + 0.33, "洗浄二次処理依頼からロットを取得中...")
+                    self.start_progress_pulse(start_progress + 0.25, start_progress + 0.29, "洗浄二次処理依頼からロットを取得中...")
                     with perf_timer(logger, "lots.get_cleaning_lots"):
                         cleaning_lots_df = get_cleaning_lots(
                             connection,
@@ -6097,7 +6189,7 @@ class ModernDataExtractorUI:
                             process_master_path=self.config.process_master_path if self.config else None,
                             inspection_target_keywords=self.inspection_target_keywords
                         )
-                    self.stop_progress_pulse(final_value=start_progress + 0.33, message="洗浄二次処理依頼ロットの取得が完了しました")
+                    self.stop_progress_pulse(final_value=start_progress + 0.29, message="洗浄二次処理依頼ロットの取得が完了しました")
                     if not cleaning_lots_df.empty:
                         self.log_message(f"洗浄二次処理依頼から {len(cleaning_lots_df)}件のロットを取得しました")
                     else:
@@ -6217,7 +6309,7 @@ class ModernDataExtractorUI:
             # ロット割り当てを実行（不足数がマイナスのデータがある場合のみ）
             assignment_df = pd.DataFrame()
             if not shortage_df.empty and not lots_df.empty:
-                self.update_progress(start_progress + 0.35, "ロットを割り当て中...")
+                self.update_progress(start_progress + 0.28, "ロットを割り当て中...")
                 with perf_timer(logger, "lot_assignment.assign_lots_to_shortage"):
                     assignment_df = self.assign_lots_to_shortage(shortage_df, lots_df)
             elif lots_df.empty and shortage_df.empty:
@@ -6227,7 +6319,7 @@ class ModernDataExtractorUI:
             
             # 登録済み品番のロットを割り当て（追加）
             if self.registered_products:
-                self.update_progress(start_progress + 0.37, "登録済み品番のロットを割り当て中...")
+                self.update_progress(start_progress + 0.30, "登録済み品番のロットを割り当て中...")
                 with perf_timer(logger, "lots.assign_registered_products"):
                     assignment_df = self.assign_registered_products_lots(connection, main_df, assignment_df)
             
@@ -9999,10 +10091,25 @@ class ModernDataExtractorUI:
 
             # ガイドメニュー
             menubar.add_command(label="📘 ガイド", command=self.open_assignment_rules_guide)
-            
+
+            # ヘルプメニュー
+            help_menu = tk.Menu(menubar, tearoff=0)
+            menubar.add_cascade(label="ヘルプ", menu=help_menu)
+            help_menu.add_command(label="バージョン情報", command=self.show_about_dialog)
+             
         except Exception as e:
             logger.error(f"メニューバーの作成に失敗しました: {e}")
-    
+
+    def show_about_dialog(self) -> None:
+        """ヘルプ → バージョン情報"""
+        try:
+            messagebox.showinfo(
+                "バージョン情報",
+                f"{APP_NAME}\n\nバージョン: {APP_VERSION}\nビルド日: {BUILD_DATE}",
+            )
+        except Exception:
+            pass
+     
     def open_product_master_file(self):
         """製品マスタファイルを開く"""
         try:
