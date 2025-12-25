@@ -3278,7 +3278,13 @@ class ModernDataExtractorUI:
         access_app = None
         pythoncom.CoInitialize()
         try:
-            access_app = win32com.client.Dispatch("Access.Application")
+            # 既存のAccessプロセスへアタッチすると、別用途でDBが既に開かれており
+            # OpenCurrentDatabase が「既にこのデータベースは開いています」で失敗することがある。
+            # そのため基本は新規インスタンス（DispatchEx）を優先する。
+            try:
+                access_app = win32com.client.DispatchEx("Access.Application")
+            except Exception:
+                access_app = win32com.client.Dispatch("Access.Application")
             visible_enabled = os.environ.get("ACCESS_VBA_VISIBLE", "0").strip() == "1"
             try:
                 access_app.Visible = bool(visible_enabled)
@@ -3295,10 +3301,26 @@ class ModernDataExtractorUI:
             except Exception:
                 pass
 
+            opened = False
             try:
                 access_app.OpenCurrentDatabase(access_path)
+                opened = True
             except Exception as e:
-                raise RuntimeError(f"Access.OpenCurrentDatabase に失敗しました: {e}") from e
+                # 「既にこのデータベースは開いています。」は、同一インスタンス内で既に開かれている場合に発生する。
+                # CloseCurrentDatabase → 再Open を試し、それでもダメなら「開いている前提」でマクロ実行を試みる。
+                msg = str(e)
+                if "既にこのデータベースは開いています" in msg:
+                    try:
+                        access_app.CloseCurrentDatabase()
+                    except Exception:
+                        pass
+                    try:
+                        access_app.OpenCurrentDatabase(access_path)
+                        opened = True
+                    except Exception:
+                        opened = False
+                else:
+                    raise RuntimeError(f"Access.OpenCurrentDatabase に失敗しました: {e}") from e
 
             try:
                 access_app.run(macro_name, start_str, end_str)
@@ -3344,7 +3366,8 @@ class ModernDataExtractorUI:
                     pass
                 raise RuntimeError(f"Access.Application.run に失敗しました: {e}") from e
             try:
-                access_app.CloseCurrentDatabase()
+                if opened:
+                    access_app.CloseCurrentDatabase()
             except Exception:
                 pass
         finally:
