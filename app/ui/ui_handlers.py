@@ -3791,7 +3791,7 @@ class ModernDataExtractorUI:
         進捗バーの表示配分を環境変数から読み込み（必要なら）更新する。
 
         - 既存処理の progress 値（0.0-1.0）そのものは変更せず、表示だけを線形変換する。
-        - デフォルトは従来配分（抽出0.10 / ロット0.40 / 検査員0.90 / 表示1.00）＝見た目不変。
+        - デフォルトは __init__ で設定した値（環境変数未設定時）を使う。
         """
         enabled = str(os.getenv("PROGRESS_DISPLAY_MAPPING_ENABLED", "1")).strip().lower() not in {
             "0",
@@ -3800,6 +3800,10 @@ class ModernDataExtractorUI:
             "no",
         }
         self._progress_display_mapping_enabled = bool(enabled)
+
+        extract_default = float(getattr(self, "_progress_display_phase_extract_end", 0.10))
+        lot_default = float(getattr(self, "_progress_display_phase_lot_end", 0.40))
+        inspector_default = float(getattr(self, "_progress_display_phase_inspector_end", 0.90))
 
         def _f(key: str, default: float) -> float:
             raw = os.getenv(key, "")
@@ -3811,9 +3815,9 @@ class ModernDataExtractorUI:
                 return float(default)
 
         # 表示側のフェーズ境界（0-1）。単調増加になるように補正する。
-        extract_end = _f("PROGRESS_PHASE_EXTRACT_END", 0.10)
-        lot_end = _f("PROGRESS_PHASE_LOT_END", 0.40)
-        inspector_end = _f("PROGRESS_PHASE_INSPECTOR_END", 0.90)
+        extract_end = _f("PROGRESS_PHASE_EXTRACT_END", extract_default)
+        lot_end = _f("PROGRESS_PHASE_LOT_END", lot_default)
+        inspector_end = _f("PROGRESS_PHASE_INSPECTOR_END", inspector_default)
 
         extract_end = max(0.01, min(0.95, extract_end))
         lot_end = max(extract_end + 0.01, min(0.98, lot_end))
