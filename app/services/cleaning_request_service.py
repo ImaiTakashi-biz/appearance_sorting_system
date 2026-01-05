@@ -640,7 +640,6 @@ def _get_cleaning_instructions_from_sheets(exporter: GoogleSheetsExporter, sheet
                 instruction_data["指示日"] = instruction_date_str
             
             result_data.append(instruction_data)
-        
         return result_data
         
     except Exception as e:
@@ -1099,6 +1098,7 @@ def get_cleaning_lots(
                         "号機": machine,
                         "数量": instruction.get("数量", "").strip(),
                         "ロット数量": instruction.get("数量", "").strip(),  # 数量をロット数量にも設定
+                        "洗浄指示_行番号": instruction.get("行番号", ""),
                         "生産ロットID": "",  # 未記載
                         "現在工程名": process_name,
                         "現在工程番号": process_number,
@@ -1139,6 +1139,9 @@ def get_cleaning_lots(
                     subset_cols = ['品番', '号機']
                     if '指示日' in no_lot_id_df.columns:
                         subset_cols.append('指示日')
+                    # 洗浄指示シート由来の行は、同一キーが複数存在し得るため行番号も重複判定に含める
+                    if '洗浄指示_行番号' in no_lot_id_df.columns:
+                        subset_cols.append('洗浄指示_行番号')
                     no_lot_id_df = no_lot_id_df.drop_duplicates(subset=subset_cols, keep='first')
 
                     if not has_lot_id_df.empty:

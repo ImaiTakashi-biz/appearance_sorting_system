@@ -5579,6 +5579,7 @@ class ModernDataExtractorUI:
                 'ロット数量': selected_lots['lot_quantity'].round(0).astype(int).values,
                 '指示日': _get_column_series('指示日').values,
                 '号機': _get_column_series('号機').values,
+                '洗浄指示_行番号': _get_column_series('洗浄指示_行番号').values,
                 '現在工程番号': _get_column_series('現在工程番号').values,
                 '現在工程名': _get_column_series('現在工程名').values,
                 '現在工程二次処理': _get_column_series('現在工程二次処理').values,
@@ -5731,6 +5732,8 @@ class ModernDataExtractorUI:
                 # 品番・号機・指示日の列が存在するか確認
                 required_cols = ['品番', '号機', '指示日']
                 available_cols = [col for col in required_cols if col in no_lot_id_df.columns]
+                if '洗浄指示_行番号' in no_lot_id_df.columns:
+                    available_cols.append('洗浄指示_行番号')
                 
                 if len(available_cols) >= 2:  # 最低2つの列があれば重複チェック可能
                     before_count = len(no_lot_id_df)
@@ -6417,12 +6420,51 @@ class ModernDataExtractorUI:
                 # assign_lots_to_shortageで既に割り当てられたロットIDを取得
                 assigned_lot_ids = set()
                 if not assignment_df.empty and '生産ロットID' in assignment_df.columns:
-                    assigned_lot_ids = set(assignment_df['生産ロットID'].dropna().unique())
+                    lot_ids = assignment_df['生産ロットID'].dropna().astype(str).map(str.strip)
+                    assigned_lot_ids = set(lot_ids[lot_ids != ''].unique())
+
+                assigned_cleaning_row_ids = set()
+                if not assignment_df.empty and '洗浄指示_行番号' in assignment_df.columns:
+                    row_ids = assignment_df['洗浄指示_行番号'].dropna().astype(str).map(str.strip)
+                    assigned_cleaning_row_ids = set(row_ids[row_ids != ''].unique())
                 
                 # 不足数がマイナスの品番と一致するが、まだ割り当てられていないロットを抽出
-                cleaning_lots_in_shortage_not_assigned = cleaning_lots_in_shortage[
-                    ~cleaning_lots_in_shortage['生産ロットID'].isin(assigned_lot_ids)
-                ].copy()
+                cleaning_lots_in_shortage_not_assigned = cleaning_lots_in_shortage.copy()
+                if not cleaning_lots_in_shortage_not_assigned.empty:
+                    keep_mask = pd.Series([True] * len(cleaning_lots_in_shortage_not_assigned), index=cleaning_lots_in_shortage_not_assigned.index)
+
+                    if '生産ロットID' in cleaning_lots_in_shortage_not_assigned.columns:
+                        lot_id_series = (
+                            cleaning_lots_in_shortage_not_assigned['生産ロットID']
+                            .fillna('')
+                            .astype(str)
+                            .map(str.strip)
+                        )
+                        has_lot_id_mask = lot_id_series != ''
+                        if assigned_lot_ids:
+                            keep_mask.loc[has_lot_id_mask] = ~lot_id_series[has_lot_id_mask].isin(assigned_lot_ids)
+
+                        if '洗浄指示_行番号' in cleaning_lots_in_shortage_not_assigned.columns and assigned_cleaning_row_ids:
+                            row_id_series = (
+                                cleaning_lots_in_shortage_not_assigned['洗浄指示_行番号']
+                                .fillna('')
+                                .astype(str)
+                                .map(str.strip)
+                            )
+                            has_row_id_mask = row_id_series != ''
+                            no_lot_id_has_row_id = (~has_lot_id_mask) & has_row_id_mask
+                            keep_mask.loc[no_lot_id_has_row_id] = ~row_id_series[no_lot_id_has_row_id].isin(assigned_cleaning_row_ids)
+                    elif '洗浄指示_行番号' in cleaning_lots_in_shortage_not_assigned.columns and assigned_cleaning_row_ids:
+                        row_id_series = (
+                            cleaning_lots_in_shortage_not_assigned['洗浄指示_行番号']
+                            .fillna('')
+                            .astype(str)
+                            .map(str.strip)
+                        )
+                        has_row_id_mask = row_id_series != ''
+                        keep_mask.loc[has_row_id_mask] = ~row_id_series[has_row_id_mask].isin(assigned_cleaning_row_ids)
+
+                    cleaning_lots_in_shortage_not_assigned = cleaning_lots_in_shortage_not_assigned[keep_mask].copy()
                 
                 # 不足数がマイナスの品番と一致しないものと、一致するが未割当のものを統合
                 all_additional_cleaning_lots = pd.DataFrame()
@@ -6472,6 +6514,7 @@ class ModernDataExtractorUI:
                                     'ロット数量': int(lot_row.get('数量', lot_row.get('ロット数量', 0))),
                                     '指示日': lot_row.get('指示日', ''),
                                     '号機': lot_row.get('号機', ''),
+                                    '洗浄指示_行番号': lot_row.get('洗浄指示_行番号', ''),
                                     '現在工程番号': lot_row.get('現在工程番号', ''),
                                     '現在工程名': lot_row.get('現在工程名', ''),
                                     '現在工程二次処理': lot_row.get('現在工程二次処理', ''),
@@ -6493,6 +6536,7 @@ class ModernDataExtractorUI:
                                     'ロット数量': int(lot_row.get('数量', lot_row.get('ロット数量', 0))),
                                     '指示日': lot_row.get('指示日', ''),
                                     '号機': lot_row.get('号機', ''),
+                                    '洗浄指示_行番号': lot_row.get('洗浄指示_行番号', ''),
                                     '現在工程番号': lot_row.get('現在工程番号', ''),
                                     '現在工程名': lot_row.get('現在工程名', ''),
                                     '現在工程二次処理': lot_row.get('現在工程二次処理', ''),
