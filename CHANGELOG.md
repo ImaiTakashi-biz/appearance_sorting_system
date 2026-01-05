@@ -1,5 +1,8 @@
 # CHANGELOG
 
+## v1.1.4 (2026-01-05)
+- 追加: `cleaning_request_service.py` と `ui_handlers.py` に洗浄指示の行番号を追加し、重複判定に行番号を考慮するよう更新
+
 ## v1.1.3 (2025-12-25)
 - 修正: Access VBA 実行時に「既にこのデータベースは開いています」で失敗するケースを回避（`DispatchEx`優先＋再Open）
 
