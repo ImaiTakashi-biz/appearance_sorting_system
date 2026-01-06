@@ -163,12 +163,28 @@ def _generate_date_range(start_date_str: str, days: int) -> List[str]:
         list: 日付文字列のリスト（YYYY-MM-DD形式）
     """
     try:
-        # 現在の年を取得
-        current_year = datetime.now().year
+        # 現在の年月を取得
+        now = datetime.now()
+        current_year = now.year
+        current_month = now.month
         
         # MM/DD形式を日付オブジェクトに変換
         month, day = map(int, start_date_str.split('/'))
-        start_date = datetime(current_year, month, day)
+        
+        # 年の決定ロジック：
+        # 12月の日付が現在の月（1月など）より前の場合は、前年として解釈
+        # 例: 現在が2026年1月で、12/20が指定された場合 → 2025年12月20日
+        if month == 12 and current_month < 12:
+            # 12月の日付で現在が12月より前の月の場合、前年として解釈
+            year = current_year - 1
+        elif month < current_month:
+            # 現在の月より前の月の場合、前年として解釈
+            year = current_year - 1
+        else:
+            # それ以外は現在の年を使用
+            year = current_year
+        
+        start_date = datetime(year, month, day)
         
         # 日付リストを生成（リスト内包表記で高速化）
         date_list = [(start_date + timedelta(days=i)).strftime('%Y-%m-%d') for i in range(days)]
@@ -666,11 +682,13 @@ def _get_today_requests_from_sheets(exporter: GoogleSheetsExporter, sheet_name: 
             logger.info(msg)
     
     try:
-        log(f"スプレッドシート「{sheet_name}」からデータを取得中...")
         spreadsheet = exporter._get_spreadsheet()
         if not spreadsheet:
             log("スプレッドシートの取得に失敗しました")
             return []
+        
+        spreadsheet_title = spreadsheet.title if hasattr(spreadsheet, 'title') else "洗浄二次処理依頼"
+        log(f"スプレッドシート「{spreadsheet_title}」のシート「{sheet_name}」からデータを取得中...")
         
         try:
             worksheet = spreadsheet.worksheet(sheet_name)
