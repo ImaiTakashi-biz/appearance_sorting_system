@@ -24,13 +24,11 @@ a = Analysis(
         'loguru',
         'customtkinter',
         'PIL',
+        'PIL.Image',  # 基本的な画像読み込みのみ
         'gspread',
         'google.auth',
         'google.oauth2',
         'google.oauth2.service_account',
-        'googleapiclient',
-        'googleapiclient.discovery',
-        'googleapiclient.errors',
         # Access VBA 実行（pywin32）
         'pythoncom',
         'pywintypes',
@@ -47,7 +45,7 @@ a = Analysis(
         'jupyter',
         'notebook',
         'pytest',
-        'setuptools',
+        # 注意: 'setuptools'はpkg_resourcesが依存しているため除外不可
         'distutils',
         'tkinter.test',
         'unittest',
@@ -57,8 +55,10 @@ a = Analysis(
         'pyarrow.parquet',
         'pyarrow.flight',
         'pyarrow.compute',
-        # pandas/numpyのテストモジュール（pandas.plottingとpandas.io.formats.styleはpandasの内部で使用される可能性があるため除外しない）
+        # pandas/numpyのテストモジュールと不要な機能
         'pandas.tests',
+        # 注意: 'pandas.plotting'はpandas内部で参照される可能性があるため除外不可
+        # 注意: 'pandas.io.formats.style'はpandas内部で参照される可能性があるため除外不可
         'numpy.tests',
         'numpy.f2py',
         # PILの不要なモジュール（基本的な画像読み込みのみ使用）
@@ -66,6 +66,22 @@ a = Analysis(
         'PIL.ImageTk',
         'PIL.ImageQt',
         'PIL.ImageShow',
+        'PIL.ImageFilter',  # 画像フィルタ機能は使用していない
+        'PIL.ImageEnhance',  # 画像強調機能は使用していない
+        'PIL.ImageOps',  # 画像操作機能は使用していない
+        'PIL.ImageDraw',  # 画像描画機能は使用していない
+        'PIL.ImageFont',  # フォント機能は使用していない
+        # Google API関連（gspreadのみ使用、googleapiclientは不要）
+        'googleapiclient',
+        'googleapiclient.discovery',
+        'googleapiclient.errors',
+        'googleapiclient.http',
+        'googleapiclient.model',
+        # その他の不要なモジュール
+        # 注意: 'email'はpkg_resourcesが依存しているため除外不可
+        'smtplib',  # SMTP機能は使用していない
+        'xmlrpc',  # XML-RPCは使用していない
+        'doctest',  # ドキュメントテストは使用していない
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
