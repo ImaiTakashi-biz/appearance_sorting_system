@@ -3658,6 +3658,23 @@ class ModernDataExtractorUI:
             # 出荷予定日をdatetime型に変換（既にSQL側でソート済み）
             if not df.empty and '出荷予定日' in df.columns:
                 df['出荷予定日'] = pd.to_datetime(df['出荷予定日'], errors='coerce')
+                
+                # 異常な日付（例: 1677年など）をチェックして修正
+                try:
+                    abnormal_dates_mask = df['出荷予定日'].notna() & (
+                        (df['出荷予定日'].dt.year < 1900) | (df['出荷予定日'].dt.year > 2100)
+                    )
+                    if abnormal_dates_mask.any():
+                        abnormal_count = abnormal_dates_mask.sum()
+                        self.log_message(
+                            f"警告: 出荷予定日に異常な日付が {abnormal_count}件検出されました（1900年～2100年の範囲外）。"
+                            "これらを無効な日付として処理します。",
+                            level='warning'
+                        )
+                        # 異常な日付をNaTに設定
+                        df.loc[abnormal_dates_mask, '出荷予定日'] = pd.NaT
+                except Exception as e:
+                    self.log_message(f"出荷予定日の異常値チェック中にエラーが発生しました: {e}", level='warning')
 
                 # 指定期間に対してデータの最大日付が大きく手前の場合、Accessファイル未更新/古いコピーの可能性を通知
                 try:

@@ -394,9 +394,17 @@ class ChatNotificationService:
             shipping_date = getattr(row, '出荷予定日', None)
             shipping_date_str = self._format_date_value(shipping_date, default="未設定")
             
+            # 客先
+            customer = getattr(row, '客先', '')
+            customer_str = str(customer) if pd.notna(customer) and str(customer).strip() else ""
+            
             # 品番
             product_number = getattr(row, '品番', '')
             product_number_str = str(product_number) if pd.notna(product_number) else "不明"
+            
+            # 品名
+            product_name = getattr(row, '品名', '')
+            product_name_str = str(product_name) if pd.notna(product_name) and str(product_name).strip() else ""
             
             # 生産ロットID
             lot_id = getattr(row, '生産ロットID', '')
@@ -412,7 +420,9 @@ class ChatNotificationService:
             
             # 希望フォーマットでメッセージを構築
             message_parts.append(f"出荷予定日：{shipping_date_str}\n")
+            message_parts.append(f"客先：{customer_str}\n")
             message_parts.append(f"品番：{product_number_str}\n")
+            message_parts.append(f"品名：{product_name_str}\n")
             message_parts.append(f"生産ロットID：{lot_id_str}\n")
             message_parts.append(f"指示日：{instruction_date_str}\n")
             message_parts.append(f"現在工程は【{current_process_str}】です\n")
