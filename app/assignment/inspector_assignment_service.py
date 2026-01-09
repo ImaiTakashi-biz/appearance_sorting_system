@@ -3583,7 +3583,7 @@ class InspectorAssignmentManager:
                     )
                     if inferred_process:
                         process_number = inferred_process
-                        self.log_message(f"先行検査品・当日洗浄品: 品番 '{product_number}' の工程番号を '{inferred_process}' に設定しました（スキルマスタ検索用）")
+                        self.log_message(f"先行検査品・当日洗浄品: 品番 '{product_number}' の工程番号を '{inferred_process}' に設定しました（スキルマスタ検索用）", debug=True)
             
             # 新規品対応チームメンバーのコードリストを取得（優先度調整用）
             new_team_inspectors = self.get_new_product_team_inspectors(inspector_master_df)
@@ -3599,10 +3599,10 @@ class InspectorAssignmentManager:
             skill_rows = skill_master_df[skill_master_df.iloc[:, 0] == product_number]
             
             if skill_rows.empty:
-                self.log_message(f"品番 '{product_number}' がスキルマスタに見つかりません")
+                self.log_message(f"品番 '{product_number}' がスキルマスタに見つかりません", debug=True)
                 # 新規品の場合は新製品チームのメンバーを取得
                 if allow_new_team_fallback:
-                    self.log_message("新規品のため、新製品チームのメンバーを取得します")
+                    self.log_message("新規品のため、新製品チームのメンバーを取得します", debug=True)
                     return self.get_new_product_team_inspectors(inspector_master_df)
                 else:
                     # 出荷予定日が間近の場合は新規品対応チームを使用
@@ -3622,7 +3622,7 @@ class InspectorAssignmentManager:
             # 追加仕様: 現在工程番号が空欄の場合は工程による絞り込みを行わず、品番一致行をすべて対象
             # 洗浄指示から取得したロットの場合、工程番号が複数ある場合は数字が若い方から処理
             if process_number is None or str(process_number).strip() == '':
-                self.log_message("現在工程番号が空欄のため、工程フィルタをスキップして品番一致行を処理")
+                self.log_message("現在工程番号が空欄のため、工程フィルタをスキップして品番一致行を処理", debug=True)
                 
                 # 工程番号が空の行を優先的に取得
                 empty_process_rows = []
@@ -3651,17 +3651,17 @@ class InspectorAssignmentManager:
                 # 工程番号が空の行がある場合はそれを使用
                 if empty_process_rows:
                     filtered_skill_rows = empty_process_rows
-                    self.log_message(f"工程番号が空の行を優先採用: {len(empty_process_rows)}件")
+                    self.log_message(f"工程番号が空の行を優先採用: {len(empty_process_rows)}件", debug=True)
                 elif numeric_process_rows:
                     # 数字が若い方からソート
                     numeric_process_rows.sort(key=lambda x: x[0])
                     filtered_skill_rows = [row for _, row in numeric_process_rows]
                     selected_process = numeric_process_rows[0][0]
-                    self.log_message(f"工程番号が空の行が見つからず、数字が若い工程番号={selected_process}を選択: {len(filtered_skill_rows)}件")
+                    self.log_message(f"工程番号が空の行が見つからず、数字が若い工程番号={selected_process}を選択: {len(filtered_skill_rows)}件", debug=True)
                 else:
                     # その他の行も含める
                     filtered_skill_rows = other_process_rows
-                    self.log_message(f"工程番号が空の行も数値の行も見つからず、その他の行を採用: {len(filtered_skill_rows)}件")
+                    self.log_message(f"工程番号が空の行も数値の行も見つからず、その他の行を採用: {len(filtered_skill_rows)}件", debug=True)
             else:
                 # 工程番号列のインデックスを事前に取得（高速化：itertuples()を使用）
                 process_col_idx = 1  # iloc[1]に対応
@@ -4184,17 +4184,19 @@ class InspectorAssignmentManager:
                                     logged.add(key)
                                     self.log_message(
                                         f"工程マスタから工程番号を推定: 品番='{product_number}', "
-                                        f"キーワード='{keyword}', 推定工程番号='{inferred_process}'"
+                                        f"キーワード='{keyword}', 推定工程番号='{inferred_process}'",
+                                        debug=True
                                     )
                             except Exception:
                                 # ログ抑制で失敗しても推定処理は継続
                                 self.log_message(
                                     f"工程マスタから工程番号を推定: 品番='{product_number}', "
-                                    f"キーワード='{keyword}', 推定工程番号='{inferred_process}'"
+                                    f"キーワード='{keyword}', 推定工程番号='{inferred_process}'",
+                                    debug=True
                                 )
                             return inferred_process
             
-            self.log_message(f"工程マスタで品番 '{product_number}' の工程番号を推定できませんでした")
+            self.log_message(f"工程マスタで品番 '{product_number}' の工程番号を推定できませんでした", debug=True)
             return None
             
         except Exception as e:
@@ -6133,25 +6135,30 @@ class InspectorAssignmentManager:
                     # 警告対象をチェック
                     if work_hours > allowed_max_hours * 0.8:  # 80%超過で警告
                         warning_inspectors.append(
-                            (inspector_code, count, work_hours, allowed_max_hours, daily_hours, work_hours > allowed_max_hours)
+                            (inspector_code, count, work_hours, max_hours, allowed_max_hours, daily_hours, work_hours > allowed_max_hours)
                         )
                 else:
                     # 検査員マスタがない場合
                     if work_hours > 6.0:  # 6時間超過で警告
-                        warning_inspectors.append((inspector_code, count, work_hours, 8.0, daily_hours, work_hours > 8.0))
+                        max_hours = 8.0
+                        allowed_max_hours = self._apply_work_hours_overrun(max_hours)
+                        warning_inspectors.append((inspector_code, count, work_hours, max_hours, allowed_max_hours, daily_hours, work_hours > allowed_max_hours))
             
             # デバッグモードでない場合は警告がある検査員のみ詳細表示
             if not self.debug_mode:
                 if warning_inspectors:
                     # 多すぎると読みにくいので上位のみ表示
-                    warning_inspectors_sorted = sorted(warning_inspectors, key=lambda x: (x[5], x[2]), reverse=True)
+                    warning_inspectors_sorted = sorted(warning_inspectors, key=lambda x: (x[6], x[2]), reverse=True)
                     self.log_message(f"警告対象の検査員: {len(warning_inspectors_sorted)}名（上位10名まで表示）")
-                    for inspector_code, count, work_hours, max_hours, daily_hours, is_over in warning_inspectors_sorted[:10]:
+                    for inspector_code, count, work_hours, max_hours, allowed_max_hours, daily_hours, is_over in warning_inspectors_sorted[:10]:
                         if is_over:
-                            status = f"（超過: {work_hours - max_hours:.1f}h）"
+                            # 10%超過許容後の最大時間を超えている場合
+                            excess_overrun = work_hours - allowed_max_hours
+                            excess_base = work_hours - max_hours
+                            status = f"（10%超過超過: {excess_overrun:.1f}h, 基本超過: {excess_base:.1f}h）"
                         else:
-                            status = f"（80%超: {work_hours:.1f}h/{max_hours:.1f}h）"
-                        self.log_message(f"  {inspector_code}: {count}回 (勤務時間: {work_hours:.1f}h/{max_hours:.1f}h, 今日: {daily_hours:.1f}h){status}")
+                            status = f"（80%超: {work_hours:.1f}h/{allowed_max_hours:.1f}h, 基本: {max_hours:.1f}h）"
+                        self.log_message(f"  {inspector_code}: {count}回 (勤務時間: {work_hours:.1f}h/許容最大: {allowed_max_hours:.1f}h, 基本: {max_hours:.1f}h, 今日: {daily_hours:.1f}h){status}")
                 else:
                     self.log_message("警告対象の検査員: 0名（正常範囲内）")
             else:
@@ -7963,6 +7970,13 @@ class InspectorAssignmentManager:
                         previous_imbalance = imbalance
                         previous_std_dev = bias_correction_metrics['initial_std_deviation']
                         
+                        # 【改善】無限ループ防止: 10%超過を検出した検査員の履歴を初期化（偏り是正フェーズ全体で追跡）
+                        if not hasattr(self, '_overrun_inspector_history'):
+                            self._overrun_inspector_history = {}
+                        else:
+                            # 偏り是正フェーズ開始時に履歴をリセット
+                            self._overrun_inspector_history.clear()
+                        
                         for pass_num in range(max_passes):
                             # 【追加】各パスの開始時に、inspector_daily_assignmentsを再計算して正確な勤務時間を反映
                             # 偏り是正の段階で、複数の再割当が連続して発生すると、累積的に超過が発生する可能性があるため
@@ -8794,6 +8808,10 @@ class InspectorAssignmentManager:
                                 # 【追加】10%超過を検出した検査員から、他の検査員へ再割当を行う処理
                                 # 偏り是正の段階で既に存在していた10%超過を解消するため
                                 if overrun_inspector_codes:
+                                    # 【改善】無限ループ防止: 同じ検査員が何度も10%超過を検出された場合の追跡
+                                    if not hasattr(self, '_overrun_inspector_history'):
+                                        self._overrun_inspector_history = {}  # {inspector_code: count}
+                                    
                                     self.log_message(
                                         f"偏り是正パス{pass_num + 1}: 10%超過を検出した検査員から、他の検査員へ再割当を行います",
                                         level='warning',
@@ -8801,6 +8819,16 @@ class InspectorAssignmentManager:
                                     
                                     # 10%超過を検出した検査員のロットを探して、他の検査員へ再割当を行う
                                     for overrun_code in overrun_inspector_codes:
+                                        # 【改善】無限ループ防止: 同じ検査員が3回以上10%超過を検出された場合、スキップ
+                                        if self._overrun_inspector_history.get(overrun_code, 0) >= 3:
+                                            inspector_info_overrun_skip = inspector_master_df[inspector_master_df['#ID'] == overrun_code]
+                                            if not inspector_info_overrun_skip.empty:
+                                                overrun_name_skip = inspector_info_overrun_skip.iloc[0]['#氏名']
+                                                self.log_message(
+                                                    f"偏り是正パス{pass_num + 1}: 検査員 '{overrun_name_skip}' ({overrun_code}) は3回以上10%超過を検出されているため、再割当をスキップします（無限ループ防止）",
+                                                    level='warning',
+                                                )
+                                            continue
                                         inspector_info_overrun = inspector_master_df[inspector_master_df['#ID'] == overrun_code]
                                         if inspector_info_overrun.empty:
                                             continue
@@ -8813,14 +8841,46 @@ class InspectorAssignmentManager:
                                         if overrun_excess <= 0:
                                             continue
                                         
-                                        self.log_message(
-                                            f"偏り是正パス{pass_num + 1}: 検査員 '{overrun_name}' ({overrun_code}) の超過分 {overrun_excess:.1f}h を他の検査員へ再割当します",
-                                            level='warning',
-                                        )
-                                        
                                         # この検査員が割り当てられているロットを探す
-                                        reassignment_count_overrun = 0
+                                        # 【改善】10%超過を解消しやすいロット（時間が短い、制約が少ない）を優先的に処理するため、まずロットを収集してソート
+                                        overrun_lots = []
                                         for row_idx, row in enumerate(result_df_sorted.itertuples(index=False)):
+                                            lot_index_overrun = result_df_sorted.index[row_idx]
+                                            product_number_overrun = row[result_cols_bias_verify['品番']]
+                                            divided_time_overrun = row[result_cols_bias_verify.get('分割検査時間', -1)] if '分割検査時間' in result_cols_bias_verify else 0.0
+                                            if divided_time_overrun == -1:
+                                                divided_time_overrun = 0.0
+                                            
+                                            # この検査員が割り当てられているか確認
+                                            found_overrun = False
+                                            inspector_col_num_overrun = None
+                                            for i in range(1, 6):
+                                                inspector_col_overrun = f'検査員{i}'
+                                                inspector_col_idx_overrun = result_cols_bias_verify.get(inspector_col_overrun, -1)
+                                                if inspector_col_idx_overrun != -1:
+                                                    inspector_name_raw_overrun = row[inspector_col_idx_overrun]
+                                                    if pd.notna(inspector_name_raw_overrun) and str(inspector_name_raw_overrun).strip() != '':
+                                                        inspector_name_overrun = str(inspector_name_raw_overrun).strip()
+                                                        if '(' in inspector_name_overrun:
+                                                            inspector_name_overrun = inspector_name_overrun.split('(')[0].strip()
+                                                        
+                                                        if inspector_name_overrun == overrun_name:
+                                                            found_overrun = True
+                                                            inspector_col_num_overrun = i
+                                                            break
+                                            
+                                            if found_overrun:
+                                                row_overrun = result_df_sorted.loc[lot_index_overrun]
+                                                is_same_day_cleaning_lot_overrun = row_overrun.get('当日洗浄上がり品', False)
+                                                # 制約の少ないロット（当日洗浄上がり品でない、時間が短い）を優先
+                                                priority = 0 if is_same_day_cleaning_lot_overrun else 1  # 当日洗浄上がり品でない方が優先
+                                                overrun_lots.append((priority, divided_time_overrun, lot_index_overrun, row_idx, row, inspector_col_num_overrun))
+                                        
+                                        # 優先順位: 1) 制約が少ない（当日洗浄上がり品でない）、2) 時間が短い順
+                                        overrun_lots.sort(key=lambda x: (x[0], x[1]))
+                                        
+                                        reassignment_count_overrun = 0
+                                        for priority, divided_time_overrun, lot_index_overrun, row_idx, row, inspector_col_num_overrun in overrun_lots:
                                             lot_index_overrun = result_df_sorted.index[row_idx]
                                             product_number_overrun = row[result_cols_bias_verify['品番']]
                                             divided_time_overrun = row[result_cols_bias_verify.get('分割検査時間', -1)] if '分割検査時間' in result_cols_bias_verify else 0.0
@@ -8928,10 +8988,21 @@ class InspectorAssignmentManager:
                                             if not replacement_candidates_overrun:
                                                 continue
                                             
-                                            # 余裕のある検査員を選択（勤務時間が少ない順）
+                                            # 【改善】余裕のある検査員を選択（許容最大時間までの余裕が大きい順）
+                                            # 10%超過を解消するため、より余裕がある検査員を優先的に選択
+                                            def sort_key_candidate(x):
+                                                candidate_code = x['コード']
+                                                candidate_daily_hours = self.inspector_daily_assignments.get(candidate_code, {}).get(current_date, 0.0)
+                                                candidate_max_hours = self.get_inspector_max_hours(candidate_code, inspector_master_df)
+                                                candidate_allowed_max_hours = candidate_max_hours * (1.0 + WORK_HOURS_OVERRUN_RATE)
+                                                # 許容最大時間までの余裕
+                                                remaining_capacity = candidate_allowed_max_hours - WORK_HOURS_BUFFER - candidate_daily_hours - divided_time_overrun
+                                                # 余裕が大きい順（負の値は除外されているので、正の値のみ）
+                                                return -remaining_capacity  # 負の値でソート（大きい順）
+                                            
                                             replacement_candidates_overrun_sorted = sorted(
                                                 replacement_candidates_overrun,
-                                                key=lambda x: self.inspector_daily_assignments.get(x['コード'], {}).get(current_date, 0.0)
+                                                key=sort_key_candidate
                                             )
                                             
                                             replacement_inspector_overrun = replacement_candidates_overrun_sorted[0]
@@ -9077,6 +9148,9 @@ class InspectorAssignmentManager:
                                                     f"偏り是正パス{pass_num + 1}: 検査員 '{overrun_name}' ({overrun_code}) の10%超過が解消されました ({overrun_current_hours_after:.1f}h <= {overrun_allowed_max_hours:.1f}h - {WORK_HOURS_BUFFER:.2f}h)",
                                                     level='info',
                                                 )
+                                                # 【改善】10%超過が解消された場合、カウントをリセットして次のパスでも再割当を試みられるようにする
+                                                if overrun_code in self._overrun_inspector_history:
+                                                    self._overrun_inspector_history[overrun_code] = 0
                                                 break
                                             
                                             # 【改善】10%超過が解消されない場合、最大10件まで再割当を試みる
@@ -9085,7 +9159,23 @@ class InspectorAssignmentManager:
                                                     f"偏り是正パス{pass_num + 1}: 検査員 '{overrun_name}' ({overrun_code}) の10%超過解消のため、最大10件まで再割当を試みましたが、完全には解消されませんでした（現在: {overrun_current_hours_after:.1f}h > {overrun_allowed_max_hours:.1f}h - {WORK_HOURS_BUFFER:.2f}h）",
                                                     level='warning',
                                                 )
+                                                # 【改善】再割当を試みたが解消できなかった場合、カウントを増やす
+                                                if overrun_code not in self._overrun_inspector_history:
+                                                    self._overrun_inspector_history[overrun_code] = 0
+                                                self._overrun_inspector_history[overrun_code] += 1
                                                 break
+                                        
+                                        # 【改善】再割当を試みたが解消できなかった場合、カウントを増やす
+                                        if reassignment_count_overrun > 0:
+                                            # 最終的な超過状態を確認
+                                            overrun_final_hours = self.inspector_daily_assignments.get(overrun_code, {}).get(current_date, 0.0)
+                                            if overrun_final_hours > overrun_allowed_max_hours - WORK_HOURS_BUFFER:
+                                                # 解消されていない場合、カウントを増やす（解消された場合は既にリセット済み）
+                                                if overrun_code not in self._overrun_inspector_history or self._overrun_inspector_history[overrun_code] == 0:
+                                                    # カウントがない場合（解消されなかった場合）のみ増やす
+                                                    if overrun_code not in self._overrun_inspector_history:
+                                                        self._overrun_inspector_history[overrun_code] = 0
+                                                    self._overrun_inspector_history[overrun_code] += 1
                                         
                                         if reassignment_count_overrun > 0:
                                             self.log_message(
@@ -9299,8 +9389,14 @@ class InspectorAssignmentManager:
                                         })
                                         break
                     
-                    # 出荷予定日順にソート（FIFO維持）
-                    assigned_lots_overrun.sort(key=lambda x: self._normalize_shipping_date(x['shipping_date']))
+                    # 【改善】10%超過を解消しやすいロット（時間が短い、制約が少ない）を優先的に処理
+                    # 優先順位: 1) 制約が少ない（当日洗浄上がり品でない）、2) 時間が短い順、3) 出荷予定日順
+                    for lot_info_overrun in assigned_lots_overrun:
+                        row_series_overrun = lot_info_overrun['row']
+                        is_same_day_cleaning_lot_overrun = row_series_overrun.get('当日洗浄上がり品', False)
+                        lot_info_overrun['priority'] = 0 if is_same_day_cleaning_lot_overrun else 1  # 当日洗浄上がり品でない方が優先
+                    
+                    assigned_lots_overrun.sort(key=lambda x: (x['priority'], x['divided_time'], self._normalize_shipping_date(x['shipping_date'])))
                     
                     reassignment_count_overrun = 0
                     max_reassignments_overrun = 10  # 最大10件まで再割当を試みる
@@ -9370,7 +9466,19 @@ class InspectorAssignmentManager:
                             replacement_candidates_overrun.append((candidate_total_hours_overrun, insp_overrun, candidate_code_overrun))
                         
                         if replacement_candidates_overrun:
-                            replacement_candidates_overrun.sort(key=lambda x: x[0])  # 総勤務時間が少ない順
+                            # 【改善】余裕のある検査員を選択（許容最大時間までの余裕が大きい順）
+                            # 10%超過を解消するため、より余裕がある検査員を優先的に選択
+                            def sort_key_candidate_phase2_5(x):
+                                _, insp, code = x
+                                candidate_daily_hours = self.inspector_daily_assignments.get(code, {}).get(current_date, 0.0)
+                                candidate_max_hours = inspector_max_hours.get(code, 8.0)
+                                candidate_allowed_max_hours = candidate_max_hours * (1.0 + WORK_HOURS_OVERRUN_RATE)
+                                # 許容最大時間までの余裕
+                                remaining_capacity = candidate_allowed_max_hours - WORK_HOURS_BUFFER - candidate_daily_hours - divided_time_overrun
+                                # 余裕が大きい順（負の値は除外されているので、正の値のみ）
+                                return -remaining_capacity  # 負の値でソート（大きい順）
+                            
+                            replacement_candidates_overrun.sort(key=sort_key_candidate_phase2_5)
                             _, replacement_inspector_overrun, new_code_overrun = replacement_candidates_overrun[0]
                             
                             # 再割当を実行

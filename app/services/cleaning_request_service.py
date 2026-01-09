@@ -15,6 +15,7 @@ from loguru import logger
 
 from app.export.google_sheets_exporter_service import GoogleSheetsExporter
 from app.utils.perf import perf_timer
+from time import perf_counter
 
 # ログ分類（app_.logの視認性向上）
 logger = logger.bind(channel="SVC:CLEAN")
@@ -154,6 +155,7 @@ def _parse_remarks_multi(remarks: str) -> List[Dict[str, str]]:
 def _generate_date_range(start_date_str: str, days: int) -> List[str]:
     """
     開始日付から指定日数分の日付リストを生成
+    年をまたぐ場合、指定ロット数に達しない場合は翌年の日付も含める
     
     Args:
         start_date_str: 開始日付（MM/DD形式、例: "10/26"）
@@ -187,11 +189,17 @@ def _generate_date_range(start_date_str: str, days: int) -> List[str]:
         start_date = datetime(year, month, day)
         
         # 日付リストを生成（リスト内包表記で高速化）
-        date_list = [(start_date + timedelta(days=i)).strftime('%Y-%m-%d') for i in range(days)]
+        date_list = []
+        for i in range(days):
+            date = start_date + timedelta(days=i)
+            date_list.append(date.strftime('%Y-%m-%d'))
+        
         return date_list
     except Exception as e:
         logger.error(f"日付範囲の生成に失敗しました: {str(e)}")
         return []
+
+
 
 
 def _get_table_structure(connection):
@@ -261,6 +269,169 @@ def _get_table_structure(connection):
         return {"columns": [], "available": []}
 
 
+def _get_lots_from_access_instruction_date(connection, requests: List[Dict]) -> pd.DataFrame:
+    """
+    instruction_dateのみのリクエストを個別の日付で直接取得
+    材料識別が5のレコードのみを対象とする
+    
+    Args:
+        connection: Accessデータベース接続
+        requests: リクエストのリスト [{"instruction_date": "...", "machine": "...", "product_number": "..."}, ...]
+    
+    Returns:
+        pd.DataFrame: 取得したロットデータ
+    """
+    if not requests:
+        return pd.DataFrame()
+    
+    try:
+        table_info = _get_table_structure(connection)
+        available_columns = table_info["available"]
+        
+        if not available_columns:
+            return pd.DataFrame()
+        
+        # すべての列を通常通り取得
+        columns_str = ", ".join([f"[{col}]" for col in available_columns])
+        
+        # 各リクエストの条件を構築（個別の日付で直接取得）
+        conditions = []
+        for req in requests:
+            machine = str(req.get("machine", "")).strip()
+            instruction_date = req.get("instruction_date")
+            
+            if not instruction_date or not machine:
+                continue
+            
+            normalized_date = _normalize_instruction_date(instruction_date)
+            if not normalized_date:
+                continue
+            
+            # 個別の日付で直接取得
+            escaped_machine = machine.replace("'", "''")
+            date_str = f"#{normalized_date}#"
+            condition = f"([号機] = '{escaped_machine}' AND [指示日] = {date_str})"
+            
+            # 品番が指定されている場合は追加
+            if req.get("product_number") and "品番" in available_columns:
+                product_number = str(req.get("product_number", "")).strip()
+                if product_number:
+                    escaped_product = product_number.replace("'", "''")
+                    condition = f"({condition} AND [品番] = '{escaped_product}')"
+            
+            conditions.append(condition)
+        
+        if not conditions:
+            return pd.DataFrame()
+        
+        # OR条件で結合
+        where_clause = " OR ".join(conditions)
+        
+        # 材料識別でフィルタリング（5のみを対象）
+        if "材料識別" in available_columns:
+            where_clause = f"({where_clause}) AND [材料識別] = 5"
+        
+        query = f"""
+        SELECT {columns_str}
+        FROM [t_現品票履歴]
+        WHERE {where_clause}
+        """
+        
+        start_time = time.time()
+        cursor = connection.cursor()
+        
+        t0 = perf_counter()
+        cursor.execute(query)
+        execute_total_ms = (perf_counter() - t0) * 1000.0
+        logger.bind(channel="PERF").debug("PERF {}: {:.1f} ms", "cleaning.access.instruction_date.cursor_execute", execute_total_ms)
+        
+        # 列名を取得
+        column_names = [desc[0] for desc in cursor.description]
+        
+        # データを取得（すべて文字列として取得）
+        t1 = perf_counter()
+        rows = cursor.fetchall()
+        fetch_total_ms = (perf_counter() - t1) * 1000.0
+        logger.bind(channel="PERF").debug("PERF {}: {:.1f} ms", "cleaning.access.instruction_date.fetchall", fetch_total_ms)
+        
+        # DataFrameに変換
+        if rows:
+            # 各行を辞書に変換（すべて文字列として扱う）
+            data = []
+            for row in rows:
+                row_dict = {}
+                for idx, col_name in enumerate(column_names):
+                    value = row[idx]
+                    if value is None:
+                        row_dict[col_name] = None
+                    elif isinstance(value, (datetime, pd.Timestamp)):
+                        row_dict[col_name] = str(value)
+                    elif isinstance(value, str):
+                        row_dict[col_name] = value
+                    else:
+                        row_dict[col_name] = str(value)
+                data.append(row_dict)
+            
+            # DataFrameを作成（日付の自動パースを無効化）
+            lots_df = pd.DataFrame(data, dtype=object)
+        else:
+            lots_df = pd.DataFrame(columns=column_names)
+        
+        elapsed_time = time.time() - start_time
+        logger.info(f"instruction_date指定のクエリ完了: {len(lots_df)}件のロットを取得 ({elapsed_time:.2f}秒)")
+        
+        # 指示日列が存在する場合、日付文字列から不要な文字を除去してからパース
+        if '指示日' in lots_df.columns:
+            def clean_date_string(date_val):
+                """日付文字列から不要な文字（「（完）」など）を除去"""
+                if pd.isna(date_val) or date_val is None or date_val == '':
+                    return None
+                date_str = str(date_val)
+                # 「（完）」「（完了）」などの文字を除去
+                date_str = re.sub(r'[（(].*?[）)]', '', date_str)
+                # 前後の空白を除去
+                date_str = date_str.strip()
+                return date_str if date_str else None
+            
+            # 日付文字列をクリーニング
+            lots_df['指示日'] = lots_df['指示日'].apply(clean_date_string)
+            
+            # パース処理: 明示的なフォーマット指定で変換を試みる
+            def parse_date_safe(date_str):
+                """日付文字列を安全にパースする"""
+                if date_str is None or pd.isna(date_str):
+                    return pd.NaT
+                try:
+                    # まず明示的なフォーマットで試す
+                    from datetime import datetime
+                    # YYYY-MM-DD HH:MM:SS 形式
+                    if isinstance(date_str, str) and len(date_str) >= 10:
+                        # 日付部分のみを抽出（YYYY-MM-DD）
+                        date_part = date_str[:10]
+                        return pd.to_datetime(date_part, format='%Y-%m-%d', errors='coerce')
+                    # フォールバック: 通常のパース
+                    return pd.to_datetime(date_str, errors='coerce')
+                except Exception:
+                    return pd.NaT
+            
+            lots_df['指示日'] = lots_df['指示日'].apply(parse_date_safe)
+        
+        # 現在工程名列を空欄として追加（ロット情報に含めないため）
+        if '現在工程名' not in lots_df.columns:
+            lots_df['現在工程名'] = ''
+        
+        return lots_df
+    except Exception as query_error:
+        logger.error(f"instruction_date指定のクエリ実行中にエラーが発生しました: {str(query_error)}")
+        try:
+            logger.error(f"クエリ: {query[:500]}...")  # クエリの最初の500文字をログに出力
+        except Exception:
+            pass
+        import traceback
+        logger.error(traceback.format_exc())
+        return pd.DataFrame()
+
+
 def _get_lots_from_access_batch(connection, requests: List[Dict]) -> pd.DataFrame:
     """
     複数のリクエストをバッチ処理でまとめて取得（高速化版）
@@ -322,6 +493,10 @@ def _get_lots_from_access_batch(connection, requests: List[Dict]) -> pd.DataFram
                 continue
 
             all_dates_set.update(normalized_dates)
+            
+            # デバッグ: リクエストごとの指示日をログ出力（品番指定時）
+            if req.get("product_number") == "1J841R3-4":
+                logger.debug(f"リクエスト処理: 品番={req.get('product_number')}, 号機={machine}, 指示日候補={date_candidates}, 正規化後={normalized_dates}")
 
             if not machine:
                 no_machine_reqs.append(req)
@@ -334,6 +509,7 @@ def _get_lots_from_access_batch(connection, requests: List[Dict]) -> pd.DataFram
         # Accessは巨大なOR条件で極端に遅くなることがあるため、
         # 号機IN + 指示日範囲の「包絡条件」で広めに取得して、後段（呼び出し側）で厳密に絞る。
         # ※呼び出し側で _指示日_normalized / 号機 で必ず絞り込んでいるため、結果は不変。
+        # instruction_dateが指定されている場合でも、範囲指定で取得し、後段のフィルタリングで厳密に絞り込む
         use_simple_range_query = (
             bool(machine_dates)
             and not no_machine_reqs
@@ -354,7 +530,20 @@ def _get_lots_from_access_batch(connection, requests: List[Dict]) -> pd.DataFram
                 escaped = str(machine).replace("'", "''")
                 escaped_machines.append(f"'{escaped}'")
             machine_literals = ", ".join(escaped_machines)
-            where_clause = f"[号機] IN ({machine_literals}) AND [指示日] >= #{dates_sorted[0]}# AND [指示日] <= #{dates_sorted[-1]}#"
+            # Accessの日付比較では、<= #2026-01-05# は 2026-01-05 00:00:00 までしか含まないため、
+            # 2026-01-05 のロットが取得されない可能性がある。
+            # そのため、終了日を1日後にして < #2026-01-06# とする
+            from datetime import datetime, timedelta
+            try:
+                end_date = datetime.strptime(dates_sorted[-1], "%Y-%m-%d")
+                end_date_next = (end_date + timedelta(days=1)).strftime("%Y-%m-%d")
+                where_clause = f"[号機] IN ({machine_literals}) AND [指示日] >= #{dates_sorted[0]}# AND [指示日] < #{end_date_next}#"
+            except Exception:
+                # 日付パースに失敗した場合は従来通り
+                where_clause = f"[号機] IN ({machine_literals}) AND [指示日] >= #{dates_sorted[0]}# AND [指示日] <= #{dates_sorted[-1]}#"
+            # デバッグ: バッチクエリの日付範囲をログ出力（品番指定時）
+            if any(req.get("product_number") == "1J841R3-4" for req in requests):
+                logger.info(f"バッチクエリ日付範囲: {dates_sorted[0]} ～ {dates_sorted[-1]} (全指示日: {sorted(all_dates_set)})")
 
             # 材料識別でフィルタリング（5のみを対象）
             if "材料識別" in available_columns:
@@ -998,11 +1187,13 @@ def get_cleaning_lots(
         idx_指示日 = col_idx_map.get("指示日", -1)
         idx_号機 = col_idx_map.get("号機", -1)
         idx_詳細備考 = col_idx_map.get("詳細・備考", -1)
+        idx_品番 = col_idx_map.get("品番", -1)
         
         for i, row in enumerate(today_data, 1):
             instruction_date = row[idx_指示日].strip() if idx_指示日 >= 0 and len(row) > idx_指示日 and row[idx_指示日] else ""
             machine = row[idx_号機].strip() if idx_号機 >= 0 and len(row) > idx_号機 and row[idx_号機] else ""
             remarks = row[idx_詳細備考].strip() if idx_詳細備考 >= 0 and len(row) > idx_詳細備考 and row[idx_詳細備考] else ""
+            product_number = row[idx_品番].strip() if idx_品番 >= 0 and len(row) > idx_品番 and row[idx_品番] else ""
             
             requests: List[Dict[str, object]] = []
             
@@ -1010,20 +1201,34 @@ def get_cleaning_lots(
             if instruction_date and machine:
                 normalized = _normalize_instruction_date(instruction_date)
                 if normalized:
-                    requests.append({
+                    request_dict = {
                         "instruction_date": normalized,
                         "machine": machine,
-                    })
+                    }
+                    # 品番が指定されている場合は追加
+                    if product_number:
+                        request_dict["product_number"] = product_number
+                    requests.append(request_dict)
+                    # デバッグ: リクエスト作成をログ出力
+                    log(f"  行 {i}: リクエスト作成（品番: {product_number}, 号機: {machine}, 指示日: {instruction_date} → {normalized}）")
+                else:
+                    log(f"  行 {i}: 指示日の正規化に失敗（指示日: {instruction_date}）")
             
             # 指示日または号機が欠落している場合、詳細・備考を解析
             elif remarks:
                 parsed_list = _parse_remarks_multi(remarks)
                 for parsed in parsed_list:
                     date_list = _generate_date_range(parsed['start_date'], parsed['days'])
-                    requests.append({
+                    request_dict = {
                         "date_list": date_list,
                         "machine": parsed['machine'],
-                    })
+                        "required_lots": parsed['days'],  # 必要なロット数を保存
+                        "original_start_date": parsed['start_date'],  # 元の開始日付を保存
+                    }
+                    # 品番が指定されている場合は追加
+                    if product_number:
+                        request_dict["product_number"] = product_number
+                    requests.append(request_dict)
             
             for request in requests:
                 batch_requests.append(request)
@@ -1033,57 +1238,275 @@ def get_cleaning_lots(
                     "request": request,
                 })
         
+        # リクエストを2つのグループに分ける：
+        # 1. instruction_dateのみのリクエスト（個別の日付で直接取得）
+        # 2. date_listのリクエスト（範囲指定で取得）
+        instruction_date_requests = []
+        date_list_requests = []
+        instruction_date_row_info_list = []
+        date_list_row_info_list = []
+        
+        for row_info in row_info_list:
+            req = row_info["request"]
+            # instruction_dateのみでdate_listがない場合は、個別処理
+            if req.get("instruction_date") and not req.get("date_list"):
+                instruction_date_requests.append(req)
+                instruction_date_row_info_list.append(row_info)
+            else:
+                # date_listがある場合は、範囲指定で処理
+                date_list_requests.append(req)
+                date_list_row_info_list.append(row_info)
+        
         # バッチ処理で一括取得
         all_lots = []
-        if batch_requests:
-            log(f"バッチ処理でロットを取得中... ({len(batch_requests)}件のリクエスト)")
-            with perf_timer(logger, "cleaning.access.batch_lots"):
-                batch_lots_df = _get_lots_from_access_batch(connection, batch_requests)
-            log(f"バッチ処理で取得したロット数: {len(batch_lots_df)}件")
-            
-            if not batch_lots_df.empty:
+        instruction_date_lots_df = pd.DataFrame()
+        date_list_lots_df = pd.DataFrame()
+        
+        # 1. instruction_dateのみのリクエストを個別の日付で取得
+        if instruction_date_requests:
+            log(f"instruction_date指定のリクエストを処理中... ({len(instruction_date_requests)}件)")
+            with perf_timer(logger, "cleaning.access.instruction_date_lots"):
+                instruction_date_lots_df = _get_lots_from_access_instruction_date(connection, instruction_date_requests)
+            log(f"instruction_date指定で取得したロット数: {len(instruction_date_lots_df)}件")
+            if not instruction_date_lots_df.empty:
                 # 指示日列を正規化（YYYY-MM-DD形式に統一）
-                if "指示日" in batch_lots_df.columns:
-                    batch_lots_df['_指示日_normalized'] = batch_lots_df['指示日'].apply(_normalize_instruction_date)
+                if "指示日" in instruction_date_lots_df.columns:
+                    instruction_date_lots_df['_指示日_normalized'] = instruction_date_lots_df['指示日'].apply(_normalize_instruction_date)
+        
+        # 2. date_listのリクエストを範囲指定で取得
+        if date_list_requests:
+            log(f"date_list指定のリクエストを処理中... ({len(date_list_requests)}件)")
+            with perf_timer(logger, "cleaning.access.batch_lots"):
+                date_list_lots_df = _get_lots_from_access_batch(connection, date_list_requests)
+            log(f"date_list指定で取得したロット数: {len(date_list_lots_df)}件")
+            if not date_list_lots_df.empty:
+                # 指示日列を正規化（YYYY-MM-DD形式に統一）
+                if "指示日" in date_list_lots_df.columns:
+                    date_list_lots_df['_指示日_normalized'] = date_list_lots_df['指示日'].apply(_normalize_instruction_date)
+        
+        # デバッグ: 取得したロットの指示日を確認
+        if not instruction_date_lots_df.empty:
+            if "指示日" in instruction_date_lots_df.columns and "品番" in instruction_date_lots_df.columns and "号機" in instruction_date_lots_df.columns:
+                for product in instruction_date_lots_df["品番"].dropna().unique():
+                    for machine in instruction_date_lots_df[instruction_date_lots_df["品番"] == product]["号機"].dropna().unique():
+                        mask = (instruction_date_lots_df["品番"] == product) & (instruction_date_lots_df["号機"] == machine)
+                        if mask.any():
+                            dates = instruction_date_lots_df[mask]["_指示日_normalized"].dropna().unique().tolist()
+                            log(f"  デバッグ: instruction_date指定で取得したロット（品番 '{product}', 号機 '{machine}'）の指示日: {sorted(dates)}")
+        
+        if not date_list_lots_df.empty:
+            # デバッグ: date_list指定で取得した全ロットの指示日を確認
+            all_dates = date_list_lots_df["_指示日_normalized"].dropna().unique().tolist()
+            log(f"  デバッグ: date_list指定で取得した全ロットの指示日: {sorted(all_dates)}")
+            if "品番" in date_list_lots_df.columns and "号機" in date_list_lots_df.columns:
+                # 品番と号機の組み合わせごとの指示日を確認
+                for product in date_list_lots_df["品番"].dropna().unique():
+                    for machine in date_list_lots_df[date_list_lots_df["品番"] == product]["号機"].dropna().unique():
+                        mask = (date_list_lots_df["品番"] == product) & (date_list_lots_df["号機"] == machine)
+                        if mask.any():
+                            dates = date_list_lots_df[mask]["_指示日_normalized"].dropna().unique().tolist()
+                            log(f"  デバッグ: date_list指定で取得したロット（品番 '{product}', 号機 '{machine}'）の指示日: {sorted(dates)}")
+        
+        # 各リクエストに対応するロットを分離
+        filtered_count = 0
+        for row_info in row_info_list:
+            req = row_info["request"]
+            
+            # instruction_dateのみのリクエストは、instruction_date_lots_dfから直接フィルタリング
+            # date_listのリクエストは、date_list_lots_dfからフィルタリング
+            if req.get("instruction_date") and not req.get("date_list"):
+                # instruction_dateのみのリクエスト
+                filtered_df = instruction_date_lots_df.copy() if not instruction_date_lots_df.empty else pd.DataFrame()
+            else:
+                # date_listのリクエスト
+                filtered_df = date_list_lots_df.copy() if not date_list_lots_df.empty else pd.DataFrame()
+            
+            if filtered_df.empty:
+                # ロットが取得できていない場合はスキップ
+                if req.get("product_number"):
+                    product_debug = req.get("product_number", "")
+                    machine_debug = req.get("machine", "不明")
+                    date_debug = req.get("instruction_date") or (req.get("date_list", [])[0] if req.get("date_list") else "N/A")
+                    log(f"  リクエスト {row_info['index']}: ⚠️ フィルタリング結果が0件です（品番: {product_debug}, 号機: {machine_debug}, 指示日: {date_debug}）")
+                continue
+            
+            mask = pd.Series([True] * len(filtered_df), index=filtered_df.index)
+            
+            # 品番が指定されている場合は、品番でフィルタリング
+            if req.get("product_number") and "品番" in filtered_df.columns:
+                product_number_req = req["product_number"].strip()
+                if product_number_req:
+                    mask = mask & (filtered_df['品番'] == product_number_req)
+            
+            # 指示日が指定されている場合は、指示日でフィルタリング
+            if req.get("instruction_date"):
+                normalized_req_date = _normalize_instruction_date(req["instruction_date"])
+                if normalized_req_date:
+                    mask = mask & (filtered_df['_指示日_normalized'] == normalized_req_date)
+            
+            # 号機が指定されている場合は、号機でフィルタリング（品番が指定されている場合でも必須）
+            if req.get("machine") and "号機" in filtered_df.columns:
+                mask = mask & (filtered_df['号機'] == req["machine"])
+            
+            if req.get("date_list"):
+                normalized_date_list = [_normalize_instruction_date(d) for d in req["date_list"]]
+                normalized_date_set = {d for d in normalized_date_list if d}
+                if normalized_date_set:
+                    mask = mask & filtered_df['_指示日_normalized'].isin(normalized_date_set)
+            
+            filtered_df = filtered_df[mask].copy()
+            filtered_df = filtered_df.drop(columns=['_指示日_normalized'], errors='ignore')
+            
+            # デバッグ: フィルタリング結果をログ出力（品番指定時）
+            if req.get("product_number"):
+                product_debug = req.get("product_number", "")
+                machine_debug = req.get("machine", "不明")
+                date_debug = req.get("instruction_date") or (req.get("date_list", [])[0] if req.get("date_list") else "N/A")
+                log(f"  リクエスト {row_info['index']}: フィルタリング結果（品番: {product_debug}, 号機: {machine_debug}, 指示日: {date_debug}）: {len(filtered_df)}件")
+                if len(filtered_df) > 0 and "生産ロットID" in filtered_df.columns:
+                    lot_ids = filtered_df["生産ロットID"].dropna().unique().tolist()
+                    log(f"  リクエスト {row_info['index']}: 取得した生産ロットID: {lot_ids}")
+                elif len(filtered_df) == 0:
+                    log(f"  リクエスト {row_info['index']}: ⚠️ フィルタリング結果が0件です（品番: {product_debug}, 号機: {machine_debug}, 指示日: {date_debug}）")
+            
+            # 指定されたロット数に達しない場合、翌年のロットを追加で取得
+            required_lots = req.get("required_lots")
+            if required_lots and len(filtered_df) < required_lots:
+                missing_lots = required_lots - len(filtered_df)
+                machine = req.get("machine")
                 
-                # 各リクエストに対応するロットを分離
-                filtered_count = 0
-                for row_info in row_info_list:
-                    req = row_info["request"]
-                    filtered_df = batch_lots_df
-                    
-                    mask = pd.Series([True] * len(filtered_df), index=filtered_df.index)
-                    
-                    if req.get("instruction_date"):
-                        normalized_req_date = _normalize_instruction_date(req["instruction_date"])
-                        if normalized_req_date:
-                            mask = mask & (filtered_df['_指示日_normalized'] == normalized_req_date)
-                    
-                    if req.get("machine") and "号機" in filtered_df.columns:
-                        mask = mask & (filtered_df['号機'] == req["machine"])
-                    
-                    if req.get("date_list"):
-                        normalized_date_list = [_normalize_instruction_date(d) for d in req["date_list"]]
-                        normalized_date_set = {d for d in normalized_date_list if d}
-                        if normalized_date_set:
-                            mask = mask & filtered_df['_指示日_normalized'].isin(normalized_date_set)
-                    
-                    filtered_df = filtered_df[mask].copy()
-                    filtered_df = filtered_df.drop(columns=['_指示日_normalized'], errors='ignore')
-                    
-                    if not filtered_df.empty:
+                if machine:
+                    try:
+                                # 元のリクエストの開始日付から次の年の1月1日を計算
+                                original_start_date = req.get("original_start_date")
+                                next_year = None
+                                
+                                if original_start_date:
+                                    # original_start_dateがdatetimeオブジェクトまたは文字列の場合に対応
+                                    if isinstance(original_start_date, str):
+                                        try:
+                                            # まず '%Y-%m-%d' 形式で試す
+                                            original_start = datetime.strptime(original_start_date, '%Y-%m-%d')
+                                            next_year = original_start.year + 1
+                                        except ValueError:
+                                            try:
+                                                # 'MM/DD' 形式の場合、_generate_date_rangeと同じロジックで年を決定
+                                                if '/' in original_start_date:
+                                                    month, day = map(int, original_start_date.split('/'))
+                                                    now = datetime.now()
+                                                    # 12月の日付が現在の月（1月など）より前の場合は、前年として解釈
+                                                    if month == 12 and now.month < 12:
+                                                        year = now.year - 1
+                                                    else:
+                                                        year = now.year
+                                                    original_start = datetime(year, month, day)
+                                                    next_year = original_start.year + 1
+                                                else:
+                                                    # その他の形式の場合は、現在の年から次の年を計算
+                                                    now = datetime.now()
+                                                    next_year = now.year + 1
+                                            except (ValueError, AttributeError) as e:
+                                                log(f"  リクエスト {row_info['index']}: original_start_dateのパースに失敗しました: {original_start_date}, エラー: {e}")
+                                                # エラーが発生した場合は、現在の年から次の年を計算
+                                                now = datetime.now()
+                                                next_year = now.year + 1
+                                    else:
+                                        # datetimeオブジェクトの場合
+                                        original_start = original_start_date
+                                        next_year = original_start.year + 1
+                                else:
+                                    # original_start_dateがない場合は、現在の年から次の年を計算
+                                    now = datetime.now()
+                                    next_year = now.year + 1
+                                
+                                if next_year is None:
+                                    # next_yearが設定されていない場合は、現在の年から次の年を計算
+                                    now = datetime.now()
+                                    next_year = now.year + 1
+                                
+                                next_year_start = datetime(next_year, 1, 1)
+                                next_year_end = datetime(next_year, 12, 31)
+                                
+                                # 翌年の1月1日から12月31日までの日付リストを生成（範囲指定用）
+                                # 範囲指定で取得するため、最初と最後の日付だけを指定すれば良いが、
+                                # 中間の日付も含めることで確実に取得できるようにする
+                                next_year_date_list = []
+                                current_date = next_year_start
+                                # 翌年の1月1日から12月31日までの全365日を生成
+                                while current_date <= next_year_end:
+                                    next_year_date_list.append(current_date.strftime('%Y-%m-%d'))
+                                    current_date += timedelta(days=1)
+                                
+                                # 翌年のロットを取得
+                                next_year_req = {
+                                    "date_list": next_year_date_list,
+                                    "machine": machine,
+                                }
+                                # 品番が指定されている場合は追加
+                                if req.get("product_number"):
+                                    next_year_req["product_number"] = req["product_number"]
+                                next_year_lots_df = _get_lots_from_access_batch(connection, [next_year_req])
+                                
+                                if not next_year_lots_df.empty and "指示日" in next_year_lots_df.columns:
+                                    # 指示日列を正規化
+                                    next_year_lots_df['_指示日_normalized'] = next_year_lots_df['指示日'].apply(_normalize_instruction_date)
+                                    
+                                    # 品番、号機、日付でフィルタリング
+                                    next_year_mask = pd.Series([True] * len(next_year_lots_df), index=next_year_lots_df.index)
+                                    
+                                    # 品番が指定されている場合は、品番でフィルタリング
+                                    if req.get("product_number") and "品番" in next_year_lots_df.columns:
+                                        product_number_req = req["product_number"].strip()
+                                        if product_number_req:
+                                            next_year_mask = next_year_mask & (next_year_lots_df['品番'] == product_number_req)
+                                    
+                                    # 号機が指定されている場合は、号機でフィルタリング（品番が指定されている場合でも必須）
+                                    if "号機" in next_year_lots_df.columns:
+                                        next_year_mask = next_year_mask & (next_year_lots_df['号機'] == machine)
+                                    
+                                    # 翌年の1月1日以降であることを確認
+                                    next_year_start_normalized = _normalize_instruction_date(next_year_start.strftime('%Y-%m-%d'))
+                                    if next_year_start_normalized:
+                                        next_year_mask = next_year_mask & (next_year_lots_df['_指示日_normalized'] >= next_year_start_normalized)
+                                    
+                                    next_year_filtered_df = next_year_lots_df[next_year_mask].copy()
+                                    
+                                    if not next_year_filtered_df.empty:
+                                        # 指示日が古い順にソートして、必要な数だけ取得
+                                        next_year_filtered_df = next_year_filtered_df.sort_values(by="指示日").head(missing_lots)
+                                        next_year_filtered_df = next_year_filtered_df.drop(columns=['_指示日_normalized'], errors='ignore')
+                                        
+                                        filtered_df = pd.concat([filtered_df, next_year_filtered_df], ignore_index=True)
+                                        
+                                        # 取得ロット数がまだ不足している場合、警告を出力
+                                        if len(filtered_df) < required_lots:
+                                            log(f"  リクエスト {row_info['index']}: ⚠️ 警告: ロット数がまだ不足しています（取得: {len(filtered_df)}件 / 必要: {required_lots}件、号機: {machine}）")
+                    except Exception as e:
+                        log(f"  リクエスト {row_info['index']}: 翌年のロット取得処理中にエラーが発生しました: {e}")
+                        # エラーが発生しても処理を続行
+            
+            if not filtered_df.empty:
                         all_lots.append(filtered_df)
                         filtered_count += len(filtered_df)
-                        log(f"  リクエスト {row_info['index']}: {len(filtered_df)}件のロットを追加（累計: {filtered_count}件）")
-                
-                log(f"通常の在庫ロット（洗浄二次処理依頼）: {filtered_count}件をall_lotsに追加しました")
-            else:
-                log("バッチ処理で取得したロットが空です")
+                        machine_info = req.get("machine", "不明")
+                        required_info = f" / 必要: {req.get('required_lots', 'N/A')}件" if req.get("required_lots") else ""
+                        log(f"  リクエスト {row_info['index']}: {len(filtered_df)}件のロットを追加（号機: {machine_info}{required_info}, 累計: {filtered_count}件）")
+                        
+                        # 取得ロット数が不足している場合、警告を出力
+                        if req.get("required_lots") and len(filtered_df) < req.get("required_lots"):
+                            log(f"  リクエスト {row_info['index']}: ⚠️ 警告: 最終的にロット数が不足しています（取得: {len(filtered_df)}件 / 必要: {req.get('required_lots')}件、号機: {machine_info}）")
+        
+        if filtered_count > 0:
+            log(f"通常の在庫ロット（洗浄二次処理依頼）: {filtered_count}件をall_lotsに追加しました")
+        elif not instruction_date_lots_df.empty or not date_list_lots_df.empty:
+            log("バッチ処理で取得したロットが空です")
         else:
             log("バッチリクエストが空のため、通常の在庫ロットは取得されませんでした")
         
         # 洗浄指示からもロットを取得
         # Googleスプレッドシートの洗浄指示から取得したデータをそのままロットとして使用
+        # ===== 洗浄指示（GOOGLE_SHEETS_URL_CLEANING_INSTRUCTIONS）の処理 =====
+        # この部分は洗浄指示専用の処理で、original_start_dateのパース処理は含まれません
         # t_現品票履歴からの取得は行わない（生産ロットIDと現在工程名は未記載）
         if cleaning_instructions:
             log(f"洗浄指示からロットを取得中... ({len(cleaning_instructions)}件の指示)")
@@ -1132,7 +1555,11 @@ def get_cleaning_lots(
         if all_lots:
             log(f"all_lotsに含まれるDataFrame数: {len(all_lots)}")
             for idx, df in enumerate(all_lots):
-                log(f"  DataFrame {idx+1}: {len(df)}件（生産ロットIDあり: {(df['生産ロットID'].notna() & (df['生産ロットID'] != '')).sum() if '生産ロットID' in df.columns else 0}件）")
+                machine_info = ""
+                if '号機' in df.columns:
+                    machines = df['号機'].unique()
+                    machine_info = f", 号機: {', '.join(map(str, machines[:3]))}" + (f" 他{len(machines)-3}件" if len(machines) > 3 else "")
+                log(f"  DataFrame {idx+1}: {len(df)}件（生産ロットIDあり: {(df['生産ロットID'].notna() & (df['生産ロットID'] != '')).sum() if '生産ロットID' in df.columns else 0}件{machine_info}）")
             
             final_lots_df = pd.concat(all_lots, ignore_index=True)
             log(f"結合後のロット数: {len(final_lots_df)}件")
@@ -1151,7 +1578,10 @@ def get_cleaning_lots(
                 log(f"重複除去前: 生産ロットIDあり={len(has_lot_id_df)}件, 生産ロットIDなし={len(no_lot_id_df)}件")
 
                 if not has_lot_id_df.empty:
+                    before_has_lot_id_count = len(has_lot_id_df)
                     has_lot_id_df = has_lot_id_df.drop_duplicates(subset=['生産ロットID'], keep='first')
+                    if before_has_lot_id_count != len(has_lot_id_df):
+                        log(f"重複除去: 生産ロットIDありのロット {before_has_lot_id_count}件 → {len(has_lot_id_df)}件（{before_has_lot_id_count - len(has_lot_id_df)}件の重複を除去）")
 
                 if not no_lot_id_df.empty:
                     subset_cols = ['品番', '号機']
@@ -1207,7 +1637,12 @@ def get_cleaning_lots(
                     final_lots_df = pd.DataFrame()
 
                 if before_count != len(final_lots_df):
-                    log(f"重複を除去: {before_count}件 → {len(final_lots_df)}件")
+                    removed_count = before_count - len(final_lots_df)
+                    log(f"重複を除去: {before_count}件 → {len(final_lots_df)}件（{removed_count}件の重複を除去）")
+                    # 重複除去の詳細をログ出力（号機別）
+                    if '号機' in final_lots_df.columns:
+                        machine_counts = final_lots_df['号機'].value_counts()
+                        log(f"重複除去後の号機別ロット数: {dict(machine_counts)}")
                 else:
                     log(f"重複なし: {before_count}件")
             
@@ -1223,6 +1658,12 @@ def get_cleaning_lots(
             )
             
             log(f"洗浄二次処理依頼から {len(final_lots_df)}件のロットを取得しました（重複除去後）")
+            
+            # 最終結果の号機別ロット数をログ出力（デバッグ用）
+            if '号機' in final_lots_df.columns:
+                machine_final_counts = final_lots_df['号機'].value_counts().to_dict()
+                log(f"最終結果の号機別ロット数: {machine_final_counts}")
+            
             log(f"出荷予定日: 全て「当日洗浄上がり品」に設定しました")
             return final_lots_df
         else:
