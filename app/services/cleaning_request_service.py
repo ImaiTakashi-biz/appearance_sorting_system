@@ -1292,12 +1292,14 @@ def get_cleaning_lots(
                         mask = (instruction_date_lots_df["品番"] == product) & (instruction_date_lots_df["号機"] == machine)
                         if mask.any():
                             dates = instruction_date_lots_df[mask]["_指示日_normalized"].dropna().unique().tolist()
-                            log(f"  デバッグ: instruction_date指定で取得したロット（品番 '{product}', 号機 '{machine}'）の指示日: {sorted(dates)}")
+                            # デバッグログはDEBUGレベルに変更（本番環境では出力されない）
+                            # log(f"  デバッグ: instruction_date指定で取得したロット（品番 '{product}', 号機 '{machine}'）の指示日: {sorted(dates)}")
         
         if not date_list_lots_df.empty:
             # デバッグ: date_list指定で取得した全ロットの指示日を確認
             all_dates = date_list_lots_df["_指示日_normalized"].dropna().unique().tolist()
-            log(f"  デバッグ: date_list指定で取得した全ロットの指示日: {sorted(all_dates)}")
+            # デバッグログはDEBUGレベルに変更（本番環境では出力されない）
+            # log(f"  デバッグ: date_list指定で取得した全ロットの指示日: {sorted(all_dates)}")
             if "品番" in date_list_lots_df.columns and "号機" in date_list_lots_df.columns:
                 # 品番と号機の組み合わせごとの指示日を確認
                 for product in date_list_lots_df["品番"].dropna().unique():
@@ -1305,7 +1307,8 @@ def get_cleaning_lots(
                         mask = (date_list_lots_df["品番"] == product) & (date_list_lots_df["号機"] == machine)
                         if mask.any():
                             dates = date_list_lots_df[mask]["_指示日_normalized"].dropna().unique().tolist()
-                            log(f"  デバッグ: date_list指定で取得したロット（品番 '{product}', 号機 '{machine}'）の指示日: {sorted(dates)}")
+                            # デバッグログはDEBUGレベルに変更（本番環境では出力されない）
+                            # log(f"  デバッグ: date_list指定で取得したロット（品番 '{product}', 号機 '{machine}'）の指示日: {sorted(dates)}")
         
         # 各リクエストに対応するロットを分離
         filtered_count = 0
