@@ -413,6 +413,10 @@ class ChatNotificationService:
             # 指示日（yyyy/mm/dd形式）
             instruction_date = getattr(row, '指示日', '')
             instruction_date_str = self._format_date_value(instruction_date, default="未設定")
+
+            # 号機
+            machine_no = getattr(row, '号機', '')
+            machine_no_str = str(machine_no) if pd.notna(machine_no) and str(machine_no).strip() else "未設定"
             
             # 現在工程
             current_process = getattr(row, '現在工程名', '')
@@ -425,6 +429,7 @@ class ChatNotificationService:
             message_parts.append(f"品名：{product_name_str}\n")
             message_parts.append(f"生産ロットID：{lot_id_str}\n")
             message_parts.append(f"指示日：{instruction_date_str}\n")
+            message_parts.append(f"号機：{machine_no_str}\n")
             message_parts.append(f"現在工程は【{current_process_str}】です\n")
         
         message = "".join(message_parts)
