@@ -1988,6 +1988,9 @@ class InspectorAssignmentManager:
             
             self.same_day_same_name_relaxation_attempts.clear()
             self.logged_vacation_messages.clear()
+            # 【高速化】同一実行内の参照をキャッシュ（結果は変えない）
+            self._skill_rows_by_product_cache = {}
+            self._new_team_inspectors_cache = None
             # 【高速化】検査員マスタのインデックスを構築
             with perf_timer(loguru_logger, "inspector_assignment.manager.build_inspector_index"):
                 self._build_inspector_index(inspector_master_df)
@@ -3462,6 +3465,14 @@ class InspectorAssignmentManager:
             # 最終KPI（通常は簡易、デバッグ時は詳細）
             with perf_timer(loguru_logger, "inspector_assignment.manager.print_detailed_kpi"):
                 self.print_detailed_kpi_statistics(result_df, inspector_master_df, skill_master_df)
+            self._log_utilization_summary(
+                result_df,
+                inspector_master_df,
+                skill_master_df,
+                process_master_df,
+                inspection_target_keywords,
+            )
+            self._log_exception_lot_summary(result_df)
             
             if '_base_candidates' in result_df.columns:
                 result_df = result_df.drop(columns=['_base_candidates'])
@@ -3662,7 +3673,11 @@ class InspectorAssignmentManager:
                         self.log_message(f"先行検査品・当日洗浄品: 品番 '{product_number}' の工程番号を '{inferred_process}' に設定しました（スキルマスタ検索用）", debug=True)
             
             # 新規品対応チームメンバーのコードリストを取得（優先度調整用）
-            new_team_inspectors = self.get_new_product_team_inspectors(inspector_master_df)
+            new_team_cache = getattr(self, "_new_team_inspectors_cache", None)
+            if new_team_cache is None:
+                new_team_cache = self.get_new_product_team_inspectors(inspector_master_df)
+                self._new_team_inspectors_cache = new_team_cache
+            new_team_inspectors = new_team_cache
             new_team_codes = {insp['コード'] for insp in new_team_inspectors}
             
             # デバッグ情報を出力
@@ -3672,7 +3687,14 @@ class InspectorAssignmentManager:
                 self.log_message(f"新規品対応チームメンバー（優先度調整対象）: {sorted(new_team_codes)}", debug=True)
             
             # スキルマスタから該当する品番の行を取得（完全一致のみ）
-            skill_rows = skill_master_df[skill_master_df.iloc[:, 0] == product_number]
+            skill_rows = None
+            skill_cache = getattr(self, "_skill_rows_by_product_cache", None)
+            if isinstance(skill_cache, dict):
+                skill_rows = skill_cache.get(product_number)
+            if skill_rows is None:
+                skill_rows = skill_master_df[skill_master_df.iloc[:, 0] == product_number]
+                if isinstance(skill_cache, dict):
+                    skill_cache[product_number] = skill_rows
             
             if skill_rows.empty:
                 self.log_message(f"品番 '{product_number}' がスキルマスタに見つかりません", debug=True)
@@ -14742,13 +14764,11 @@ class InspectorAssignmentManager:
 
                 fixed_inspector_names = self._collect_fixed_inspector_names(product_number, process_name)
                 if fixed_inspector_names:
-                    fixed_name_norms = {
-                        self._normalize_person_name(n)
-                        for n in fixed_inspector_names
-                        if self._normalize_person_name(n)
-                    }
-                    if overloaded_norm in fixed_name_norms:
-                        continue
+                    self.log_message(
+                        f"偏り是正(後処理): ロット {lot_index} は固定検査員設定のため対象外（品番: {product_number}）",
+                        debug=True,
+                    )
+                    continue
 
                 inspection_time = row.get('検査時間', 0.0)
                 inspector_count = row.get('検査員人数', 1)
@@ -14870,7 +14890,7 @@ class InspectorAssignmentManager:
         inspection_target_keywords: Optional[List[str]] = None,
     ) -> pd.DataFrame:
         """
-        余裕検査員（勤務時間80%未満）に未割当ロットを追加で割り当てる。
+        余裕検査員（勤務時間90%/95%/100%未満の段階式）に未割当ロットを追加で割り当てる。
         10%超過は許容せず、偏りが悪化する割当は行わない。
         """
         self.log_message("全体最適化フェーズ2.7: 余裕検査員への追加割当を開始")
@@ -14878,6 +14898,7 @@ class InspectorAssignmentManager:
         if result_df is None or result_df.empty:
             return result_df
 
+        current_date = pd.Timestamp.now().date()
         try:
             self._rebuild_assignment_histories(result_df, inspector_master_df)
         except Exception as e:
@@ -14955,33 +14976,78 @@ class InspectorAssignmentManager:
             if not available_inspectors:
                 continue
 
-            # 80%未満の検査員のみ
-            underutilized = []
-            for insp in available_inspectors:
-                code = insp.get('コード', insp.get('#ID', insp.get('コーチID', insp.get('コーチE', ''))))
-                if not code:
+            fixed_inspector_names = self._collect_fixed_inspector_names(product_number, process_name)
+            fixed_name_norms = {
+                self._normalize_person_name(n)
+                for n in fixed_inspector_names
+                if self._normalize_person_name(n)
+            }
+            if fixed_name_norms:
+                available_inspectors = [
+                    insp for insp in available_inspectors
+                    if self._normalize_person_name(str(insp.get('氏名', '')).strip()) in fixed_name_norms
+                ]
+                if not available_inspectors:
+                    self.log_message(
+                        f"追加割当: 固定検査員が候補にいないためスキップ（品番: {product_number}）",
+                        debug=True,
+                    )
                     continue
-                max_hours = self.get_inspector_max_hours(code, inspector_master_df)
-                allowed_max_hours = self._apply_work_hours_overrun(max_hours)
-                daily_hours = self.inspector_daily_assignments.get(code, {}).get(pd.Timestamp.now().date(), 0.0)
-                if daily_hours < allowed_max_hours * 0.95:
-                    underutilized.append(insp)
 
-            if not underutilized:
-                continue
+            selected = None
+            thresholds = [0.9, 0.95, 1.0]
+            for threshold in thresholds:
+                underutilized = []
+                for insp in available_inspectors:
+                    code = insp.get('コード', insp.get('#ID', insp.get('コーチID', insp.get('コーチE', ''))))
+                    if not code:
+                        continue
+                    max_hours = self.get_inspector_max_hours(code, inspector_master_df)
+                    allowed_max_hours = self._apply_work_hours_overrun(max_hours)
+                    daily_hours = self.inspector_daily_assignments.get(code, {}).get(current_date, 0.0)
+                    if daily_hours < allowed_max_hours * threshold:
+                        underutilized.append(insp)
 
-            selected = self.select_inspectors_with_skill_combination(
-                underutilized,
-                required_inspectors,
-                divided_time,
-                pd.Timestamp.now(),
-                pd.Timestamp.now().date(),
-                inspector_master_df,
-                product_number,
-                process_name_context=process_name,
-                relax_work_hours=False,
-                ignore_product_limit=False,
-            )
+                if not underutilized:
+                    continue
+
+                underutilized.sort(
+                    key=lambda insp: self.inspector_work_hours.get(
+                        insp.get('コード', insp.get('#ID', insp.get('コーチID', insp.get('コーチE', '')))),
+                        0.0,
+                    )
+                )
+                candidate = self.select_inspectors_with_skill_combination(
+                    underutilized,
+                    required_inspectors,
+                    divided_time,
+                    pd.Timestamp.now(),
+                    current_date,
+                    inspector_master_df,
+                    product_number,
+                    process_name_context=process_name,
+                    relax_work_hours=False,
+                    ignore_product_limit=False,
+                )
+                if not candidate:
+                    continue
+
+                projected_hours = self.inspector_work_hours.copy()
+                for insp in candidate:
+                    code = insp.get('コード', insp.get('#ID', insp.get('コーチID', insp.get('コーチE', ''))))
+                    if not code:
+                        continue
+                    projected_hours[code] = projected_hours.get(code, 0.0) + divided_time
+
+                new_max = max(projected_hours.values())
+                new_min = min(projected_hours.values())
+                new_imbalance = new_max - new_min
+                if new_imbalance > current_imbalance + 0.2:
+                    continue
+
+                selected = candidate
+                break
+
             if not selected:
                 continue
 
@@ -14996,7 +15062,7 @@ class InspectorAssignmentManager:
             new_max = max(projected_hours.values())
             new_min = min(projected_hours.values())
             new_imbalance = new_max - new_min
-            if new_imbalance > current_imbalance + 0.5:
+            if new_imbalance > current_imbalance + 0.2:
                 continue
 
             # 割当を反映
@@ -15023,6 +15089,282 @@ class InspectorAssignmentManager:
         result_df.drop(columns=['_ship_key_fill', '_inst_key_fill'], errors='ignore', inplace=True)
         self.log_message(f"追加割当: {additional_assigned}件")
         return result_df
+
+    def _log_exception_lot_summary(self, result_df: pd.DataFrame) -> None:
+        if result_df is None or result_df.empty or '出荷予定日' not in result_df.columns:
+            return
+
+        shipping_dates = result_df['出荷予定日']
+        pre_mask = shipping_dates.apply(self._is_preinspection_label)
+        same_day_mask = shipping_dates.apply(self._is_same_day_cleaning_label)
+        inspector_counts = pd.to_numeric(result_df.get('検査員人数', 0), errors='coerce').fillna(0)
+        unassigned_mask = inspector_counts <= 0
+
+        def summarize(mask: pd.Series, label: str) -> None:
+            if not mask.any():
+                return
+            total = int(mask.sum())
+            assigned = int((~unassigned_mask & mask).sum())
+            unassigned = total - assigned
+            self.log_message(f"例外ロット内訳: {label} {total}件 (割当 {assigned} / 未割当 {unassigned})")
+            if unassigned > 0 and 'チーム情報' in result_df.columns:
+                reasons = (
+                    result_df.loc[mask & unassigned_mask, 'チーム情報']
+                    .fillna('未割当')
+                    .astype(str)
+                    .value_counts()
+                    .head(3)
+                )
+                for reason, count in reasons.items():
+                    self.log_message(f"  - {label} 未割当理由: {reason} ({count}件)")
+
+        summarize(pre_mask, "先行検査")
+        summarize(same_day_mask & ~pre_mask, "当日洗浄")
+
+    def _log_utilization_summary(
+        self,
+        result_df: pd.DataFrame,
+        inspector_master_df: pd.DataFrame,
+        skill_master_df: pd.DataFrame,
+        process_master_df: Optional[pd.DataFrame],
+        inspection_target_keywords: Optional[List[str]],
+    ) -> None:
+        if result_df is None or result_df.empty or not self.inspector_work_hours:
+            return
+
+        name_map: Dict[str, str] = {}
+        if inspector_master_df is not None and not inspector_master_df.empty:
+            if '#ID' in inspector_master_df.columns and '#氏名' in inspector_master_df.columns:
+                name_map = {
+                    str(row['#ID']).strip(): str(row['#氏名']).strip()
+                    for _, row in inspector_master_df[['#ID', '#氏名']].iterrows()
+                    if pd.notna(row['#ID']) and pd.notna(row['#氏名'])
+                }
+            elif '#コード' in inspector_master_df.columns and '#氏名' in inspector_master_df.columns:
+                name_map = {
+                    str(row['#コード']).strip(): str(row['#氏名']).strip()
+                    for _, row in inspector_master_df[['#コード', '#氏名']].iterrows()
+                    if pd.notna(row['#コード']) and pd.notna(row['#氏名'])
+                }
+
+        under_90 = []
+        for code, hours in self.inspector_work_hours.items():
+            max_hours = self.get_inspector_max_hours(code, inspector_master_df)
+            allowed_max = self._apply_work_hours_overrun(max_hours)
+            if allowed_max <= 0:
+                continue
+            utilization = hours / allowed_max
+            if utilization < 0.9:
+                name = name_map.get(str(code).strip(), str(code).strip())
+                under_90.append((utilization, name, hours, allowed_max))
+
+        if not under_90:
+            self.log_message("勤務時間稼働率: 90%未満 0名")
+            return
+
+        under_90.sort(key=lambda x: x[0])
+        self.log_message(f"勤務時間稼働率: 90%未満 {len(under_90)}名")
+        for utilization, name, hours, allowed_max in under_90[:10]:
+            self.log_message(
+                f"  - {name}: {hours:.1f}h / {allowed_max:.1f}h ({utilization * 100:.1f}%)"
+            )
+
+        # 診断: 90%未満者が未割当ロットに対して候補になれるか
+        unassigned_df = result_df.copy()
+        if '検査員人数' in unassigned_df.columns:
+            inspector_counts = pd.to_numeric(unassigned_df['検査員人数'], errors='coerce').fillna(0).astype(int)
+            unassigned_df = unassigned_df[inspector_counts <= 0]
+        if unassigned_df.empty or '検査時間' not in unassigned_df.columns:
+            return
+
+        unassigned_df = unassigned_df[pd.to_numeric(unassigned_df['検査時間'], errors='coerce').fillna(0.0) > 0]
+        if unassigned_df.empty:
+            return
+
+        def _candidate_code(candidate: Dict[str, Any]) -> str:
+            return candidate.get('コード', candidate.get('#ID', candidate.get('コーチID', candidate.get('コーチE', ''))))
+
+        self.log_message("勤務時間稼働率: 90%未満者の候補ロット診断", debug=True)
+        current_date = pd.Timestamp.now().date()
+        unassigned_divided_times = []
+        for _, row in unassigned_df.iterrows():
+            inspection_time = row.get('検査時間', 0.0)
+            try:
+                inspection_time = float(inspection_time)
+            except Exception:
+                continue
+            required_inspectors = self._calc_required_inspectors(inspection_time)
+            required_inspectors = max(1, min(5, required_inspectors))
+            divided_time = inspection_time / required_inspectors if required_inspectors > 0 else 0.0
+            if divided_time > 0:
+                unassigned_divided_times.append(divided_time)
+        if unassigned_divided_times:
+            divided_series = pd.Series(unassigned_divided_times)
+            self.log_message(
+                "未割当ロット分割時間: "
+                f"最小 {divided_series.min():.2f}h / 中央 {divided_series.median():.2f}h / 最大 {divided_series.max():.2f}h",
+                debug=True,
+            )
+
+        def _diagnose_exclusion_reason(
+            available_inspectors: List[Dict[str, Any]],
+            inspector_code: str,
+            divided_time: float,
+            product_number: str,
+        ) -> str:
+            target = next(
+                (insp for insp in available_inspectors if _candidate_code(insp) == inspector_code),
+                None,
+            )
+            if not target:
+                return "候補に非含有"
+
+            inspector_name = str(target.get('氏名', '') or '').strip()
+            vacation_info = self.get_vacation_info(inspector_name)
+            if vacation_info:
+                code = vacation_info.get("code", "")
+                if code in ["休", "出", "当"]:
+                    return "休暇"
+
+            max_daily_hours = self.get_inspector_max_hours(inspector_code, inspector_master_df)
+            if max_daily_hours <= 0:
+                return "勤務時間0"
+
+            daily_hours = self.inspector_daily_assignments.get(inspector_code, {}).get(current_date, 0.0)
+            allowed_max_hours = self._apply_work_hours_overrun(max_daily_hours)
+            if daily_hours + divided_time > allowed_max_hours - WORK_HOURS_BUFFER:
+                return "勤務時間上限"
+
+            product_hours = self.inspector_product_hours.get(inspector_code, {}).get(product_number, 0.0)
+            projected_hours = product_hours + divided_time
+            if projected_hours >= PRODUCT_LIMIT_DRAFT_THRESHOLD:
+                return "品番4h上限"
+
+            return "その他制約"
+
+        for utilization, name, hours, allowed_max in under_90[:10]:
+            inspector_info = self._get_inspector_by_name(name, inspector_master_df)
+            if inspector_info.empty:
+                continue
+            inspector_code = str(inspector_info.iloc[0].get('#ID', inspector_info.iloc[0].get('#コード', ''))).strip()
+            if not inspector_code:
+                continue
+            candidate_count = 0
+            normalized_name = self._normalize_person_name(name)
+            remaining_hours = allowed_max - hours
+            remaining_time_total = 0
+            remaining_time_candidate = 0
+            reason_counts = {
+                "固定検査員外": 0,
+                "スキル/工程候補なし": 0,
+                "候補に非含有": 0,
+                "休暇": 0,
+                "勤務時間0": 0,
+                "勤務時間上限": 0,
+                "品番4h上限": 0,
+                "その他制約": 0,
+                "検査時間不正": 0,
+            }
+            for _, row in unassigned_df.iterrows():
+                inspection_time = row.get('検査時間', 0.0)
+                try:
+                    inspection_time = float(inspection_time)
+                except Exception:
+                    reason_counts["検査時間不正"] += 1
+                    continue
+                required_inspectors = self._calc_required_inspectors(inspection_time)
+                required_inspectors = max(1, min(5, required_inspectors))
+                divided_time = inspection_time / required_inspectors if required_inspectors > 0 else 0.0
+
+                product_number = row.get('品番', '')
+                process_number = row.get('現在工程番号', '')
+                process_name = str(row.get('現在工程名', '') or '').strip()
+                shipping_date = row.get('出荷予定日', None)
+                if divided_time <= remaining_hours:
+                    remaining_time_total += 1
+
+                fixed_inspector_names = self._collect_fixed_inspector_names(product_number, process_name)
+                if fixed_inspector_names:
+                    fixed_name_set = {
+                        self._normalize_person_name(n)
+                        for n in fixed_inspector_names
+                        if str(n).strip()
+                    }
+                    if normalized_name not in fixed_name_set:
+                        reason_counts["固定検査員外"] += 1
+                        continue
+
+                available_inspectors = self.get_available_inspectors(
+                    product_number,
+                    process_number,
+                    skill_master_df,
+                    inspector_master_df,
+                    shipping_date=shipping_date,
+                    allow_new_team_fallback=True,
+                    process_master_df=process_master_df,
+                    inspection_target_keywords=inspection_target_keywords,
+                    process_name_context=process_name,
+                )
+                if not available_inspectors:
+                    reason_counts["スキル/工程候補なし"] += 1
+                    continue
+                if not any(_candidate_code(insp) == inspector_code for insp in available_inspectors):
+                    reason_counts["候補に非含有"] += 1
+                    continue
+                if divided_time <= remaining_hours:
+                    remaining_time_candidate += 1
+
+                base_available_inspectors = available_inspectors
+                available_inspectors = self.filter_available_inspectors(
+                    available_inspectors,
+                    divided_time,
+                    inspector_master_df,
+                    product_number,
+                    relax_work_hours=False,
+                    process_name_context=process_name,
+                    ignore_product_limit=False,
+                )
+                if not available_inspectors:
+                    reason = _diagnose_exclusion_reason(
+                        base_available_inspectors,
+                        inspector_code,
+                        divided_time,
+                        product_number,
+                    )
+                    reason_counts[reason] += 1
+                    continue
+
+                if any(_candidate_code(insp) == inspector_code for insp in available_inspectors):
+                    candidate_count += 1
+                else:
+                    reason = _diagnose_exclusion_reason(
+                        base_available_inspectors,
+                        inspector_code,
+                        divided_time,
+                        product_number,
+                    )
+                    reason_counts[reason] += 1
+
+            self.log_message(f"  - {name}: 候補ロット {candidate_count}件", debug=True)
+            self.log_message(
+                f"    残り時間 {remaining_hours:.1f}h / 残り時間内ロット {remaining_time_total}件 / "
+                f"候補含有 {remaining_time_candidate}件",
+                debug=True,
+            )
+            top_reasons = [
+                (reason, count)
+                for reason, count in sorted(
+                    reason_counts.items(),
+                    key=lambda item: item[1],
+                    reverse=True,
+                )
+                if count > 0
+            ]
+            if top_reasons:
+                reason_summary = ", ".join(
+                    f"{reason} {count}件" for reason, count in top_reasons[:3]
+                )
+                self.log_message(f"    除外理由(上位): {reason_summary}", debug=True)
     
     def check_work_hours_capacity(
         self,

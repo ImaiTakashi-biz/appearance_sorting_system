@@ -1648,6 +1648,16 @@ def get_cleaning_lots(
                         log(f"重複除去後の号機別ロット数: {dict(machine_counts)}")
                 else:
                     log(f"重複なし: {before_count}件")
+
+            # ロット数量が欠損/0の行は、数量を優先的に補完（洗浄二次処理依頼の欠損対策）
+            if 'ロット数量' in final_lots_df.columns and '数量' in final_lots_df.columns and not final_lots_df.empty:
+                lot_qty = pd.to_numeric(final_lots_df['ロット数量'], errors='coerce')
+                qty = pd.to_numeric(final_lots_df['数量'], errors='coerce')
+                fill_mask = (lot_qty.isna() | (lot_qty <= 0)) & qty.notna() & (qty > 0)
+                fill_count = int(fill_mask.sum())
+                if fill_count > 0:
+                    final_lots_df.loc[fill_mask, 'ロット数量'] = qty[fill_mask]
+                    log(f"洗浄二次処理依頼: ロット数量が0/NaNの{fill_count}件を数量で補完しました")
             
             # 出荷予定日列を確実に設定（既存の値があっても上書き）
             # Googleスプレッドシートから取得したロットは全て"当日洗浄上がり品"とする
