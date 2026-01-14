@@ -3711,7 +3711,17 @@ class InspectorAssignmentManager:
                             current_date = pd.Timestamp.now().date()
                             two_weeks_later = current_date + timedelta(days=14)
                             if shipping_date_date <= two_weeks_later:
-                                self.log_message(f"出荷予定日が間近（{shipping_date_date}）で他に割当てられないため、新規品対応チームを使用します")
+                                warning_key = (
+                                    "new_team_fallback",
+                                    "skill_missing",
+                                    str(product_number).strip(),
+                                    str(shipping_date_date),
+                                )
+                                if warning_key not in self.logged_warnings:
+                                    self.logged_warnings.add(warning_key)
+                                    self.log_message(
+                                        f"出荷予定日が間近（{shipping_date_date}）で他に割当てられないため、新規品対応チームを使用します"
+                                    )
                                 return self.get_new_product_team_inspectors(inspector_master_df)
                     self.log_message("利用可能な検査員が見つかりません")
                     return []
@@ -3794,7 +3804,17 @@ class InspectorAssignmentManager:
                         current_date = pd.Timestamp.now().date()
                         two_weeks_later = current_date + timedelta(days=14)
                         if shipping_date_date <= two_weeks_later:
-                            self.log_message(f"出荷予定日が間近（{shipping_date_date}）で他に割当てられないため、新規品対応チームを使用します")
+                            warning_key = (
+                                "new_team_fallback",
+                                "process_not_found",
+                                str(product_number).strip(),
+                                str(shipping_date_date),
+                            )
+                            if warning_key not in self.logged_warnings:
+                                self.logged_warnings.add(warning_key)
+                                self.log_message(
+                                    f"出荷予定日が間近（{shipping_date_date}）で他に割当てられないため、新規品対応チームを使用します"
+                                )
                             return self.get_new_product_team_inspectors(inspector_master_df)
                 self.log_message("利用可能な検査員が見つかりません")
                 return []
@@ -4180,7 +4200,17 @@ class InspectorAssignmentManager:
                         current_date = pd.Timestamp.now().date()
                         two_weeks_later = current_date + timedelta(days=14)
                         if shipping_date_date <= two_weeks_later:
-                            self.log_message(f"出荷予定日が間近（{shipping_date_date}）で他に割当てられないため、新規品対応チームを使用します")
+                            warning_key = (
+                                "new_team_fallback",
+                                "no_available_inspectors",
+                                str(product_number).strip(),
+                                str(shipping_date_date),
+                            )
+                            if warning_key not in self.logged_warnings:
+                                self.logged_warnings.add(warning_key)
+                                self.log_message(
+                                    f"出荷予定日が間近（{shipping_date_date}）で他に割当てられないため、新規品対応チームを使用します"
+                                )
                             return self.get_new_product_team_inspectors(inspector_master_df)
             
             return available_inspectors
