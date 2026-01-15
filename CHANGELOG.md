@@ -6,6 +6,7 @@
   - 偏り是正の履歴再計算で`lot_date`を反映
 - 改善: フェーズ3.5で勤務時間超過のみの品番は一括クリアせず個別是正へ（`inspector_assignment_service.py`）
 - 改善: 最終違反再処理の重複実行を抑止（`inspector_assignment_service.py`）
+- 改善: 検査員列を10人まで拡張し、UI/出力の表示を拡張（`ui_handlers.py`, `google_sheets_exporter_service.py`）
 
 ## v1.2.1 (2026-01-14)
 - 改善: 90%未満検査員の割当不能原因をデバッグ時に分解表示（`inspector_assignment_service.py`）
