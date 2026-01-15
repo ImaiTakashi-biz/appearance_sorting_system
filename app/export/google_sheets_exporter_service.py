@@ -249,7 +249,12 @@ class GoogleSheetsExporter:
                 '検査員2': 'N4',
                 '検査員3': 'O4',
                 '検査員4': 'P4',
-                '検査員5': 'Q4'
+                '検査員5': 'Q4',
+                '検査員6': 'R4',
+                '検査員7': 'S4',
+                '検査員8': 'T4',
+                '検査員9': 'U4',
+                '検査員10': 'V4'
             }
             
             # 各列のデータを準備
@@ -349,7 +354,7 @@ class GoogleSheetsExporter:
                         
                         values_to_write[range_str] = values
                 else:
-                    # 列が存在しない場合は空データを書き込む（検査員1～5以外）
+                    # 列が存在しない場合は空データを書き込む（検査員1～10以外）
                     if col_name.startswith('検査員'):
                         # 検査員列が存在しない場合はスキップ
                         continue

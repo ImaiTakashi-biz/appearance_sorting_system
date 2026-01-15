@@ -40,6 +40,8 @@ from loguru import logger
 # ログ分類（app_.logの視認性向上）
 logger = logger.bind(channel="UI")
 
+# 検査員列の最大数（UI/出力と一致させる）
+MAX_INSPECTORS_PER_LOT = 10
 from version import APP_NAME, APP_VERSION, BUILD_DATE
 
 
@@ -289,7 +291,10 @@ class ModernDataExtractorUI:
         if not required.issubset(cols):
             return
 
-        inspector_cols = [c for c in ["検査員1", "検査員2", "検査員3", "検査員4", "検査員5"] if c in cols]
+        inspector_cols = [
+            f"検査員{i}" for i in range(1, MAX_INSPECTORS_PER_LOT + 1)
+            if f"検査員{i}" in cols
+        ]
         if not inspector_cols:
             return
 
@@ -6729,11 +6734,7 @@ class ModernDataExtractorUI:
                     "出荷予定日",
                     "検査時間",
                     "分割検査時間",
-                    "検査員1",
-                    "検査員2",
-                    "検査員3",
-                    "検査員4",
-                    "検査員5",
+                    *[f"検査員{i}" for i in range(1, MAX_INSPECTORS_PER_LOT + 1)],
                     "検査員人数",
                     "remaining_work_hours",
                     "assignability_status",
@@ -6769,11 +6770,7 @@ class ModernDataExtractorUI:
                     "出荷予定日",
                     "検査時間",
                     "分割検査時間",
-                    "検査員1",
-                    "検査員2",
-                    "検査員3",
-                    "検査員4",
-                    "検査員5",
+                    *[f"検査員{i}" for i in range(1, MAX_INSPECTORS_PER_LOT + 1)],
                     "検査員人数",
                     "remaining_work_hours",
                     "assignability_status",
@@ -8203,8 +8200,8 @@ class ModernDataExtractorUI:
             inspector_columns = [
                 "出荷予定日", "品番", "品名", "客先", "生産ロットID", "ロット数量", 
                 "指示日", "号機", "現在工程名", "秒/個", "検査時間",
-                "検査員人数", "分割検査時間", "検査員1", "検査員2", "検査員3", "検査員4", "検査員5"
-            ]
+                "検査員人数", "分割検査時間",
+            ] + [f"検査員{i}" for i in range(1, MAX_INSPECTORS_PER_LOT + 1)]
             
             # Treeviewの作成
             inspector_tree = ttk.Treeview(table_frame, columns=inspector_columns, show="headings", height=20)
@@ -8344,7 +8341,7 @@ class ModernDataExtractorUI:
                     
                     col_name = inspector_columns[col_index]
                     
-                    # 検査員列（検査員1～5）の場合のみメニューを表示
+                    # 検査員列（検査員1～10）の場合のみメニューを表示
                     if not col_name.startswith('検査員'):
                         return
                     
@@ -9575,8 +9572,8 @@ class ModernDataExtractorUI:
                 if not old_info.empty:
                     old_inspector_codes.append(old_info.iloc[0]['#ID'])
             
-            # 現在の検査員列（検査員1～5）から旧検査員のコードを取得
-            for i in range(1, 6):
+            # 現在の検査員列（検査員1～10）から旧検査員のコードを取得
+            for i in range(1, MAX_INSPECTORS_PER_LOT + 1):
                 inspector_col = f'検査員{i}'
                 if inspector_col in df.columns:
                     inspector_value = row.get(inspector_col, '')
@@ -9634,8 +9631,8 @@ class ModernDataExtractorUI:
                     self.inspector_manager.inspector_product_hours[new_code].get(product_number, 0.0) + divided_time
                 )
             
-            # データフレームを更新（検査員1～5に設定）
-            for i in range(1, 6):
+            # データフレームを更新（検査員1～10に設定）
+            for i in range(1, MAX_INSPECTORS_PER_LOT + 1):
                 inspector_col = f'検査員{i}'
                 if inspector_col in df.columns:
                     if i <= len(selected_names):
@@ -9687,9 +9684,9 @@ class ModernDataExtractorUI:
         try:
             row = df.loc[row_index]
             
-            # 検査員1～5の列を確認して、実際に割り当てられている検査員数をカウント
+            # 検査員1～10の列を確認して、実際に割り当てられている検査員数をカウント
             inspector_count = 0
-            for i in range(1, 6):
+            for i in range(1, MAX_INSPECTORS_PER_LOT + 1):
                 inspector_col = f'検査員{i}'
                 if inspector_col in df.columns:
                     inspector_value = row.get(inspector_col, '')

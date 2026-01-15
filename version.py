@@ -1,3 +1,3 @@
 APP_NAME = "外観検査振分支援システム"
-APP_VERSION = "v1.2.1"
-BUILD_DATE = "2026-01-14"
+APP_VERSION = "v1.2.2"
+BUILD_DATE = "2026-01-15"
