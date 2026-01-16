@@ -10,7 +10,7 @@ from loguru import logger
 # ログ分類（app_.logの視認性向上）
 logger = logger.bind(channel="UI:SEAT")
 
-from app.seat_ui import SEATING_JSON_PATH, SEATING_HTML_PATH, save_seating_chart
+from app.seat_ui import SEATING_JSON_PATH, SEATING_HTML_PATH, normalize_split_metadata, save_seating_chart
 
 SEAT_CHART_PORT_FILE_NAME = "seat_chart_server_port.txt"
 
@@ -96,7 +96,42 @@ class SeatChartRequestHandler(BaseHTTPRequestHandler):
             self.wfile.write(b"invalid json")
             return
         try:
+            payload = normalize_split_metadata(payload)
+            try:
+                lots = []
+                for seat in payload.get("seats", []):
+                    lots.extend(seat.get("lots", []) or [])
+                lots.extend(payload.get("unassigned_lots", []) or [])
+                split_lots = [lot for lot in lots if lot.get("split_group")]
+                split_count = len(split_lots)
+                lot_key_counts = {}
+                for lot in lots:
+                    lot_key = lot.get("lot_key")
+                    if not lot_key:
+                        continue
+                    lot_key_counts[lot_key] = lot_key_counts.get(lot_key, 0) + 1
+                duplicate_lot_keys = [key for key, count in lot_key_counts.items() if count >= 2]
+                sample_split_ids = [
+                    {
+                        "lot_id": lot.get("lot_id"),
+                        "lot_key": lot.get("lot_key"),
+                        "split_group": lot.get("split_group"),
+                        "split_index": lot.get("split_index"),
+                    }
+                    for lot in split_lots[:6]
+                ]
+                logger.info(
+                    "Seat chart payload summary: lots={}, split_lots={}, duplicate_lot_keys={}",
+                    len(lots),
+                    split_count,
+                    len(duplicate_lot_keys),
+                )
+                if split_lots:
+                    logger.info("Seat chart payload split samples: {}", sample_split_ids)
+            except Exception as exc:
+                logger.debug("Seat chart payload summary failed: %s", exc)
             save_seating_chart(SEATING_JSON_PATH, payload)
+            logger.info("Seat chart JSON saved: {}", SEATING_JSON_PATH)
             self.send_response(204)
             self.end_headers()
         except Exception as exc:  # pragma: no cover

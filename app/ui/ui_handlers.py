@@ -10,7 +10,7 @@ from pathlib import Path
 from collections import defaultdict, deque
 import warnings  # 警告抑制のため
 import webbrowser
-from typing import Deque, Dict, List, Optional, Tuple, Any
+from typing import Deque, Dict, List, Optional, Tuple, Any, Set
 
 # pandasのUserWarningを抑制（SQLAlchemy接続の推奨警告）
 warnings.filterwarnings('ignore', category=UserWarning, message='.*pandas only supports SQLAlchemy.*')
@@ -8534,6 +8534,29 @@ class ModernDataExtractorUI:
         if self.current_inspector_data is None or self.current_inspector_data.empty:
             messagebox.showwarning("Seat chart", "Inspector assignment data is not available.")
             return
+        split_suffix_pattern = re.compile(r"-S\\d+$")
+        def count_explicit_split(target_chart: Optional[Dict[str, List[Dict[str, object]]]]) -> int:
+            if not target_chart:
+                return 0
+            count = 0
+            for seat in target_chart.get("seats", []):
+                for lot in seat.get("lots", []) or []:
+                    if not isinstance(lot, dict):
+                        continue
+                    lot_id = lot.get("lot_id") or ""
+                    if lot.get("split_group") or (
+                        isinstance(lot_id, str) and split_suffix_pattern.search(lot_id)
+                    ):
+                        count += 1
+            for lot in target_chart.get("unassigned_lots", []) or []:
+                if not isinstance(lot, dict):
+                    continue
+                lot_id = lot.get("lot_id") or ""
+                if lot.get("split_group") or (
+                    isinstance(lot_id, str) and split_suffix_pattern.search(lot_id)
+                ):
+                    count += 1
+            return count
         lots_by_inspector = self._serialize_inspector_lots_for_seating()
         logger.bind(channel="UI:SEAT").debug(
             "serialize_inspector_lots_for_seating inspectors={}",
@@ -8542,26 +8565,134 @@ class ModernDataExtractorUI:
         if not lots_by_inspector:
             messagebox.showinfo("Seat chart", "No lot data is available for seating layout export.")
             return
+        current_lot_id_counts: Dict[str, int] = defaultdict(int)
+        for inspector_name, lots in lots_by_inspector.items():
+            for lot in lots:
+                if not isinstance(lot, dict):
+                    continue
+                lot_id = lot.get("lot_id")
+                if lot_id:
+                    current_lot_id_counts[str(lot_id)] += 1
         unassigned_lots = lots_by_inspector.pop(self.UNASSIGNED_LOTS_KEY, [])
         inspector_names = self._resolve_inspector_names_for_seating()
         if not inspector_names:
             inspector_names = list(lots_by_inspector.keys())
         chart = None
+        split_lots_by_inspector: Dict[str, Dict[str, Deque[Dict[str, object]]]] = {}
         if os.path.exists(SEATING_JSON_PATH):
             try:
                 chart = load_seating_chart(SEATING_JSON_PATH)
                 if not chart.get("seats"):
                     chart = None
+                else:
+                    split_lots_by_inspector = defaultdict(lambda: defaultdict(deque))
+                    for seat in chart.get("seats", []):
+                        inspector_name = (seat.get("name") or "").strip()
+                        if not inspector_name:
+                            continue
+                        for lot in seat.get("lots", []) or []:
+                            if not isinstance(lot, dict):
+                                continue
+                            lot_id = lot.get("lot_id") or ""
+                            is_explicit_split = bool(
+                                lot.get("split_group")
+                                or (
+                                    isinstance(lot_id, str)
+                                    and split_suffix_pattern.search(lot_id)
+                                )
+                            )
+                            if not is_explicit_split:
+                                continue
+                            lot_key = lot.get("lot_key")
+                            group_id = lot.get("split_group") or lot_key
+                            if not group_id:
+                                continue
+                            # 現在の割当が分割済みのときだけ引き継ぐ
+                            if current_lot_id_counts.get(str(group_id), 0) < 2:
+                                continue
+                            split_lots_by_inspector[inspector_name][str(group_id)].append(lot)
+                    for lot in chart.get("unassigned_lots", []) or []:
+                        if not isinstance(lot, dict):
+                            continue
+                        lot_id = lot.get("lot_id") or ""
+                        is_explicit_split = bool(
+                            lot.get("split_group")
+                            or (
+                                isinstance(lot_id, str)
+                                and split_suffix_pattern.search(lot_id)
+                            )
+                        )
+                        if not is_explicit_split:
+                            continue
+                        lot_key = lot.get("lot_key")
+                        group_id = lot.get("split_group") or lot_key
+                        if not group_id:
+                            continue
+                        if current_lot_id_counts.get(str(group_id), 0) < 2:
+                            continue
+                        split_lots_by_inspector[self.UNASSIGNED_LOTS_KEY][str(group_id)].append(lot)
             except Exception:
                 chart = None
+                split_lots_by_inspector = {}
         if chart is None:
             chart = build_initial_seating_chart(inspector_names)
-        chart = attach_lots_to_chart(chart, lots_by_inspector)
+        else:
+            logger.bind(channel="UI:SEAT").info(
+                "Seat chart split count before attach: {}",
+                count_explicit_split(chart),
+            )
+        if split_lots_by_inspector:
+            for inspector_name, lots in list(lots_by_inspector.items()):
+                split_groups = split_lots_by_inspector.get(inspector_name)
+                if not split_groups:
+                    continue
+                merged = []
+                for lot in lots:
+                    group_key = lot.get("lot_id") or lot.get("lot_key")
+                    if group_key and group_key in split_groups and split_groups[group_key]:
+                        split_lot = split_groups[group_key].popleft()
+                        merged_lot = split_lot.copy()
+                        merged_lot["source_inspector_col"] = lot.get("source_inspector_col", "")
+                        merged.append(merged_lot)
+                    else:
+                        merged.append(lot)
+                lots_by_inspector[inspector_name] = merged
+            unassigned_split_groups = split_lots_by_inspector.get(self.UNASSIGNED_LOTS_KEY)
+            if unassigned_split_groups:
+                merged_unassigned = []
+                for lot in unassigned_lots:
+                    group_key = lot.get("lot_id") or lot.get("lot_key")
+                    if group_key and group_key in unassigned_split_groups and unassigned_split_groups[group_key]:
+                        split_lot = unassigned_split_groups[group_key].popleft()
+                        merged_unassigned.append(split_lot.copy())
+                    else:
+                        merged_unassigned.append(lot)
+                unassigned_lots = merged_unassigned
+        chart = attach_lots_to_chart(chart, lots_by_inspector, preserve_split_lots=False)
         chart["unassigned_lots"] = unassigned_lots
+        logger.bind(channel="UI:SEAT").info(
+            "Seat chart split count before save: {}",
+            count_explicit_split(chart),
+        )
         chart["inspector_column_map"] = self.inspector_column_map_for_seating.copy()
+        save_endpoint = None
+        try:
+            self._seat_chart_server.start()
+            server_html_url = self._seat_chart_server.get_html_url(SEATING_HTML_PATH)
+            if server_html_url:
+                base_url = server_html_url.rsplit("/", 1)[0]
+                save_endpoint = f"{base_url}/save-seating-chart"
+        except Exception as exc:
+            logger.debug("Seat chart server の起動に失敗しました: {}", exc)
+            save_endpoint = None
         try:
             save_seating_chart(SEATING_JSON_PATH, chart)
-            generate_html(chart, SEATING_HTML_PATH, inspector_candidates=inspector_names)
+            generate_html(
+                chart,
+                SEATING_HTML_PATH,
+                inspector_candidates=inspector_names,
+                save_endpoint=save_endpoint,
+            )
             self._open_seating_chart_html(SEATING_HTML_PATH)
             self.log_message(f"Seat chart generated: {SEATING_HTML_PATH}")
             self._set_seating_flow_prompt("座席表で割当を変更したら「ロット振分変更反映」を押してください。")
@@ -8623,7 +8754,11 @@ class ModernDataExtractorUI:
             messagebox.showerror("Seat chart sync", f"Failed to load seating JSON: {exc}")
             logger.error("Seat chart load failed", exc_info=True)
             return
-        inspector_cols = [col for col in self.current_inspector_data.columns if col.startswith("検査員")]
+        inspector_cols = [
+            col
+            for col in self.current_inspector_data.columns
+            if re.match(r"^検査員\d+$", str(col))
+        ]
         normalized_columns: List[Tuple[str, str]] = []
         seen_norms = set()
         for col in inspector_cols:
@@ -8637,19 +8772,44 @@ class ModernDataExtractorUI:
         lot_key_to_inspector: Dict[str, Deque[str]] = {}
         # lot_keyからsource_inspector_colを取得するマッピング
         lot_key_to_source_col: Dict[str, str] = {}
+        # 分割ロットの判定・件数管理
+        split_lot_keys: Set[str] = set()
+        split_assigned_counts: Dict[str, int] = defaultdict(int)
+        split_unassigned_counts: Dict[str, int] = defaultdict(int)
+        split_rowkey_to_inspectors: Dict[str, Deque[str]] = {}
+        split_assigned_counts_by_rowkey: Dict[str, int] = defaultdict(int)
+        split_unassigned_counts_by_rowkey: Dict[str, int] = defaultdict(int)
+        split_row_keys: Set[str] = set()
+        lot_key_to_inspectors_all: Dict[str, Deque[str]] = {}
+        split_group_to_inspectors: Dict[str, Deque[str]] = {}
+        split_base_key_to_inspectors: Dict[str, Deque[str]] = {}
         seen_rowcol_keys = set()
-        seen_lot_keys = set()
+        # seen_lot_keysはsplit判定後に再構築するため不要
         # 座席表のロット順番を保持するためのマッピング
         # {lot_key: (inspector_name, order_index, global_order)} の形式
         # global_order: 座席表全体での順序（全座席を通した順序）
         lot_key_to_order: Dict[str, Tuple[str, int, int]] = {}
         global_order_counter = 0
+        def _strip_lot_key_index(lot_key_value: Any) -> str:
+            """idxNN_ を除去したロットキーを返す。"""
+            if not lot_key_value:
+                return ""
+            try:
+                return re.sub(r"^idx\d+_", "", str(lot_key_value))
+            except Exception:
+                return ""
+
         for seat in chart.get("seats", []):
             inspector_name = (seat.get("name") or "").strip()
             if not inspector_name:
                 continue
             lots = seat.get("lots", [])
             for order_index, lot in enumerate(lots):
+                split_total = lot.get("split_total")
+                split_group = lot.get("split_group")
+                is_split_lot = bool(split_group) or (
+                    isinstance(split_total, (int, float)) and split_total >= 2
+                )
                 source_row = lot.get("source_row_index")
                 source_row_key = lot.get("source_row_key")
                 source_col = lot.get("source_inspector_col")
@@ -8657,19 +8817,36 @@ class ModernDataExtractorUI:
                     source_row_key if source_row_key else self._normalize_seating_row_key(source_row)
                 )
                 normalized_col = self._normalize_inspector_column_name(source_col)
-                if normalized_row and normalized_col:
+                if normalized_row:
+                    split_rowkey_to_inspectors.setdefault(normalized_row, deque()).append(inspector_name)
+                if normalized_row and normalized_col and not is_split_lot:
                     rowcol_key = (normalized_row, normalized_col)
                     if rowcol_key not in seen_rowcol_keys:
                         rowcol_to_inspector[rowcol_key] = inspector_name
                         seen_rowcol_keys.add(rowcol_key)
                 lot_key = lot.get("lot_key")
                 if lot_key:
-                    if lot_key not in seen_lot_keys:
-                        lot_key_to_inspector.setdefault(lot_key, deque()).append(inspector_name)
-                        seen_lot_keys.add(lot_key)
-                    # lot_keyからsource_inspector_colを取得できるようにする
-                    if source_col:
-                        lot_key_to_source_col[lot_key] = source_col
+                    lot_key_to_inspectors_all.setdefault(lot_key, deque()).append(inspector_name)
+                    if is_split_lot:
+                        split_lot_keys.add(lot_key)
+                        split_assigned_counts[lot_key] += 1
+                        split_group_id = lot.get("split_group")
+                        if split_group_id:
+                            split_group_to_inspectors.setdefault(str(split_group_id), deque()).append(
+                                inspector_name
+                            )
+                        base_key = _strip_lot_key_index(lot_key)
+                        if base_key:
+                            split_base_key_to_inspectors.setdefault(base_key, deque()).append(
+                                inspector_name
+                            )
+                        if normalized_row:
+                            split_row_keys.add(normalized_row)
+                            split_assigned_counts_by_rowkey[normalized_row] += 1
+                    else:
+                        # lot_keyからsource_inspector_colを取得できるようにする
+                        if source_col:
+                            lot_key_to_source_col[lot_key] = source_col
                     # ロット順番を記録（座席表の検査員名、座席内での順序、全体での順序）
                     # 同じlot_keyが複数回出現する場合、最後の出現位置を優先（座席表での最新の状態を反映）
                     lot_key_to_order[lot_key] = (inspector_name, order_index, global_order_counter)
@@ -8681,9 +8858,18 @@ class ModernDataExtractorUI:
         unassigned_rowcol_keys = set()
         unassigned_row_keys = set()  # source_inspector_colが空の場合、行全体をクリア
         for lot in unassigned_lots:
+            split_total = lot.get("split_total")
+            split_group = lot.get("split_group")
+            is_split_lot = bool(split_group) or (
+                isinstance(split_total, (int, float)) and split_total >= 2
+            )
             lot_key = lot.get("lot_key")
             if lot_key:
-                unassigned_lot_keys.add(lot_key)
+                if is_split_lot:
+                    split_lot_keys.add(lot_key)
+                    split_unassigned_counts[lot_key] += 1
+                else:
+                    unassigned_lot_keys.add(lot_key)
             source_row = lot.get("source_row_index")
             source_row_key = lot.get("source_row_key")
             source_col = lot.get("source_inspector_col")
@@ -8691,16 +8877,34 @@ class ModernDataExtractorUI:
                 source_row_key if source_row_key else self._normalize_seating_row_key(source_row)
             )
             if normalized_row:
-                if source_col and source_col.strip():
+                if source_col and source_col.strip() and not is_split_lot:
                     # source_inspector_colが指定されている場合、特定の列をクリア
                     normalized_col = self._normalize_inspector_column_name(source_col)
                     if normalized_col:
                         unassigned_rowcol_keys.add((normalized_row, normalized_col))
-                else:
+                elif not is_split_lot:
                     # source_inspector_colが空の場合、行全体をクリア対象とする
                     unassigned_row_keys.add(normalized_row)
+                elif is_split_lot:
+                    split_row_keys.add(normalized_row)
+                    split_unassigned_counts_by_rowkey[normalized_row] += 1
+                if is_split_lot:
+                    split_row_keys.add(normalized_row)
 
-        if not rowcol_to_inspector and not lot_key_to_inspector and not unassigned_lot_keys and not unassigned_rowcol_keys:
+        # lot_key -> inspector を分割判定後に構築する
+        for lot_key, inspectors in lot_key_to_inspectors_all.items():
+            if lot_key in split_lot_keys:
+                lot_key_to_inspector[lot_key] = deque(inspectors)
+            elif lot_key not in lot_key_to_inspector and inspectors:
+                lot_key_to_inspector[lot_key] = deque([inspectors[0]])
+
+        if (
+            not rowcol_to_inspector
+            and not lot_key_to_inspector
+            and not unassigned_lot_keys
+            and not unassigned_rowcol_keys
+            and not split_unassigned_counts
+        ):
             logger.info("Seat chart sync: rowcol_to_inspector is empty")
             messagebox.showinfo("Seat chart sync", "Seating chart has no lot assignments.")
             return
@@ -8716,14 +8920,73 @@ class ModernDataExtractorUI:
         matched_by_rowcol = 0
         matched_by_lot_key = 0
         matched_by_lot_key_no_col = 0
+
+        def _unique_inspector_list(values: List[str]) -> List[str]:
+            """重複検査員を除去しつつ順序を維持する。"""
+            seen = set()
+            ordered: List[str] = []
+            for value in values:
+                cleaned = str(value).strip()
+                if not cleaned or cleaned in seen:
+                    continue
+                seen.add(cleaned)
+                ordered.append(cleaned)
+            return ordered
+
+        def _resolve_split_inspectors(
+            lot_id: Optional[str],
+            lot_key: Optional[str],
+            base_key: Optional[str],
+            row_key: Optional[str],
+        ) -> Optional[List[str]]:
+            """分割ロットの検査員リストをlot_key/row_keyで解決する。"""
+            inspectors_queue = None
+            if lot_id:
+                inspectors_queue = split_group_to_inspectors.get(lot_id)
+            if lot_key and lot_key in split_lot_keys:
+                inspectors_queue = lot_key_to_inspector.get(lot_key)
+            if not inspectors_queue and base_key:
+                inspectors_queue = split_base_key_to_inspectors.get(base_key)
+            if not inspectors_queue and row_key and row_key in split_row_keys:
+                inspectors_queue = split_rowkey_to_inspectors.get(row_key)
+            if not inspectors_queue:
+                return None
+            return _unique_inspector_list(list(inspectors_queue))
+
         for row_index, row in df.iterrows():
             row_key = self._normalize_seating_row_key(row_index)
             if not row_key:
                 continue
+            lot_id = ""
+            for lot_id_col in ("生産ロットID", "ロットID", "lot_id", "LotID"):
+                if lot_id_col in df.columns:
+                    lot_id = self._normalize_key_value(row.get(lot_id_col))
+                    if lot_id:
+                        break
             lot_key = self._derive_lot_key(row, row_index, product_code_candidates)
+            base_key = _strip_lot_key_index(lot_key)
             row_modified = False
             assigned = None
             target_col = None
+            inspectors = _resolve_split_inspectors(lot_id, lot_key, base_key, row_key)
+            if inspectors:
+                if lot_key:
+                    lot_key_to_inspector.pop(lot_key, None)
+                if row_key:
+                    split_rowkey_to_inspectors.pop(row_key, None)
+                    target_cols = [actual for _, actual in normalized_columns]
+                    for idx, actual_col in enumerate(target_cols):
+                        new_value = inspectors[idx] if idx < len(inspectors) else ""
+                        current_value = df.at[row_index, actual_col]
+                        current_value_str = str(current_value).strip() if pd.notna(current_value) else ""
+                        if current_value_str != new_value:
+                            df.at[row_index, actual_col] = new_value
+                            updated += 1
+                            row_modified = True
+                    if row_modified:
+                        self._recalculate_inspector_count_and_divided_time(df, row_index)
+                # 分割ロットはrowcolマッチングを行わず次の行へ
+                continue
             # まずrowcolでマッチングを試みる
             for normalized_col, actual_col in normalized_columns:
                 assigned = rowcol_to_inspector.get((row_key, normalized_col))
@@ -8831,6 +9094,46 @@ class ModernDataExtractorUI:
                 continue
             lot_key = self._derive_lot_key(row, row_index, product_code_candidates)
             row_modified = False
+            if (
+                (lot_key and lot_key in split_lot_keys)
+                or (row_key and row_key in split_row_keys)
+            ):
+                assigned_count = 0
+                unassigned_count = 0
+                if lot_key and lot_key in split_lot_keys:
+                    assigned_count = split_assigned_counts.get(lot_key, 0)
+                    unassigned_count = split_unassigned_counts.get(lot_key, 0)
+                if row_key and row_key in split_row_keys and not assigned_count and not unassigned_count:
+                    assigned_count = split_assigned_counts_by_rowkey.get(row_key, 0)
+                    unassigned_count = split_unassigned_counts_by_rowkey.get(row_key, 0)
+                if unassigned_count > 0:
+                    if assigned_count == 0:
+                        for _, actual_col in normalized_columns:
+                            current_value = df.at[row_index, actual_col]
+                            if pd.notna(current_value) and str(current_value).strip():
+                                df.at[row_index, actual_col] = ""
+                                unassigned_cleared += 1
+                                row_modified = True
+                        if row_modified:
+                            unassigned_matched_by_lot_key += 1
+                    else:
+                        filled_cols = [
+                            actual_col
+                            for _, actual_col in normalized_columns
+                            if pd.notna(df.at[row_index, actual_col])
+                            and str(df.at[row_index, actual_col]).strip()
+                        ]
+                        to_clear = max(0, len(filled_cols) - assigned_count)
+                        if to_clear:
+                            for actual_col in reversed(filled_cols[-to_clear:]):
+                                df.at[row_index, actual_col] = ""
+                                unassigned_cleared += 1
+                                row_modified = True
+                            if row_modified:
+                                unassigned_matched_by_lot_key += 1
+                if row_modified:
+                    self._recalculate_inspector_count_and_divided_time(df, row_index)
+                continue
             
             # lot_keyで未割当かどうかを確認（最優先）
             if lot_key and lot_key in unassigned_lot_keys:
@@ -8852,7 +9155,7 @@ class ModernDataExtractorUI:
                     unassigned_matched_by_lot_key += 1
             # rowcolで未割当かどうかを確認
             elif row_key:
-                matched_by_rowcol = False
+                matched_by_rowcol_flag = False
                 for normalized_col, actual_col in normalized_columns:
                     rowcol_key = (row_key, normalized_col)
                     if rowcol_key in unassigned_rowcol_keys:
@@ -8869,8 +9172,8 @@ class ModernDataExtractorUI:
                             df.at[row_index, actual_col] = ""
                             unassigned_cleared += 1
                             row_modified = True
-                            matched_by_rowcol = True
-                if matched_by_rowcol:
+                            matched_by_rowcol_flag = True
+                if matched_by_rowcol_flag:
                     unassigned_matched_by_rowcol += 1
                 # row_keyで未割当かどうかを確認（source_inspector_colが空の場合）
                 elif row_key in unassigned_row_keys:

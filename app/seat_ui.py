@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import json
 import os
+import re
 from typing import Dict, List, Optional
 
 # 本番統合時の指針:
@@ -152,11 +153,13 @@ def build_initial_seating_chart(inspector_names: List[str]) -> Dict[str, List[Di
 def attach_lots_to_chart(
     chart: Dict[str, List[Dict[str, object]]],
     lots_by_inspector: Dict[str, List[Dict[str, object]]],
+    preserve_split_lots: bool = False,
 ) -> Dict[str, List[Dict[str, object]]]:
     """
     既存の座席配置に lot 情報を紐づける。
     lots_by_inspector のキーには検査員名または座席 ID を受け入れ、見つかった最初のリストを seat["lots"] にセットする。
     """
+    split_suffix_pattern = re.compile(r"-S\\d+$")
     seats = chart.setdefault("seats", [])
     for seat in seats:
         seat_name = (seat.get("name") or "").strip()
@@ -169,7 +172,31 @@ def attach_lots_to_chart(
             if candidate:
                 resolved_lots = candidate
                 break
-        seat["lots"] = list(resolved_lots) if resolved_lots else []
+        preserved: List[Dict[str, object]] = []
+        if preserve_split_lots:
+            for lot in seat.get("lots", []) or []:
+                if not isinstance(lot, dict):
+                    continue
+                lot_id = lot.get("lot_id") or ""
+                if lot.get("split_group") or (
+                    isinstance(lot_id, str) and split_suffix_pattern.search(lot_id)
+                ):
+                    preserved.append(lot)
+        if preserved:
+            resolved_ids = {
+                lot.get("lot_id")
+                for lot in resolved_lots
+                if isinstance(lot, dict) and lot.get("lot_id")
+            }
+            merged = list(resolved_lots)
+            for lot in preserved:
+                lot_id = lot.get("lot_id")
+                if lot_id and lot_id in resolved_ids:
+                    continue
+                merged.append(lot)
+            seat["lots"] = merged
+        else:
+            seat["lots"] = list(resolved_lots) if resolved_lots else []
     return chart
 
 
@@ -190,6 +217,60 @@ def save_seating_chart(path: str, chart: Dict[str, List[Dict[str, object]]]) -> 
         os.makedirs(directory, exist_ok=True)
     with open(path, "w", encoding="utf-8") as handle:
         json.dump(chart, handle, ensure_ascii=False, indent=2)
+
+
+def normalize_split_metadata(chart: Dict[str, List[Dict[str, object]]]) -> Dict[str, List[Dict[str, object]]]:
+    """split_group/split_total/split_index が欠けている場合に補完する。"""
+    split_suffix_pattern = re.compile(r"-S\\d+$")
+
+    def _is_explicit_split(lot: Dict[str, object]) -> bool:
+        lot_id = lot.get("lot_id") or ""
+        return bool(lot.get("split_group") or (isinstance(lot_id, str) and split_suffix_pattern.search(lot_id)))
+
+    def _split_group_key(lot: Dict[str, object]) -> str:
+        if lot.get("split_group"):
+            return str(lot.get("split_group"))
+        lot_id = lot.get("lot_id") or ""
+        if isinstance(lot_id, str) and split_suffix_pattern.search(lot_id):
+            return split_suffix_pattern.sub("", lot_id)
+        return ""
+
+    def _iter_lots():
+        for seat in chart.get("seats", []):
+            for lot in seat.get("lots", []) or []:
+                yield lot
+        for lot in chart.get("unassigned_lots", []) or []:
+            yield lot
+
+    groups: Dict[str, List[Dict[str, object]]] = {}
+    for lot in _iter_lots():
+        if not isinstance(lot, dict):
+            continue
+        if not _is_explicit_split(lot):
+            continue
+        key = _split_group_key(lot)
+        if not key:
+            continue
+        group_key = str(key)
+        groups.setdefault(group_key, []).append(lot)
+
+    for group_key, lots in groups.items():
+        if len(lots) < 2:
+            continue
+        group_id = ""
+        for lot in lots:
+            if lot.get("split_group"):
+                group_id = str(lot.get("split_group"))
+                break
+        if not group_id:
+            group_id = group_key
+        total = len(lots)
+        for index, lot in enumerate(lots, start=1):
+            lot["split_group"] = group_id
+            lot["split_total"] = total
+            lot["split_index"] = index
+
+    return chart
 
 
 def ensure_seating_json_exists() -> Dict[str, List[Dict[str, object]]]:
@@ -531,6 +612,28 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         background: #e4f0ff;
         box-shadow: 0 0 0 2px rgba(31, 122, 239, 0.35);
       }
+      .lot-card--group-highlight {
+        border-color: #1f7aef;
+        background: #eaf2ff;
+        box-shadow: 0 0 0 2px rgba(31, 122, 239, 0.25);
+      }
+      .lot-card--hover-highlight {
+        border-color: #16a34a;
+        background: #e8f7ee;
+        box-shadow: 0 0 0 2px rgba(22, 163, 74, 0.25);
+      }
+      .seat-card--group-highlight {
+        border-color: #1f7aef !important;
+        background: #f4f8ff !important;
+        box-shadow: 0 0 0 2px rgba(31, 122, 239, 0.2) !important;
+        outline: 2px solid rgba(31, 122, 239, 0.45);
+        outline-offset: 2px;
+      }
+      .unassigned-area--group-highlight {
+        border-color: #1f7aef;
+        background: #f4f8ff;
+        box-shadow: 0 0 0 2px rgba(31, 122, 239, 0.18);
+      }
       .lot-context-menu {
         position: absolute;
         top: 0;
@@ -835,6 +938,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       const INSPECTOR_COLUMN_MAP = INSPECTOR_COLUMN_MAP_PLACEHOLDER;
       const SEATING_JSON_PATH = SEATING_JSON_PATH_PLACEHOLDER;
       const SEATING_JSON_FILE_NAME = SEATING_JSON_FILE_NAME_PLACEHOLDER;
+      const SAVE_ENDPOINT = SAVE_ENDPOINT_PLACEHOLDER;
       const seats = Array.isArray(seatingData.seats) ? seatingData.seats : [];
       let unassignedLots = Array.isArray(seatingData.unassigned_lots) ? [...seatingData.unassigned_lots] : [];
       const inspectorColumnMap = INSPECTOR_COLUMN_MAP && typeof INSPECTOR_COLUMN_MAP === "string"
@@ -1175,6 +1279,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       };
 
       const renderUnassignedLots = () => {
+        rebuildLotIdCounts();
         if (unassignedCount) {
           unassignedCount.textContent = unassignedLots.length ? `${unassignedLots.length}件` : "";
         }
@@ -1318,21 +1423,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           lot.split_group || lot.lot_id || `split-${Date.now().toString(36)}`;
         const uniqueSuffix = Date.now().toString(36);
         const sanitizedIdBase = `${splitGroupLabel}-${uniqueSuffix}`.replace(/[^A-Za-z0-9_-]/g, "-");
-        const baseLotKey = (lot.lot_key || lot.lot_id || splitGroupLabel)
-          .toString()
-          .replace(/[^A-Za-z0-9_-]/g, "-");
         const inspectionHours = Number(lot.inspection_time) || 0;
         const inspectionValues =
           inspectionHours > 0
             ? distributeFloatValue(inspectionHours, normalizedCount, 4)
             : Array(normalizedCount).fill(0);
-        const quantityValue = Number(lot.quantity);
-        let quantityValues = Array(normalizedCount).fill(0);
-        if (Number.isFinite(quantityValue) && quantityValue > 0) {
-          quantityValues = Number.isInteger(quantityValue)
-            ? distributeIntegerValue(quantityValue, normalizedCount)
-            : distributeFloatValue(quantityValue, normalizedCount, 3);
-        }
         const clones = [];
         for (let index = 0; index < normalizedCount; index += 1) {
           const clone = { ...lot };
@@ -1341,12 +1436,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           clone.split_index = sequence;
           clone.split_total = normalizedCount;
           clone.lot_id = `${sanitizedIdBase}-S${sequence}`;
-          clone.lot_key = `${baseLotKey}-S${sequence}`;
+          // 分割後も元ロットと同じlot_keyを維持する
+          clone.lot_key = lot.lot_key || lot.lot_id || splitGroupLabel;
           if (inspectionHours > 0) {
             clone.inspection_time = inspectionValues[index];
-          }
-          if ("quantity" in lot || quantityValues[index]) {
-            clone.quantity = quantityValues[index];
           }
           clones.push(clone);
         }
@@ -1439,6 +1532,76 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       };
 
       const floatingTooltip = document.getElementById("floating-tooltip");
+      const highlightSplitGroup = (groupId) => {
+        document
+          .querySelectorAll(".lot-card--group-highlight")
+          .forEach((el) => el.classList.remove("lot-card--group-highlight"));
+        document
+          .querySelectorAll(".seat-card--group-highlight")
+          .forEach((el) => el.classList.remove("seat-card--group-highlight"));
+        document
+          .querySelectorAll(".unassigned-area--group-highlight")
+          .forEach((el) => el.classList.remove("unassigned-area--group-highlight"));
+        if (!groupId) {
+          return;
+        }
+        document
+          .querySelectorAll(`.lot-card[data-highlight-group="${groupId}"]`)
+          .forEach((el) => el.classList.add("lot-card--group-highlight"));
+        document.querySelectorAll(".seat-card").forEach((card) => {
+          const hasGroup = card.querySelector(`.lot-card[data-highlight-group="${groupId}"]`);
+          if (hasGroup) {
+            card.classList.add("seat-card--group-highlight");
+          }
+        });
+        if (unassignedArea || unassignedContainer) {
+          const hasGroup =
+            unassignedContainer?.querySelector(`.lot-card[data-highlight-group="${groupId}"]`) ||
+            unassignedArea?.querySelector(`.lot-card[data-highlight-group="${groupId}"]`);
+          if (hasGroup) {
+            (unassignedArea || unassignedContainer).classList.add("unassigned-area--group-highlight");
+          }
+        }
+      };
+
+      let lotIdCounts = new Map();
+      const rebuildLotIdCounts = () => {
+        const counts = new Map();
+        const addLotId = (lot) => {
+          if (!lot || typeof lot !== "object") {
+            return;
+          }
+          const lotId = lot.lot_id ? String(lot.lot_id) : "";
+          if (!lotId) {
+            return;
+          }
+          counts.set(lotId, (counts.get(lotId) || 0) + 1);
+        };
+        seats.forEach((seat) => {
+          if (!seat || !Array.isArray(seat.lots)) {
+            return;
+          }
+          seat.lots.forEach(addLotId);
+        });
+        if (Array.isArray(unassignedLots)) {
+          unassignedLots.forEach(addLotId);
+        }
+        lotIdCounts = counts;
+      };
+
+      const getHighlightGroupId = (lot) => {
+        if (!lot || typeof lot !== "object") {
+          return "";
+        }
+        if (lot.split_group) {
+          return String(lot.split_group);
+        }
+        const lotId = lot.lot_id ? String(lot.lot_id) : "";
+        if (lotId && (lotIdCounts.get(lotId) || 0) >= 2) {
+          return lotId;
+        }
+        return "";
+      };
 
       const updateFloatingTooltipPosition = (rect) => {
         if (!floatingTooltip || !rect) {
@@ -1494,6 +1657,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         lotCard.draggable = true;
         lotCard.dataset.seatId = seatId;
         lotCard.dataset.lotId = lot.lot_id;
+        const highlightGroupId = getHighlightGroupId(lot);
+        if (highlightGroupId) {
+          lotCard.dataset.highlightGroup = highlightGroupId;
+        }
 
         const shippingDateRaw = normalizeShippingDateValue(lot.shipping_date);
         const hasSameDayCleaning = isSameDayCleaningShippingDate(shippingDateRaw);
@@ -1522,6 +1689,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           if (editingMode || draggingLot) {
             return;
           }
+          lotCard.classList.add("lot-card--hover-highlight");
+          if (highlightGroupId) {
+            highlightSplitGroup(highlightGroupId);
+          }
           showFloatingTooltip(event, lot);
         });
         lotCard.addEventListener("mousemove", function (event) {
@@ -1530,7 +1701,18 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           }
           updateFloatingTooltipPosition(event.currentTarget.getBoundingClientRect());
         });
-        lotCard.addEventListener("mouseleave", () => hideFloatingTooltip());
+        lotCard.addEventListener("mouseleave", () => {
+          hideFloatingTooltip();
+          lotCard.classList.remove("lot-card--hover-highlight");
+          if (highlightGroupId) {
+            highlightSplitGroup("");
+          }
+        });
+        lotCard.addEventListener("click", () => {
+          if (highlightGroupId) {
+            highlightSplitGroup(highlightGroupId);
+          }
+        });
 
         lotCard.addEventListener("dragstart", (event) => {
           if (editingMode) {
@@ -1540,6 +1722,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           event.stopPropagation();
           // ドラッグ開始時にツールチップを非表示にする
           hideFloatingTooltip();
+          lotCard.classList.remove("lot-card--hover-highlight");
+          if (highlightGroupId) {
+            highlightSplitGroup("");
+          }
           draggingLot = { seatId, lotId: lot.lot_id };
           lotCard.classList.add("dragging-lot");
           event.dataTransfer?.setData("text/plain", lot.lot_id);
@@ -1726,6 +1912,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         hideFloatingTooltip();
         applyModeSizes();
         grid.innerHTML = "";
+        rebuildLotIdCounts();
         seats
           .slice()
           .sort((a, b) => (a.row === b.row ? a.col - b.col : a.row - b.row))
@@ -1841,15 +2028,93 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
       toggleEditButton.addEventListener("click", () => setEditingMode(!editingMode));
 
-      const craftJsonPayload = () => ({
-        seats,
-        unassigned_lots: unassignedLots
-      });
+      const buildSplitGroupId = (groupKey, fallback) => {
+        const raw = String(groupKey || fallback || `split-${Date.now().toString(36)}`).trim();
+        return raw || `split-${Date.now().toString(36)}`;
+      };
+
+      const normalizeSplitMetadata = () => {
+        const groups = new Map();
+        const splitSuffixPattern = /-S\\d+$/;
+        const isExplicitSplit = (lot) =>
+          !!(lot && (lot.split_group || (lot.lot_id && splitSuffixPattern.test(lot.lot_id))));
+        const getSplitGroupKey = (lot) => {
+          if (lot.split_group) {
+            return String(lot.split_group);
+          }
+          if (lot.lot_id && splitSuffixPattern.test(lot.lot_id)) {
+            return String(lot.lot_id).replace(splitSuffixPattern, "");
+          }
+          return "";
+        };
+        const addLot = (lot) => {
+          if (!lot || typeof lot !== "object") {
+            return;
+          }
+          if (!isExplicitSplit(lot)) {
+            return;
+          }
+          const groupKey = getSplitGroupKey(lot);
+          if (!groupKey) {
+            return;
+          }
+          const key = String(groupKey);
+          if (!groups.has(key)) {
+            groups.set(key, []);
+          }
+          groups.get(key).push(lot);
+        };
+        seats.forEach((seat) => {
+          if (!seat || !Array.isArray(seat.lots)) {
+            return;
+          }
+          seat.lots.forEach(addLot);
+        });
+        if (Array.isArray(unassignedLots)) {
+          unassignedLots.forEach(addLot);
+        }
+
+        groups.forEach((lots) => {
+          if (lots.length < 2) {
+            return;
+          }
+          let groupId = "";
+          for (const lot of lots) {
+            if (lot.split_group) {
+              groupId = lot.split_group;
+              break;
+            }
+          }
+          if (!groupId) {
+            const seed = lots.find((lot) => lot.lot_id || lot.split_group);
+            groupId = buildSplitGroupId(
+              seed?.lot_id || seed?.split_group,
+              "split"
+            );
+          }
+          const total = lots.length;
+          lots.forEach((lot, index) => {
+            lot.split_group = groupId;
+            lot.split_total = total;
+            lot.split_index = index + 1;
+          });
+        });
+      };
+
+      const craftJsonPayload = () => {
+        // 分割メタ情報が欠けている場合は保存前に補完する
+        normalizeSplitMetadata();
+        return {
+          seats,
+          unassigned_lots: unassignedLots
+        };
+      };
 
       const saveJsonFileSystem = async () => {
         try {
           const payload = craftJsonPayload();
-          const response = await fetch("/save-seating-chart", {
+          const endpoint = SAVE_ENDPOINT || "/save-seating-chart";
+          const response = await fetch(endpoint, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(payload),
@@ -1939,6 +2204,7 @@ def generate_html(
     chart: Dict[str, List[Dict[str, object]]],
     output_path: str,
     inspector_candidates: Optional[List[str]] = None,
+    save_endpoint: Optional[str] = None,
 ) -> None:
     """HTML_TEMPLATEにシートを埋め込み、座席UIを生成する共通関数。inspector_candidatesを指定すればautocomplete候補を制御できます。"""
     candidates = inspector_candidates or DEFAULT_INSPECTOR_NAMES
@@ -1950,6 +2216,7 @@ def generate_html(
         .replace("INSPECTOR_COLUMN_MAP_PLACEHOLDER", json.dumps(column_map, ensure_ascii=False))
         .replace("SEATING_JSON_PATH_PLACEHOLDER", json.dumps(SEATING_JSON_PATH, ensure_ascii=False))
         .replace("SEATING_JSON_FILE_NAME_PLACEHOLDER", json.dumps(SEATING_JSON_FILE_NAME, ensure_ascii=False))
+        .replace("SAVE_ENDPOINT_PLACEHOLDER", json.dumps(save_endpoint or "", ensure_ascii=False))
     )
     directory = os.path.dirname(output_path)
     if directory:
