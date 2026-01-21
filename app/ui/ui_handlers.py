@@ -1532,6 +1532,29 @@ class ModernDataExtractorUI:
             )
             manual_value.pack(side="left", padx=(0, 2))
 
+            is_active_today = self._is_registered_product_active(item)
+            exec_label = ctk.CTkLabel(
+                sub_row,
+                text="実行可否:",
+                font=ctk.CTkFont(family="Yu Gothic", size=14, weight="bold"),
+                text_color="#374151",
+                width=70,
+                anchor="w"
+            )
+            exec_label.pack(side="left", padx=(8, 3))
+
+            exec_text = "対象" if is_active_today else "対象外"
+            exec_color = "#16A34A" if is_active_today else "#DC2626"
+            exec_value = ctk.CTkLabel(
+                sub_row,
+                text=exec_text,
+                font=ctk.CTkFont(family="Yu Gothic", size=14, weight="bold"),
+                text_color=exec_color,
+                width=60,
+                anchor="w"
+            )
+            exec_value.pack(side="left", padx=(0, 2))
+
             
             # 固定検査員の表示
             fixed_inspectors_label = ctk.CTkLabel(
