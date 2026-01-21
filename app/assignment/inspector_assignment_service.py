@@ -270,6 +270,11 @@ class InspectorAssignmentManager:
         # 品番ごとの固定検査員情報:
         # {品番: [ {'process': '工程名', 'inspectors': ['A', 'B']}, ... ]}
         self.fixed_inspectors_by_product: Dict[str, List[Dict[str, Any]]] = {}
+        # 先行検査品の検査割当て人数（品番ごとの人数設定）
+        # {品番: [ {'process': '工程名', 'headcount': 3}, ... ]}
+        self.preinspection_assignment_targets: Dict[str, List[Dict[str, Any]]] = {}
+        # 先行検査品の割当プール状態（1回の割当実行ごとに初期化）
+        self._preinspection_assignment_state: Dict[Tuple[str, str], Dict[str, Any]] = {}
         # 同日洗浄品の制約緩和フラグ（品番: ロットインデックス）
         self.same_day_constraint_relaxations = set()
         # 【高速化】検査員マスタのインデックス（O(1)アクセス用）
@@ -463,6 +468,14 @@ class InspectorAssignmentManager:
             product_number = str(result_df.at[lot_index, '品番']).strip() if '品番' in result_df.columns else ''
             if not product_number:
                 return False
+            if '検査割当て人数' in result_df.columns and self._is_preinspection_label(shipping_date):
+                headcount_raw = str(result_df.at[lot_index, '検査割当て人数'] or '').strip()
+                if headcount_raw:
+                    try:
+                        if int(headcount_raw) > 0:
+                            return True
+                    except ValueError:
+                        pass
             process_name = ''
             if '現在工程名' in result_df.columns:
                 process_name = str(result_df.at[lot_index, '現在工程名'] or '').strip()
@@ -793,6 +806,35 @@ class InspectorAssignmentManager:
             if keyword in candidate:
                 return True
         return False
+
+    def _resolve_preinspection_assignment_target(
+        self,
+        product_number: str,
+        process_name: Optional[str]
+    ) -> Optional[Tuple[int, str]]:
+        """先行検査品の検査割当て人数を取得（工程名が一致する設定を優先）"""
+        entries = self.preinspection_assignment_targets.get(str(product_number).strip(), [])
+        if not entries:
+            return None
+        fallback: Optional[Tuple[int, str]] = None
+        for entry in entries:
+            headcount_raw = str(entry.get('headcount', '') or '').strip()
+            if not headcount_raw:
+                continue
+            try:
+                headcount_value = int(headcount_raw)
+            except ValueError:
+                continue
+            if headcount_value <= 0:
+                continue
+            process_filter = str(entry.get('process', '') or '').strip()
+            if process_filter:
+                if self._process_filter_matches(process_filter, process_name):
+                    return (headcount_value, process_filter)
+                continue
+            if fallback is None:
+                fallback = (headcount_value, process_filter)
+        return fallback
 
     def _get_tuple_value(
         self,
@@ -1894,6 +1936,8 @@ class InspectorAssignmentManager:
                     '秒/個': round(seconds_per_unit, 1),
                     '検査時間': round(total_inspection_time_hours, 1)
                 }
+                if '検査割当て人数' in assignment_cols:
+                    inspector_result['検査割当て人数'] = row[assignment_cols.get('検査割当て人数', -1)]
                 
                 inspector_results.append(inspector_result)
             
@@ -2015,6 +2059,25 @@ class InspectorAssignmentManager:
             # 各ロットに対して検査員を割り当て
             result_cols_after_sort = {col: idx for idx, col in enumerate(result_df.columns)}
             _first_pass_t0 = perf_counter()
+            self._preinspection_assignment_state = {}
+            preinspection_lot_counts: Dict[Tuple[str, str], int] = defaultdict(int)
+            for row_idx, row in enumerate(result_df.itertuples(index=False)):
+                product_number_val = row[result_cols_after_sort.get('品番', -1)] if '品番' in result_cols_after_sort else ''
+                product_number_str = str(product_number_val).strip() if pd.notna(product_number_val) else ''
+                if not product_number_str:
+                    continue
+                shipping_date_val = row[result_cols_after_sort.get('出荷予定日', -1)] if '出荷予定日' in result_cols_after_sort else None
+                if not self._is_preinspection_label(shipping_date_val):
+                    continue
+                process_name_val = self._get_tuple_value(row, result_cols_after_sort, '現在工程名')
+                target = self._resolve_preinspection_assignment_target(product_number_str, process_name_val)
+                if not target:
+                    continue
+                headcount_value, process_key = target
+                if headcount_value <= 0:
+                    continue
+                key = (product_number_str, str(process_key or '').strip())
+                preinspection_lot_counts[key] += 1
             for row_idx, row in enumerate(result_df.itertuples(index=False)):
                 index = result_df.index[row_idx]
                 inspection_time = row[result_cols_after_sort['検査時間']]
@@ -2239,6 +2302,16 @@ class InspectorAssignmentManager:
                 else:
                     fixed_candidate_count = 0
                 
+                shipping_date = row[result_cols_after_sort.get('出荷予定日', -1)] if '出荷予定日' in result_cols_after_sort else None
+                process_name_for_target = str(self._get_tuple_value(row, result_cols_after_sort, '現在工程名') or '').strip()
+                preinspection_target = self._resolve_preinspection_assignment_target(product_number, process_name_for_target)
+                use_preinspection_pool = False
+                preinspection_pool_key = None
+                preinspection_pool_size = 0
+                if preinspection_target and self._is_preinspection_label(shipping_date):
+                    preinspection_pool_size, preinspection_pool_key = preinspection_target
+                    use_preinspection_pool = preinspection_pool_size > 0
+
                 # 必要な検査員人数を計算（先に計算してから、当日洗浄上がり品の制約を適用）
                 required_inspectors = self._calc_required_inspectors(inspection_time)
                 if is_same_day_cleaning and self._should_force_same_day_dual_assignment(inspection_time):
@@ -2279,6 +2352,9 @@ class InspectorAssignmentManager:
                 if force_full_pool_for_product:
                     required_inspectors = 2
                     balance_across_max_inspectors = True
+                if use_preinspection_pool:
+                    required_inspectors = 1
+                    balance_across_max_inspectors = False
                 
                 # 固定検査員は「ロットを固定検査員間で平準化」して割り当てるため、
                 # 1ロットに固定検査員を複数人入れない（固定ロットは主担当1名に固定する）。
@@ -2308,7 +2384,7 @@ class InspectorAssignmentManager:
                 # - self.same_day_cleaning_inspectors_by_product_name は品名ごとに管理（{品名: set(検査員コード)}）
                 # - 各ロットで既に割り当てられた検査員を除外して候補を絞り込む
                 # - 複数ロットがある場合は均等分散ロジックで必要人数を調整
-                if is_same_day_cleaning:
+                if is_same_day_cleaning and not use_preinspection_pool:
                     shipping_date_val = row[result_cols_after_sort.get('出荷予定日', -1)] if '出荷予定日' in result_cols_after_sort else None
                     force_assign_same_day = self._should_force_assign_same_day(shipping_date_val)
                     # この品番に既に割り当てられた検査員を取得（品番単位の制約）
@@ -2481,6 +2557,97 @@ class InspectorAssignmentManager:
                             # 候補が不足しているが、0人より多い場合はそのまま使用（可能な限り割り当て）
                 
                 # 新規品かどうかを判定（スキルマスタに登録がない場合）
+                preinspection_pool_candidates: Optional[List[Dict[str, Any]]] = None
+                preinspection_pool_counts: Optional[Dict[str, int]] = None
+                preinspection_pool_used_codes: Optional[Dict[str, int]] = None
+                preinspection_target_inspectors = 1
+                if use_preinspection_pool:
+                    def _candidate_code_local(candidate: Dict[str, Any]) -> str:
+                        return str(
+                            candidate.get('コード', candidate.get('#ID', candidate.get('コーチID', candidate.get('コーチ', ''))))
+                        ).strip()
+
+                    pool_key = (str(product_number).strip(), str(preinspection_pool_key or '').strip())
+                    pool_state = self._preinspection_assignment_state.setdefault(
+                        pool_key,
+                        {
+                            'pool_codes': [],
+                            'counts': {},
+                            'used_codes': {},
+                            'lot_seq': 0,
+                            'lot_count': preinspection_lot_counts.get(pool_key, 0)
+                        }
+                    )
+                    pool_codes = list(pool_state.get('pool_codes', []))
+                    pool_counts = pool_state.get('counts')
+                    pool_used_codes = pool_state.get('used_codes')
+                    if not isinstance(pool_counts, dict):
+                        pool_counts = {}
+                    if not isinstance(pool_used_codes, dict):
+                        pool_used_codes = {}
+
+                    lot_count_total = pool_state.get('lot_count', preinspection_lot_counts.get(pool_key, 0)) or 0
+                    lot_seq = pool_state.get('lot_seq', 0)
+                    if preinspection_pool_size > 0 and lot_count_total > 0 and preinspection_pool_size > lot_count_total:
+                        base = preinspection_pool_size // lot_count_total
+                        remainder = preinspection_pool_size % lot_count_total
+                        preinspection_target_inspectors = base + (1 if lot_seq < remainder else 0)
+                    else:
+                        preinspection_target_inspectors = 1
+                    preinspection_target_inspectors = max(1, preinspection_target_inspectors)
+                    pool_state['lot_seq'] = lot_seq + 1
+
+                    if preinspection_pool_size > 0 and len(pool_codes) < preinspection_pool_size:
+                        scored = []
+                        for insp in available_inspectors:
+                            code = _candidate_code_local(insp)
+                            if not code or code in pool_codes:
+                                continue
+                            scored.append((
+                                self.inspector_work_hours.get(code, 0.0),
+                                self.inspector_assignment_count.get(code, 0),
+                                code,
+                                insp
+                            ))
+                        scored.sort(key=lambda x: (x[0], x[1], x[2]))
+                        for _, _, code, _ in scored:
+                            pool_codes.append(code)
+                            pool_counts.setdefault(code, 0)
+                            if len(pool_codes) >= preinspection_pool_size:
+                                break
+
+                    pool_state['pool_codes'] = pool_codes
+                    pool_state['counts'] = pool_counts
+                    pool_state['used_codes'] = pool_used_codes
+
+                    unused_codes = {code for code in pool_codes if code not in pool_used_codes}
+                    pool_candidates = []
+                    for insp in available_inspectors:
+                        code = _candidate_code_local(insp)
+                        if code not in pool_codes:
+                            continue
+                        insp['_pool_unused_priority'] = 0 if code in unused_codes else 1
+                        pool_candidates.append(insp)
+                    if pool_candidates:
+                        pool_candidates.sort(
+                            key=lambda insp: (
+                                pool_counts.get(_candidate_code_local(insp), 0),
+                                self.inspector_work_hours.get(_candidate_code_local(insp), 0.0),
+                                self.inspector_assignment_count.get(_candidate_code_local(insp), 0),
+                                _candidate_code_local(insp)
+                            )
+                        )
+                        for insp in pool_candidates:
+                            insp['_pool_priority'] = pool_counts.get(_candidate_code_local(insp), 0)
+                        preinspection_pool_candidates = pool_candidates
+                        preinspection_pool_counts = pool_counts
+                        preinspection_pool_used_codes = pool_used_codes
+                    else:
+                        self.log_message(
+                            f"先行検査品 {product_number}: 検査割当て人数の候補が見つからないため未割当になります",
+                            level='warning'
+                        )
+
                 is_new_product = False
                 
                 # get_available_inspectorsは既に新製品チームを返す場合があるが、明示的に確認
@@ -2561,17 +2728,49 @@ class InspectorAssignmentManager:
                 if fixed_inspector_names and inspection_time > self.product_limit_hard_threshold:
                     ignore_product_limit_for_lot = False
 
-                assigned_inspectors, remaining_time, assigned_time_sum = self.assign_inspectors_asymmetric(
-                    available_inspectors, inspection_time, inspector_master_df, product_number, is_new_product,
-                    max_inspectors=required_inspectors, allow_same_day_overrun=is_same_day_cleaning,
-                    reserve_capacity_for_high_priority=reserve_for_high_priority,
-                    process_name_context=process_name_context,
-                    fixed_primary_inspector_name=fixed_primary_name,
-                    force_fixed_assignment=force_fixed_assignment,
-                    ignore_product_limit=ignore_product_limit_for_lot,
-                    balance_across_max_inspectors=balance_across_max_inspectors,
-                    lot_date=lot_date_for_assign
-                )
+                assigned_inspectors = []
+                remaining_time = float(inspection_time)
+                assigned_time_sum = 0.0
+                preinspection_assignment_applied = False
+                if use_preinspection_pool and preinspection_pool_candidates is not None:
+                    preinspection_assignment_applied = True
+                    def _candidate_code_pool(candidate: Dict[str, Any]) -> str:
+                        return str(
+                            candidate.get('コード', candidate.get('#ID', candidate.get('コーチID', candidate.get('コーチ', ''))))
+                        ).strip()
+                    assigned_inspectors, remaining_time, assigned_time_sum = self.assign_inspectors_asymmetric(
+                        preinspection_pool_candidates, inspection_time, inspector_master_df, product_number, is_new_product,
+                        max_inspectors=preinspection_target_inspectors, allow_same_day_overrun=is_same_day_cleaning,
+                        reserve_capacity_for_high_priority=reserve_for_high_priority,
+                        process_name_context=process_name_context,
+                        fixed_primary_inspector_name=fixed_primary_name,
+                        force_fixed_assignment=force_fixed_assignment,
+                        ignore_product_limit=ignore_product_limit_for_lot,
+                        balance_across_max_inspectors=True,
+                        lot_date=lot_date_for_assign
+                    )
+                    if assigned_inspectors:
+                        for inspector in assigned_inspectors:
+                            selected_code = _candidate_code_pool(inspector)
+                            if preinspection_pool_counts is not None and selected_code:
+                                preinspection_pool_counts[selected_code] = preinspection_pool_counts.get(selected_code, 0) + 1
+                            if preinspection_pool_used_codes is not None and selected_code:
+                                preinspection_pool_used_codes[selected_code] = preinspection_pool_used_codes.get(selected_code, 0) + 1
+                    else:
+                        remaining_time = float(inspection_time)
+                        assigned_time_sum = 0.0
+                if not preinspection_assignment_applied:
+                    assigned_inspectors, remaining_time, assigned_time_sum = self.assign_inspectors_asymmetric(
+                        available_inspectors, inspection_time, inspector_master_df, product_number, is_new_product,
+                        max_inspectors=required_inspectors, allow_same_day_overrun=is_same_day_cleaning,
+                        reserve_capacity_for_high_priority=reserve_for_high_priority,
+                        process_name_context=process_name_context,
+                        fixed_primary_inspector_name=fixed_primary_name,
+                        force_fixed_assignment=force_fixed_assignment,
+                        ignore_product_limit=ignore_product_limit_for_lot,
+                        balance_across_max_inspectors=balance_across_max_inspectors,
+                        lot_date=lot_date_for_assign
+                    )
 
                 # Force fixed inspector if not assigned (registered product special case)
                 if force_fixed_assignment and fixed_primary_name:
@@ -2717,7 +2916,7 @@ class InspectorAssignmentManager:
                 self.log_message(f"品番 {product_number}: 必要時間 {inspection_time:.1f}h → 割当時間 {assigned_time_sum:.1f}h, 残り {remaining_time:.1f}h, 割当人数 {len(assigned_inspectors)}人")
                 
                 # 【追加】当日洗浄上がり品の場合は、通常の割り当て処理後にも検査員を追跡（再分配処理前に追跡）
-                if is_same_day_cleaning and len(assigned_inspectors) > 0:
+                if is_same_day_cleaning and len(assigned_inspectors) > 0 and not use_preinspection_pool:
                     product_name = row[result_cols_after_sort.get('品名', -1)] if '品名' in result_cols_after_sort else ''
                     product_name_str = str(product_name).strip() if pd.notna(product_name) and product_name != -1 else ''
                     for inspector in assigned_inspectors:
@@ -4772,6 +4971,8 @@ class InspectorAssignmentManager:
             candidates_with_capacity.sort(key=lambda x: (
                 not x.get('_is_fixed_inspector', False),  # False=固定検査員を最優先（False < TrueなのでFalseが先）
                 x.get('is_new_team', False),  # 新規品対応チームメンバーは後回し（False < TrueなのでFalseが先）
+                x.get('_pool_unused_priority', 0),  # 先行検査で未使用者を優先
+                x.get('_pool_priority', 0),  # 先行検査の均等割当てを優先
                 x['_daily_hours'],  # 総検査時間が少ない順（余裕のある検査員を優先）
                 -x['_remaining_capacity'],  # 容量の大きい順
                 x['_product_hours'],  # 同一品番の累計時間が少ない順（4時間上限の分散化）
@@ -6283,8 +6484,9 @@ class InspectorAssignmentManager:
         if not vacation_info:
             return False
         
-        work_status = vacation_info.get("work_status")
-        return work_status == "休み"
+        # 終日休暇のみ休暇扱い（AM/PM/早/遅は勤務可能）
+        code = vacation_info.get("code", "")
+        return code in ["休", "出", "当"]
     
     def get_inspector_max_hours(
         self,

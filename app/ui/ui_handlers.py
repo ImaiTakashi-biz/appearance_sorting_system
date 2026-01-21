@@ -361,6 +361,10 @@ class ModernDataExtractorUI:
         self.product_code_entry = None  # 品番入力フィールド
         self.process_name_entry = None  # 工程名入力
         self.inspectable_lots_entry = None  # 検査可能ロット数／日入力フィールド
+        self.machine_entry = None  # 号機入力フィールド
+        self.inspection_headcount_entry = None  # 検査割当て人数入力フィールド
+        self.weekday_option = None  # 曜日選択
+        self.manual_active_option = None  # 有効設定選択
         self.register_button = None  # 登録確定ボタン
         self.registered_products = []  # 登録された品番のリスト [{品番, ロット数}, ...]
         self.registered_products_frame = None  # 登録リスト表示フレーム
@@ -1038,7 +1042,7 @@ class ModernDataExtractorUI:
         
         lots_label = ctk.CTkLabel(
             lots_frame,
-            text="検査可能ロット数／日",
+            text="ロット数/日",
             font=ctk.CTkFont(family="Yu Gothic", size=16, weight="bold"),
             text_color="#374151"
         )
@@ -1054,6 +1058,133 @@ class ModernDataExtractorUI:
             text_color="#374151"
         )
         self.inspectable_lots_entry.pack(fill="x")
+
+        extra_fields_frame = ctk.CTkFrame(input_frame, fg_color="transparent")
+        extra_fields_frame.pack(fill="x", padx=10, pady=(0, 8))
+        extra_fields_frame.grid_columnconfigure(0, weight=1)
+        extra_fields_frame.grid_columnconfigure(1, weight=1)
+        extra_fields_frame.grid_columnconfigure(2, weight=1)
+        extra_fields_frame.grid_columnconfigure(3, weight=1)
+
+        machine_frame = ctk.CTkFrame(extra_fields_frame, fg_color="transparent")
+        machine_frame.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+
+        machine_label = ctk.CTkLabel(
+            machine_frame,
+            text="号機（例: A-1, C-8）",
+            font=ctk.CTkFont(family="Yu Gothic", size=16, weight="bold"),
+            text_color="#374151"
+        )
+        machine_label.pack(anchor="w", pady=(0, 4))
+
+        self.machine_entry = ctk.CTkEntry(
+            machine_frame,
+            placeholder_text="号機を入力（任意）",
+            font=ctk.CTkFont(family="Yu Gothic", size=14),
+            height=40,
+            border_width=1,
+            fg_color="white",
+            text_color="#374151"
+        )
+        self.machine_entry.pack(fill="x")
+
+        headcount_frame = ctk.CTkFrame(extra_fields_frame, fg_color="transparent")
+        headcount_frame.grid(row=0, column=1, sticky="ew", padx=(8, 8))
+
+        headcount_label = ctk.CTkLabel(
+            headcount_frame,
+            text="割当て人数",
+            font=ctk.CTkFont(family="Yu Gothic", size=16, weight="bold"),
+            text_color="#374151"
+        )
+        headcount_label.pack(anchor="w", pady=(0, 4))
+
+        self.inspection_headcount_entry = ctk.CTkEntry(
+            headcount_frame,
+            placeholder_text="人数を入力（任意）",
+            font=ctk.CTkFont(family="Yu Gothic", size=14),
+            height=40,
+            border_width=1,
+            fg_color="white",
+            text_color="#374151"
+        )
+        self.inspection_headcount_entry.pack(fill="x")
+        
+        weekday_frame = ctk.CTkFrame(extra_fields_frame, fg_color="transparent")
+        weekday_frame.grid(row=0, column=2, sticky="ew", padx=(8, 8))
+
+        weekday_label = ctk.CTkLabel(
+            weekday_frame,
+            text="曜日",
+            font=ctk.CTkFont(family="Yu Gothic", size=16, weight="bold"),
+            text_color="#374151"
+        )
+        weekday_label.pack(anchor="w", pady=(0, 4))
+
+        weekday_border = ctk.CTkFrame(
+            weekday_frame,
+            fg_color="white",
+            border_width=1,
+            border_color="#9CA3AF",
+            corner_radius=6
+        )
+        weekday_border.pack(fill="x")
+
+        self.weekday_option = ctk.CTkOptionMenu(
+            weekday_border,
+            values=["未設定", "月曜", "火曜", "水曜", "木曜", "金曜", "土曜", "日曜"],
+            font=ctk.CTkFont(family="Yu Gothic", size=14),
+            dropdown_font=ctk.CTkFont(family="Yu Gothic", size=13),
+            height=40,
+            fg_color="#F9FAFB",
+            button_color="#DBEAFE",
+            button_hover_color="#BFDBFE",
+            dropdown_fg_color="#F8FAFC",
+            dropdown_hover_color="#DBEAFE",
+            dropdown_text_color="#1F2937",
+            text_color="#374151",
+            corner_radius=6
+        )
+        self.weekday_option.set("未設定")
+        self.weekday_option.pack(fill="x", padx=1, pady=1)
+
+        manual_frame = ctk.CTkFrame(extra_fields_frame, fg_color="transparent")
+        manual_frame.grid(row=0, column=3, sticky="ew", padx=(8, 0))
+
+        manual_label = ctk.CTkLabel(
+            manual_frame,
+            text="有効設定",
+            font=ctk.CTkFont(family="Yu Gothic", size=16, weight="bold"),
+            text_color="#374151"
+        )
+        manual_label.pack(anchor="w", pady=(0, 4))
+
+        manual_border = ctk.CTkFrame(
+            manual_frame,
+            fg_color="white",
+            border_width=1,
+            border_color="#9CA3AF",
+            corner_radius=6
+        )
+        manual_border.pack(fill="x")
+
+        self.manual_active_option = ctk.CTkOptionMenu(
+            manual_border,
+            values=["自動", "有効", "無効"],
+            font=ctk.CTkFont(family="Yu Gothic", size=14),
+            dropdown_font=ctk.CTkFont(family="Yu Gothic", size=13),
+            height=40,
+            fg_color="#F9FAFB",
+            button_color="#DBEAFE",
+            button_hover_color="#BFDBFE",
+            dropdown_fg_color="#F8FAFC",
+            dropdown_hover_color="#DBEAFE",
+            dropdown_text_color="#1F2937",
+            text_color="#374151",
+            corner_radius=6
+        )
+        self.manual_active_option.set("自動")
+        self.manual_active_option.pack(fill="x", padx=1, pady=1)
         
         # 入力フィールドの変更を監視してボタンの表示/非表示を制御
         # 品番入力フィールドのイベントはon_product_code_key_releaseで処理（予測検索も含む）
@@ -1125,6 +1256,20 @@ class ModernDataExtractorUI:
         product_code = self.product_code_entry.get().strip()
         process_name = self.process_name_entry.get().strip()
         lots = self.inspectable_lots_entry.get().strip()
+        machine = self.machine_entry.get().strip() if self.machine_entry else ""
+        headcount_raw = self.inspection_headcount_entry.get().strip() if self.inspection_headcount_entry else ""
+        weekday_value = self.weekday_option.get().strip() if hasattr(self, "weekday_option") else "未設定"
+        manual_active_value = self.manual_active_option.get().strip() if hasattr(self, "manual_active_option") else "自動"
+        headcount_value: Any = ""
+        if headcount_raw:
+            try:
+                headcount_value = int(headcount_raw)
+            except ValueError:
+                messagebox.showwarning("警告", "割当て人数は数値で入力してください。")
+                return
+            if headcount_value <= 0:
+                messagebox.showwarning("警告", "割当て人数は1以上で入力してください。")
+                return
         
         # 入力チェック
         if not product_code or not lots:
@@ -1138,13 +1283,22 @@ class ModernDataExtractorUI:
                 item['品番'] = product_code
                 item['ロット数'] = lots
                 item['工程名'] = process_name
+                item['号機'] = machine
+                item['検査割当て人数'] = headcount_value
+                item['曜日'] = weekday_value
+                item['有効設定'] = manual_active_value
                 if '固定検査員' not in item:
                     item['固定検査員'] = []
                 self.update_registered_list()
                 self.save_registered_products()
+                self._ensure_excluded_product_registered(product_code)
                 self.product_code_entry.delete(0, "end")
                 self.inspectable_lots_entry.delete(0, "end")
                 self.process_name_entry.delete(0, "end")
+                if self.machine_entry:
+                    self.machine_entry.delete(0, "end")
+                if self.inspection_headcount_entry:
+                    self.inspection_headcount_entry.delete(0, "end")
                 self.check_input_fields()
                 return
         
@@ -1153,15 +1307,28 @@ class ModernDataExtractorUI:
             '品番': product_code,
             'ロット数': lots,
             '工程名': process_name,
+            '号機': machine,
+            '検査割当て人数': headcount_value,
+            '曜日': weekday_value,
+            '有効設定': manual_active_value,
             '固定検査員': []
         })
         
         # リストとファイル更新
         self.update_registered_list()
         self.save_registered_products()
+        self._ensure_excluded_product_registered(product_code)
         self.product_code_entry.delete(0, "end")
         self.inspectable_lots_entry.delete(0, "end")
         self.process_name_entry.delete(0, "end")
+        if self.machine_entry:
+            self.machine_entry.delete(0, "end")
+        if self.inspection_headcount_entry:
+            self.inspection_headcount_entry.delete(0, "end")
+        if hasattr(self, "weekday_option"):
+            self.weekday_option.set("未設定")
+        if hasattr(self, "manual_active_option"):
+            self.manual_active_option.set("自動")
         self.check_input_fields()
 
     def update_registered_list(self):
@@ -1183,6 +1350,9 @@ class ModernDataExtractorUI:
             # 検査員情報がない場合は初期化
             if '固定検査員' not in item:
                 item['固定検査員'] = []
+            
+            highlight_text_color = "#3B82F6"  # 登録変更ボタンと同色
+            default_text_color = "#374151"
             
             default_row_color = "#F3F4F6"
             item_frame = ctk.CTkFrame(self.registered_list_container, fg_color=default_row_color, corner_radius=6)
@@ -1210,6 +1380,7 @@ class ModernDataExtractorUI:
                 text="品番：",
                 font=ctk.CTkFont(family="Yu Gothic", size=14, weight="bold"),
                 text_color="#374151",
+                width=40,
                 anchor="w"
             )
             product_label.pack(side="left", padx=(0, 2))
@@ -1219,8 +1390,8 @@ class ModernDataExtractorUI:
                 single_row,
                 text=item['品番'],
                 font=ctk.CTkFont(family="Yu Gothic", size=14, weight="bold"),
-                text_color="#374151",
-                width=150,
+                text_color=highlight_text_color if str(item.get('品番', '')).strip() else default_text_color,
+                width=160,
                 anchor="w"
             )
             product_value.pack(side="left", padx=(0, 2))
@@ -1228,9 +1399,10 @@ class ModernDataExtractorUI:
             # 検査可能ロット数／日のラベル
             lots_label = ctk.CTkLabel(
                 single_row,
-                text="検査可能ロット数／日：",
+                text="ロット数/日：",
                 font=ctk.CTkFont(family="Yu Gothic", size=14, weight="bold"),
                 text_color="#374151",
+                width=90,
                 anchor="w"
             )
             lots_label.pack(side="left", padx=(0, 2))
@@ -1240,16 +1412,18 @@ class ModernDataExtractorUI:
                 single_row,
                 text=f"{item['ロット数']}ロット",
                 font=ctk.CTkFont(family="Yu Gothic", size=14, weight="bold"),
-                text_color="#374151",
+                text_color=highlight_text_color if str(item.get('ロット数', '')).strip() else "#6B7280",
+                width=40,
                 anchor="w"
             )
             lots_value.pack(side="left", padx=(0, 2))
             # 工程名
             process_label = ctk.CTkLabel(
                 single_row,
-                text="工程名",
+                text="工程名：",
                 font=ctk.CTkFont(family="Yu Gothic", size=14, weight="bold"),
                 text_color="#374151",
+                width=60,
                 anchor="w"
             )
             process_label.pack(side="left", padx=(20, 2))
@@ -1258,10 +1432,105 @@ class ModernDataExtractorUI:
                 single_row,
                 text=item.get('工程名', '') or "未指定",
                 font=ctk.CTkFont(family="Yu Gothic", size=14, weight="bold"),
-                text_color="#374151",
+                text_color=highlight_text_color if str(item.get('工程名', '')).strip() else "#6B7280",
+                width=70,
                 anchor="w"
             )
             process_value.pack(side="left", padx=(0, 2))
+
+            # 号機
+            machine_label = ctk.CTkLabel(
+                single_row,
+                text="号機：",
+                font=ctk.CTkFont(family="Yu Gothic", size=14, weight="bold"),
+                text_color="#374151",
+                width=40,
+                anchor="w"
+            )
+            machine_label.pack(side="left", padx=(20, 2))
+
+            machine_value = ctk.CTkLabel(
+                single_row,
+                text=item.get('号機', '') or "未指定",
+                font=ctk.CTkFont(family="Yu Gothic", size=14, weight="bold"),
+                text_color=highlight_text_color if str(item.get('号機', '')).strip() else "#6B7280",
+                width=50,
+                anchor="w"
+            )
+            machine_value.pack(side="left", padx=(0, 2))
+
+            # 検査割当て人数
+            headcount_label = ctk.CTkLabel(
+                single_row,
+                text="割当て人数：",
+                font=ctk.CTkFont(family="Yu Gothic", size=14, weight="bold"),
+                text_color="#374151",
+                width=80,
+                anchor="w"
+            )
+            headcount_label.pack(side="left", padx=(20, 2))
+
+            headcount_raw = item.get('検査割当て人数', '')
+            headcount_text = f"{headcount_raw}人" if str(headcount_raw).strip() else "未指定"
+            headcount_value = ctk.CTkLabel(
+                single_row,
+                text=headcount_text,
+                font=ctk.CTkFont(family="Yu Gothic", size=14, weight="bold"),
+                text_color=highlight_text_color if str(headcount_raw).strip() else "#6B7280",
+                width=50,
+                anchor="w"
+            )
+            headcount_value.pack(side="left", padx=(0, 2))
+
+            sub_row = ctk.CTkFrame(info_frame, fg_color="transparent")
+            sub_row.pack(fill="x", anchor="w", pady=(2, 0))
+
+            weekday_raw = str(item.get('曜日', '') or '').strip()
+            weekday_text = weekday_raw if weekday_raw and weekday_raw != "未設定" else "未設定"
+            weekday_value_color = highlight_text_color if weekday_raw and weekday_raw != "未設定" else "#6B7280"
+
+            manual_setting = str(item.get('有効設定', '') or '').strip() or "自動"
+            manual_value_color = "#EF4444" if manual_setting == "無効" else "#3B82F6"
+
+            weekday_label = ctk.CTkLabel(
+                sub_row,
+                text="曜日:",
+                font=ctk.CTkFont(family="Yu Gothic", size=14, weight="bold"),
+                text_color="#374151",
+                width=40,
+                anchor="w"
+            )
+            weekday_label.pack(side="left", padx=(0, 3))
+
+            weekday_value = ctk.CTkLabel(
+                sub_row,
+                text=weekday_text,
+                font=ctk.CTkFont(family="Yu Gothic", size=14, weight="bold"),
+                text_color=weekday_value_color,
+                width=50,
+                anchor="w"
+            )
+            weekday_value.pack(side="left", padx=(0, 8))
+
+            manual_label = ctk.CTkLabel(
+                sub_row,
+                text="有効設定:",
+                font=ctk.CTkFont(family="Yu Gothic", size=14, weight="bold"),
+                text_color="#374151",
+                width=70,
+                anchor="w"
+            )
+            manual_label.pack(side="left", padx=(0, 3))
+
+            manual_value = ctk.CTkLabel(
+                sub_row,
+                text=manual_setting,
+                font=ctk.CTkFont(family="Yu Gothic", size=14, weight="bold"),
+                text_color=manual_value_color,
+                width=50,
+                anchor="w"
+            )
+            manual_value.pack(side="left", padx=(0, 2))
 
             
             # 固定検査員の表示
@@ -1294,9 +1563,11 @@ class ModernDataExtractorUI:
                 anchor="w"
             )
             fixed_inspectors_value.pack(side="left", fill="x", expand=True, padx=(0, 2))
-            if len(inspectors) > visible_limit:
+            if len(inspectors) >= visible_limit:
                 fixed_inspectors_value.configure(cursor="hand2")
                 fixed_inspectors_value.bind("<Button-1>", lambda event, names=inspectors: self.show_fixed_inspector_list(names))
+                fixed_inspectors_value.bind("<Enter>", lambda event: self._show_fixed_inspector_tooltip(event))
+                fixed_inspectors_value.bind("<Leave>", lambda event: self._hide_fixed_inspector_tooltip())
             
             button_column = ctk.CTkFrame(item_frame, fg_color="transparent", width=220)
             button_column.grid(row=0, column=1, sticky="ne", padx=(8, 5), pady=6)
@@ -1337,39 +1608,163 @@ class ModernDataExtractorUI:
         """固定検査員一覧をモーダル表示"""
         if not inspector_names:
             return
-
+        
         dialog = ctk.CTkToplevel(self.root)
         dialog.title("固定検査員一覧")
-        dialog.geometry("320x360")
+        dialog.geometry("420x460")
         dialog.transient(self.root)
         dialog.grab_set()
-
-        label = ctk.CTkLabel(
-            dialog,
-            text="\n".join(inspector_names),
-            font=ctk.CTkFont(family="Yu Gothic", size=12),
-            text_color="#111827",
-            justify="left",
-            anchor="w"
+        dialog.configure(fg_color="#EFF6FF")
+        
+        container = ctk.CTkFrame(dialog, fg_color="transparent")
+        container.pack(fill="both", expand=True, padx=16, pady=16)
+        
+        header_frame = ctk.CTkFrame(container, fg_color="transparent")
+        header_frame.pack(fill="x", pady=(4, 10))
+        
+        title_label = ctk.CTkLabel(
+            header_frame,
+            text="固定検査員一覧",
+            font=ctk.CTkFont(family="Yu Gothic", size=16, weight="bold"),
+            text_color="#1F2937"
         )
-        label.pack(fill="both", expand=True, padx=20, pady=(20, 10))
-
+        title_label.pack(anchor="w")
+        
+        count_label = ctk.CTkLabel(
+            header_frame,
+            text=f"人数: {len(inspector_names)}人",
+            font=ctk.CTkFont(family="Yu Gothic", size=12),
+            text_color="#6B7280"
+        )
+        count_label.pack(anchor="w", pady=(2, 0))
+        
+        list_card = ctk.CTkFrame(
+            container,
+            fg_color="white",
+            corner_radius=10,
+            border_width=1,
+            border_color="#DBEAFE"
+        )
+        list_card.pack(fill="both", expand=True, pady=(0, 12))
+        
+        list_frame = ctk.CTkScrollableFrame(
+            list_card,
+            fg_color="transparent",
+            corner_radius=8
+        )
+        list_frame.pack(fill="both", expand=True, padx=12, pady=12)
+        
+        for name in inspector_names:
+            row = ctk.CTkLabel(
+                list_frame,
+                text=f"・{name}",
+                font=ctk.CTkFont(family="Yu Gothic", size=13),
+                text_color="#111827",
+                anchor="w",
+                justify="left"
+            )
+            row.pack(fill="x", pady=2)
+        
+        footer_frame = ctk.CTkFrame(container, fg_color="transparent")
+        footer_frame.pack(fill="x")
+        
         close_button = ctk.CTkButton(
-            dialog,
+            footer_frame,
             text="閉じる",
             command=dialog.destroy,
-            width=100,
-            height=32
+            width=120,
+            height=36,
+            fg_color="#3B82F6",
+            hover_color="#2563EB",
+            text_color="white"
         )
-        close_button.pack(pady=(0, 20))
+        close_button.pack()
+
+    def _show_fixed_inspector_tooltip(self, event):
+        """固定検査員一覧の案内ツールチップを表示"""
+        tooltip_job = getattr(self, "_fixed_inspector_tooltip_job", None)
+        if tooltip_job is not None:
+            return
+        self._fixed_inspector_tooltip_target = event.widget
+        self._fixed_inspector_tooltip_job = self.root.after(
+            120,
+            lambda: self._create_fixed_inspector_tooltip(event)
+        )
+
+    def _create_fixed_inspector_tooltip(self, event):
+        """固定検査員一覧の案内ツールチップを生成"""
+        self._fixed_inspector_tooltip_job = None
+        widget = event.widget
+        if not widget or not widget.winfo_exists():
+            return
+        pointer_x = self.root.winfo_pointerx()
+        pointer_y = self.root.winfo_pointery()
+        if widget.winfo_containing(pointer_x, pointer_y) != widget:
+            return
+
+        self._hide_fixed_inspector_tooltip()
+        tooltip = ctk.CTkToplevel(self.root)
+        tooltip.wm_overrideredirect(True)
+        tooltip.attributes("-topmost", True)
+        tooltip.configure(fg_color="#FFFFFF")
+
+        x = widget.winfo_rootx() + 6
+        y = widget.winfo_rooty() + widget.winfo_height() + 8
+        screen_width = widget.winfo_screenwidth()
+        screen_height = widget.winfo_screenheight()
+        max_x = screen_width - 240
+        max_y = screen_height - 80
+        x = min(max(6, x), max_x)
+        y = min(max(6, y), max_y)
+        tooltip.geometry(f"+{x}+{y}")
+
+        bubble = ctk.CTkFrame(
+            tooltip,
+            fg_color="#F8FAFC",
+            corner_radius=10,
+            border_width=1,
+            border_color="#BFDBFE"
+        )
+        bubble.pack(padx=0, pady=0)
+
+        accent = ctk.CTkFrame(bubble, fg_color="#3B82F6", height=3, corner_radius=6)
+        accent.pack(fill="x", padx=10, pady=(8, 4))
+
+        label = ctk.CTkLabel(
+            bubble,
+            text="クリックして固定検査員一覧を表示",
+            font=ctk.CTkFont(family="Yu Gothic", size=11, weight="bold"),
+            text_color="#1F2937"
+        )
+        label.pack(padx=12, pady=(0, 10))
+        self._fixed_inspector_tooltip = tooltip
+
+    def _hide_fixed_inspector_tooltip(self):
+        """固定検査員一覧の案内ツールチップを非表示"""
+        tooltip_job = getattr(self, "_fixed_inspector_tooltip_job", None)
+        if tooltip_job is not None:
+            try:
+                self.root.after_cancel(tooltip_job)
+            except Exception:
+                pass
+        self._fixed_inspector_tooltip_job = None
+        tooltip = getattr(self, "_fixed_inspector_tooltip", None)
+        if tooltip:
+            try:
+                tooltip.destroy()
+            except Exception:
+                pass
+        self._fixed_inspector_tooltip = None
 
     def delete_registered_product(self, index):
         """登録された品番を削除（後方互換性のため残す）"""
         if 0 <= index < len(self.registered_products):
+            deleted_product = self.registered_products[index].get('品番', '')
             self.registered_products.pop(index)
             self.update_registered_list()
             # ファイルに保存
             self.save_registered_products()
+            self._remove_excluded_product_if_unused(deleted_product)
     
     def modify_registered_product(self, index):
         """登録された品番の変更ダイアログを表示（ロット数変更・削除）"""
@@ -1380,11 +1775,17 @@ class ModernDataExtractorUI:
             item = self.registered_products[index]
             product_number = item['品番']
             current_lots = item['ロット数']
+            current_process = item.get('工程名', '')
+            current_machine = item.get('号機', '')
+            current_headcount = item.get('検査割当て人数', '')
+            current_weekday = item.get('曜日', '')
+            current_manual_setting = item.get('有効設定', '自動')
             
             # 変更ダイアログを作成
             dialog = ctk.CTkToplevel(self.root)
             dialog.title(f"登録変更 - {product_number}")
-            dialog.geometry("450x300")
+            dialog.geometry("520x720")
+            dialog.minsize(520, 720)
             dialog.transient(self.root)
             dialog.grab_set()
             
@@ -1396,50 +1797,190 @@ class ModernDataExtractorUI:
             )
             title_label.pack(pady=15)
             
-            # 現在のロット数表示
-            current_label = ctk.CTkLabel(
-                dialog,
-                text=f"現在のロット数: {current_lots}ロット",
-                font=ctk.CTkFont(family="Yu Gothic", size=14),
-                text_color="#6B7280"
-            )
-            current_label.pack(pady=5)
+            # 現在の設定表示
+            info_frame = ctk.CTkFrame(dialog, fg_color="transparent")
+            info_frame.pack(pady=5, padx=30, fill="x")
+            info_frame.grid_columnconfigure(1, weight=1)
+
+            current_labels = [
+                ("現在のロット数:", f"{current_lots}ロット"),
+                ("工程名:", str(current_process or "未指定")),
+                ("号機:", str(current_machine or "未指定")),
+                ("割当て人数:", f"{current_headcount}人" if str(current_headcount).strip() else "未指定"),
+                ("曜日:", str(current_weekday or "未設定")),
+                ("有効設定:", str(current_manual_setting or "自動")),
+            ]
+            for row_index, (label_text, value_text) in enumerate(current_labels):
+                label = ctk.CTkLabel(
+                    info_frame,
+                    text=label_text,
+                    font=ctk.CTkFont(family="Yu Gothic", size=13, weight="bold"),
+                    text_color="#6B7280"
+                )
+                label.grid(row=row_index, column=0, sticky="w", padx=(0, 8), pady=2)
+                value = ctk.CTkLabel(
+                    info_frame,
+                    text=value_text,
+                    font=ctk.CTkFont(family="Yu Gothic", size=13),
+                    text_color="#6B7280"
+                )
+                value.grid(row=row_index, column=1, sticky="w", pady=2)
             
             # ロット数入力フレーム
-            lots_frame = ctk.CTkFrame(dialog, fg_color="transparent")
-            lots_frame.pack(pady=20, padx=30, fill="x")
-            
-            lots_label = ctk.CTkLabel(
-                lots_frame,
-                text="新しいロット数:",
-                font=ctk.CTkFont(family="Yu Gothic", size=14, weight="bold")
-            )
-            lots_label.pack(side="left", padx=(0, 10))
-            
+            input_frame = ctk.CTkFrame(dialog, fg_color="transparent")
+            input_frame.pack(pady=15, padx=30, fill="x")
+            input_frame.grid_columnconfigure(1, weight=1)
+
+            def add_input_row(row_index, label_text, entry_widget):
+                label = ctk.CTkLabel(
+                    input_frame,
+                    text=label_text,
+                    font=ctk.CTkFont(family="Yu Gothic", size=14, weight="bold")
+                )
+                label.grid(row=row_index, column=0, sticky="w", padx=(0, 10), pady=6)
+                entry_widget.grid(row=row_index, column=1, sticky="ew", pady=6)
+
             lots_entry = ctk.CTkEntry(
-                lots_frame,
+                input_frame,
                 placeholder_text="ロット数を入力",
                 font=ctk.CTkFont(family="Yu Gothic", size=14),
-                width=150
+                height=40,
+                border_width=1,
+                border_color="#9CA3AF"
             )
-            lots_entry.pack(side="left")
-            lots_entry.insert(0, str(current_lots))  # 現在の値を初期値として設定
+            lots_entry.insert(0, str(current_lots))
+            add_input_row(0, "新しいロット数:", lots_entry)
+
+            process_entry = ctk.CTkEntry(
+                input_frame,
+                placeholder_text="例: 外観、顕微鏡、PG",
+                font=ctk.CTkFont(family="Yu Gothic", size=14),
+                height=40,
+                border_width=1,
+                border_color="#9CA3AF"
+            )
+            if str(current_process).strip():
+                process_entry.insert(0, str(current_process))
+            add_input_row(1, "工程名:", process_entry)
+
+            machine_entry = ctk.CTkEntry(
+                input_frame,
+                placeholder_text="例: A-1, C-8",
+                font=ctk.CTkFont(family="Yu Gothic", size=14),
+                height=40,
+                border_width=1,
+                border_color="#9CA3AF"
+            )
+            if current_machine:
+                machine_entry.insert(0, str(current_machine))
+            add_input_row(2, "号機:", machine_entry)
+
+            headcount_entry = ctk.CTkEntry(
+                input_frame,
+                placeholder_text="人数を入力（任意）",
+                font=ctk.CTkFont(family="Yu Gothic", size=14),
+                height=40,
+                border_width=1,
+                border_color="#9CA3AF"
+            )
+            if str(current_headcount).strip():
+                headcount_entry.insert(0, str(current_headcount))
+            add_input_row(3, "割当て人数:", headcount_entry)
+
+            weekday_option_frame = ctk.CTkFrame(
+                input_frame,
+                fg_color="white",
+                border_width=1,
+                border_color="#9CA3AF",
+                corner_radius=6,
+                height=40
+            )
+            weekday_option_frame.grid_columnconfigure(0, weight=1)
+            weekday_option_frame.pack_propagate(False)
+
+            weekday_option = ctk.CTkOptionMenu(
+                weekday_option_frame,
+                values=["未設定", "月曜", "火曜", "水曜", "木曜", "金曜", "土曜", "日曜"],
+                font=ctk.CTkFont(family="Yu Gothic", size=14),
+                dropdown_font=ctk.CTkFont(family="Yu Gothic", size=13),
+                height=40,
+                fg_color="white",
+                button_color="#E5E7EB",
+                button_hover_color="#CBD5E1",
+                dropdown_fg_color="#F8FAFC",
+                dropdown_hover_color="#DBEAFE",
+                dropdown_text_color="#1F2937",
+                text_color="#374151"
+            )
+            weekday_option.set(str(current_weekday or "未設定"))
+            weekday_option.pack(fill="x", padx=1, pady=1)
+            add_input_row(4, "曜日:", weekday_option_frame)
+
+            manual_setting_frame = ctk.CTkFrame(
+                input_frame,
+                fg_color="white",
+                border_width=1,
+                border_color="#9CA3AF",
+                corner_radius=6,
+                height=40
+            )
+            manual_setting_frame.grid_columnconfigure(0, weight=1)
+            manual_setting_frame.pack_propagate(False)
+
+            manual_setting_option = ctk.CTkOptionMenu(
+                manual_setting_frame,
+                values=["自動", "有効", "無効"],
+                font=ctk.CTkFont(family="Yu Gothic", size=14),
+                dropdown_font=ctk.CTkFont(family="Yu Gothic", size=13),
+                height=40,
+                fg_color="white",
+                button_color="#E5E7EB",
+                button_hover_color="#CBD5E1",
+                dropdown_fg_color="#F8FAFC",
+                dropdown_hover_color="#DBEAFE",
+                dropdown_text_color="#1F2937",
+                text_color="#374151"
+            )
+            manual_setting_option.set(str(current_manual_setting or "自動"))
+            manual_setting_option.pack(fill="x", padx=1, pady=1)
+            add_input_row(5, "有効設定:", manual_setting_frame)
             
             # ボタンフレーム
             button_frame = ctk.CTkFrame(dialog, fg_color="transparent")
-            button_frame.pack(pady=20)
+            button_frame.pack(pady=(24, 32))
             
             def update_lots():
                 """ロット数を更新"""
                 new_lots = lots_entry.get().strip()
                 if not new_lots:
                     return
+
+                new_process = process_entry.get().strip()
+                new_machine = machine_entry.get().strip()
+                new_headcount_raw = headcount_entry.get().strip()
+                new_weekday = weekday_option.get().strip()
+                new_manual_setting = manual_setting_option.get().strip()
+                new_headcount_value: Any = ""
+                if new_headcount_raw:
+                    try:
+                        new_headcount_value = int(new_headcount_raw)
+                    except ValueError:
+                        messagebox.showwarning("警告", "割当て人数は数値で入力してください。")
+                        return
+                    if new_headcount_value <= 0:
+                        messagebox.showwarning("警告", "割当て人数は1以上で入力してください。")
+                        return
                 
                 # ロット数を更新
                 item['ロット数'] = new_lots
+                item['工程名'] = new_process
+                item['号機'] = new_machine
+                item['検査割当て人数'] = new_headcount_value
+                item['曜日'] = new_weekday
+                item['有効設定'] = new_manual_setting
                 self.update_registered_list()
                 self.save_registered_products()
-                self.log_message(f"品番「{product_number}」のロット数を「{new_lots}ロット」に変更しました")
+                self.log_message(f"品番「{product_number}」の登録内容を更新しました（ロット数: {new_lots}ロット）")
                 dialog.destroy()
             
             def delete_product():
@@ -1463,10 +2004,12 @@ class ModernDataExtractorUI:
                 
                 def confirm_delete():
                     if 0 <= index < len(self.registered_products):
+                        deleted_product = self.registered_products[index].get('品番', '')
                         self.registered_products.pop(index)
                         self.update_registered_list()
                         self.save_registered_products()
                         self.log_message(f"品番「{product_number}」を登録から削除しました")
+                        self._remove_excluded_product_if_unused(deleted_product)
                     confirm_dialog.destroy()
                     dialog.destroy()
                 
@@ -1502,13 +2045,13 @@ class ModernDataExtractorUI:
             # ロット数変更ボタン
             update_button = ctk.CTkButton(
                 button_frame,
-                text="ロット数変更",
+                text="登録変更",
                 command=update_lots,
                 font=ctk.CTkFont(family="Yu Gothic", size=12, weight="bold"),
                 width=120,
                 height=35,
-                fg_color="#10B981",
-                hover_color="#059669",
+                fg_color="#3B82F6",
+                hover_color="#2563EB",
                 text_color="white"
             )
             update_button.pack(side="left", padx=10)
@@ -1660,18 +2203,22 @@ class ModernDataExtractorUI:
                 text="OK",
                 command=on_ok,
                 width=100,
-                height=30
+                height=30,
+                fg_color="#3B82F6",
+                hover_color="#2563EB",
+                text_color="white"
             )
             ok_button.pack(side="left", padx=5)
-            
+
             clear_button = ctk.CTkButton(
                 button_frame,
                 text="クリア",
                 command=on_clear,
                 width=100,
                 height=30,
-                fg_color="#F59E0B",
-                hover_color="#D97706"
+                fg_color="#EF4444",
+                hover_color="#DC2626",
+                text_color="white"
             )
             clear_button.pack(side="left", padx=5)
             
@@ -1751,6 +2298,40 @@ class ModernDataExtractorUI:
         except Exception as e:
             self.log_message(f"固定検査員情報の設定に失敗しました: {str(e)}")
             logger.error(f"固定検査員情報の設定に失敗しました: {str(e)}", exc_info=True)
+
+    def _set_preinspection_assignment_targets_to_manager(self):
+        """登録済み品番の検査割当て人数情報をInspectorAssignmentManagerに設定"""
+        try:
+            if not hasattr(self, 'inspector_manager') or self.inspector_manager is None:
+                return
+
+            targets: Dict[str, List[Dict[str, Any]]] = {}
+            for item in self.registered_products:
+                product_number = str(item.get('品番', '')).strip()
+                process_name = str(item.get('工程名', '') or '').strip()
+                headcount_raw = str(item.get('検査割当て人数', '') or '').strip()
+                if not product_number or not headcount_raw:
+                    continue
+                try:
+                    headcount_value = int(headcount_raw)
+                except ValueError:
+                    continue
+                if headcount_value <= 0:
+                    continue
+                targets.setdefault(product_number, []).append({
+                    'process': process_name,
+                    'headcount': headcount_value
+                })
+
+            self.inspector_manager.preinspection_assignment_targets = targets
+
+            if targets:
+                self.log_message(f"検査割当て人数情報を設定しました: {len(targets)}品番")
+            else:
+                self.log_message("検査割当て人数情報は設定されていません")
+        except Exception as e:
+            self.log_message(f"検査割当て人数情報の設定に失敗しました: {str(e)}")
+            logger.error(f"検査割当て人数情報の設定に失敗しました: {str(e)}", exc_info=True)
     
     def load_registered_products(self):
         """登録済み品番リストをファイルから読み込む"""
@@ -1784,6 +2365,35 @@ class ModernDataExtractorUI:
                         if normalized_key not in item and legacy_key in item:
                             item[normalized_key] = item[legacy_key]
                     item.setdefault('工程名', '')
+                    item.setdefault('号機', '')
+                    item.setdefault('曜日', '')
+                    item.setdefault('有効設定', '自動')
+                    headcount_raw = str(item.get('検査割当て人数', '') or '').strip()
+                    if headcount_raw:
+                        try:
+                            item['検査割当て人数'] = int(headcount_raw)
+                        except ValueError:
+                            item['検査割当て人数'] = ''
+                    else:
+                        item['検査割当て人数'] = ''
+                    weekday_raw = str(item.get('曜日', '') or '').strip()
+                    legacy_weekday_map = {
+                        "月": "月曜",
+                        "火": "火曜",
+                        "水": "水曜",
+                        "木": "木曜",
+                        "金": "金曜",
+                        "土": "土曜",
+                        "日": "日曜",
+                    }
+                    if weekday_raw in legacy_weekday_map:
+                        weekday_raw = legacy_weekday_map[weekday_raw]
+                        item['曜日'] = weekday_raw
+                    if weekday_raw not in {"", "未設定", "月曜", "火曜", "水曜", "木曜", "金曜", "土曜", "日曜"}:
+                        item['曜日'] = ''
+                    manual_setting_raw = str(item.get('有効設定', '') or '').strip()
+                    if manual_setting_raw not in {"自動", "有効", "無効"}:
+                        item['有効設定'] = "自動"
 
                     # 廃止キー/旧キーを削除（保存時に共有マスター側もクリーンにする）
                     item.pop('same_day_priority', None)
@@ -1801,11 +2411,38 @@ class ModernDataExtractorUI:
         """登録済み品番リストをファイルに保存"""
         try:
             legacy_keys_to_remove = {"?i??", "???b?g??", "???????"}
+            legacy_weekday_map = {
+                "月": "月曜",
+                "火": "火曜",
+                "水": "水曜",
+                "木": "木曜",
+                "金": "金曜",
+                "土": "土曜",
+                "日": "日曜",
+            }
             for item in self.registered_products:
                 if isinstance(item, dict):
                     item.pop('same_day_priority', None)
                     for legacy_key in legacy_keys_to_remove:
                         item.pop(legacy_key, None)
+                    if '号機' in item:
+                        item['号機'] = str(item.get('号機', '') or '').strip()
+                    item['曜日'] = str(item.get('曜日', '') or '').strip()
+                    if item['曜日'] in legacy_weekday_map:
+                        item['曜日'] = legacy_weekday_map[item['曜日']]
+                    if item['曜日'] not in {"", "未設定", "月曜", "火曜", "水曜", "木曜", "金曜", "土曜", "日曜"}:
+                        item['曜日'] = ""
+                    item['有効設定'] = str(item.get('有効設定', '') or '').strip() or "自動"
+                    if item['有効設定'] not in {"自動", "有効", "無効"}:
+                        item['有効設定'] = "自動"
+                    headcount_raw = str(item.get('検査割当て人数', '') or '').strip()
+                    if headcount_raw:
+                        try:
+                            item['検査割当て人数'] = int(headcount_raw)
+                        except ValueError:
+                            item['検査割当て人数'] = ''
+                    else:
+                        item['検査割当て人数'] = ''
             # 共有パスも含めてUTF-8(BOM)で統一して文字化けを防ぐ（Excel/メモ帳でも崩れにくい）
             tmp_path = self.registered_products_file.with_suffix(self.registered_products_file.suffix + ".tmp")
             with open(tmp_path, 'w', encoding='utf-8-sig') as f:
@@ -1920,6 +2557,29 @@ class ModernDataExtractorUI:
             logger.debug(f"抽出対象外（品番）マスタを保存しました: {len(self.excluded_products)}件")
         except Exception as e:
             logger.error(f"抽出対象外（品番）マスタの保存に失敗しました: {str(e)}")
+
+    def _ensure_excluded_product_registered(self, product_number: str) -> None:
+        """登録済み品番が抽出対象外（品番）マスタに存在することを保証"""
+        pn = self._normalize_product_number(product_number)
+        if not pn:
+            return
+        if any(self._normalize_product_number(entry.get("品番", "")) == pn for entry in (self.excluded_products or [])):
+            return
+        self.excluded_products.append({"品番": pn, "メモ": ""})
+        self.save_excluded_products()
+
+    def _remove_excluded_product_if_unused(self, product_number: str) -> None:
+        """登録済み品番から消えた場合に抽出対象外マスタから削除"""
+        pn = self._normalize_product_number(product_number)
+        if not pn:
+            return
+        if any(self._normalize_product_number(item.get("品番", "")) == pn for item in (self.registered_products or [])):
+            return
+        self.excluded_products = [
+            entry for entry in (self.excluded_products or [])
+            if self._normalize_product_number(entry.get("品番", "")) != pn
+        ]
+        self.save_excluded_products()
     
     def create_period_selector(self, parent):
         """期間選択UIの作成"""
@@ -5328,7 +5988,40 @@ class ModernDataExtractorUI:
         except Exception as e:
             self.log_message(f"登録済み品番のロット取得中にエラーが発生しました: {str(e)}")
             return pd.DataFrame()
-    
+
+    def _is_registered_product_active(self, registered_item, target_date=None) -> bool:
+        """登録済み品番が当日割当対象か判定（曜日 + 手動有効設定）"""
+        manual_setting = str(registered_item.get('有効設定', '') or '').strip() or "自動"
+        if manual_setting == "有効":
+            return True
+        if manual_setting == "無効":
+            return False
+
+        weekday_setting = str(registered_item.get('曜日', '') or '').strip()
+        legacy_weekday_map = {
+            "月": "月曜",
+            "火": "火曜",
+            "水": "水曜",
+            "木": "木曜",
+            "金": "金曜",
+            "土": "土曜",
+            "日": "日曜",
+        }
+        if weekday_setting in legacy_weekday_map:
+            weekday_setting = legacy_weekday_map[weekday_setting]
+        if not weekday_setting or weekday_setting == "未設定":
+            return True
+
+        if target_date is None:
+            target_date = datetime.now().date()
+
+        weekday_map = ["月曜", "火曜", "水曜", "木曜", "金曜", "土曜", "日曜"]
+        try:
+            today_label = weekday_map[target_date.weekday()]
+        except Exception:
+            return True
+        return weekday_setting == today_label
+
     def assign_registered_products_lots(self, connection, main_df, assignment_df):
         """登録済み品番のロットを割り当て"""
         try:
@@ -5351,8 +6044,10 @@ class ModernDataExtractorUI:
                     main_row_by_product = main_df.dropna(subset=['品番']).drop_duplicates('品番').set_index('品番')
                 except Exception:
                     main_row_by_product = {}
-            
+
             for registered_item in self.registered_products:
+                if not self._is_registered_product_active(registered_item):
+                    continue
                 product_number = registered_item.get('品番', '')
                 max_lots_per_day = int(registered_item.get('ロット数', 0))
                 
@@ -5361,6 +6056,23 @@ class ModernDataExtractorUI:
                 
                 if product_lots.empty:
                     continue
+
+                machine_filter = str(registered_item.get('号機', '') or '').strip()
+                if machine_filter:
+                    if "号機" in product_lots.columns:
+                        product_lots = product_lots[
+                            product_lots['号機'].astype(str).str.strip() == machine_filter
+                        ].copy()
+                        if product_lots.empty:
+                            self.log_message(
+                                f"登録済み品番 {product_number}: 号機「{machine_filter}」に一致するロットが見つかりません"
+                            )
+                            continue
+                    else:
+                        self.log_message(
+                            f"登録済み品番 {product_number}: 号機を指定しましたが、号機列がないため割当をスキップします"
+                        )
+                        continue
 
                 lots_before_filter = len(product_lots)
                 
@@ -5431,6 +6143,14 @@ class ModernDataExtractorUI:
                         main_row = main_row_by_product.loc[product_number]
                     except Exception:
                         main_row = None
+
+                headcount_raw = str(registered_item.get('検査割当て人数', '') or '').strip()
+                headcount_value: Any = ''
+                if headcount_raw:
+                    try:
+                        headcount_value = int(headcount_raw)
+                    except ValueError:
+                        headcount_value = ''
                 
                 with perf_timer(logger, f"lots.registered.build_assignments[{product_number}]"):
                     for lot in product_lots.itertuples(index=False):
@@ -5469,6 +6189,8 @@ class ModernDataExtractorUI:
                             '現在工程二次処理': lot[lot_cols.get('現在工程二次処理', -1)] if '現在工程二次処理' in lot_cols and pd.notna(lot[lot_cols['現在工程二次処理']]) else '',
                             '生産ロットID': lot[lot_cols.get('生産ロットID', -1)] if '生産ロットID' in lot_cols and pd.notna(lot[lot_cols['生産ロットID']]) else ''
                         }
+                        if headcount_value:
+                            assignment_result['検査割当て人数'] = headcount_value
                         
                         additional_assignments.append(assignment_result)
                         assigned_count += 1
@@ -6706,6 +7428,7 @@ class ModernDataExtractorUI:
             
             # 固定検査員情報を設定
             self._set_fixed_inspectors_to_manager()
+            self._set_preinspection_assignment_targets_to_manager()
             
             # 検査員を割り当て（スキル値付きで保存）
             self.update_progress(assign_start, "検査員を割り当て中...")
@@ -10211,6 +10934,7 @@ class ModernDataExtractorUI:
             
             # 固定検査員情報を設定
             self._set_fixed_inspectors_to_manager()
+            self._set_preinspection_assignment_targets_to_manager()
             
             # 検査員割振りテーブルを作成（製品マスタパスを渡す）
             product_master_path = self.config.product_master_path if self.config else None
