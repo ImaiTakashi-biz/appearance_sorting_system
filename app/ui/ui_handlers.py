@@ -697,21 +697,27 @@ class ModernDataExtractorUI:
                 except Exception:
                     pass
 
-            # ログファイルが存在しない場合は作成し、ユーザー名を書き込む（BOM付きで作成）
+            # ログファイルが存在しない場合は作成し、ユーザー名とバージョンを書き込む（BOM付きで作成）
             if not log_file.exists():
                 with open(log_file, 'w', encoding='utf-8-sig') as f:
                     f.write(f"user : {user_name}\n")
+                    f.write(f"APP_VERSION = {APP_VERSION}\n")
             else:
-                # 既存ファイルの場合は、既にユーザー名が記載されているかチェック
+                # 既存ファイルの場合は、既にユーザー名とバージョンが記載されているかチェック
                 with open(log_file, 'r', encoding='utf-8', errors='replace') as f:
-                    first_line = f.readline().strip()
-                    # 既にユーザー名が記載されている場合は追加しない（重複を防ぐ）
-                    if not first_line.startswith('user :'):
-                        # ユーザー名が記載されていない場合のみ追加
+                    content_lines = f.readlines()
+                    has_user = any(line.strip().startswith('user :') for line in content_lines)
+                    has_version = any(line.strip().startswith('APP_VERSION =') for line in content_lines)
+                    
+                    # ユーザー名またはバージョンが記載されていない場合のみ追加
+                    if not has_user or not has_version:
                         with open(log_file, 'r+', encoding='utf-8', errors='replace') as f2:
                             content = f2.read()
                             f2.seek(0, 0)
-                            f2.write(f"user : {user_name}\n")
+                            if not has_user:
+                                f2.write(f"user : {user_name}\n")
+                            if not has_version:
+                                f2.write(f"APP_VERSION = {APP_VERSION}\n")
                             f2.write(content)
         except Exception as e:
             # ユーザー名の取得・書き込みに失敗した場合はエラーを無視（ログ機能は継続）
@@ -6411,15 +6417,15 @@ class ModernDataExtractorUI:
                 except:
                     pass
                 
-                # 2. 当日洗浄上がり品（優先度1）
+                # 2. 先行検査品（優先度1）
+                if (val_str == "先行検査" or
+                    val_str == "当日先行検査"):
+                    return (1, val_str)
+                
+                # 3. 当日洗浄上がり品（優先度2）
                 if (val_str == "当日洗浄上がり品" or
                     val_str == "当日洗浄品" or
                     "当日洗浄" in val_str):
-                    return (1, val_str)
-                
-                # 3. 先行検査品（優先度2）
-                if (val_str == "先行検査" or
-                    val_str == "当日先行検査"):
                     return (2, val_str)
                 
                 # 4. 翌日または翌営業日（優先度3）

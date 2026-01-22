@@ -3782,15 +3782,15 @@ class InspectorAssignmentManager:
                 except:
                     pass
                 
-                # 2. 当日洗浄上がり品（優先度1）
+                # 2. 先行検査品（優先度1）
+                if (val_str == "先行検査" or
+                    val_str == "当日先行検査"):
+                    return (1, val_str)
+                
+                # 3. 当日洗浄上がり品（優先度2）
                 if (val_str == "当日洗浄上がり品" or 
                     val_str == "当日洗浄品" or
                     "当日洗浄" in val_str):
-                    return (1, val_str)
-                
-                # 3. 先行検査品（優先度2）
-                if (val_str == "先行検査" or
-                    val_str == "当日先行検査"):
                     return (2, val_str)
                 
                 # 4. 翌日または翌営業日（優先度3）
@@ -6954,15 +6954,15 @@ class InspectorAssignmentManager:
                 except:
                     pass
                 
-                # 2. 当日洗浄上がり品（優先度1）
+                # 2. 先行検査品（優先度1）
+                if (val_str == "先行検査" or
+                    val_str == "当日先行検査"):
+                    return (1, val_str)
+                
+                # 3. 当日洗浄上がり品（優先度2）
                 if (val_str == "当日洗浄上がり品" or 
                     val_str == "当日洗浄品" or
                     "当日洗浄" in val_str):
-                    return (1, val_str)
-                
-                # 3. 先行検査品（優先度2）
-                if (val_str == "先行検査" or
-                    val_str == "当日先行検査"):
                     return (2, val_str)
                 
                 # 4. 翌日または翌営業日（優先度3）
@@ -8407,15 +8407,15 @@ class InspectorAssignmentManager:
                             except:
                                 pass
                             
-                            # 2. 当日洗浄上がり品（優先度1）
+                            # 2. 先行検査品（優先度1）
+                            if (val_str == "先行検査" or
+                                val_str == "当日先行検査"):
+                                return (1, val_str)
+                            
+                            # 3. 当日洗浄上がり品（優先度2）
                             if (val_str == "当日洗浄上がり品" or
                                 val_str == "当日洗浄品" or
                                 "当日洗浄" in val_str):
-                                return (1, val_str)
-                            
-                            # 3. 先行検査品（優先度2）
-                            if (val_str == "先行検査" or
-                                val_str == "当日先行検査"):
                                 return (2, val_str)
                             
                             # 4. 翌日または翌営業日（優先度3）
@@ -13278,15 +13278,15 @@ class InspectorAssignmentManager:
                 except:
                     pass
                 
-                # 2. 当日洗浄上がり品（優先度1）
+                # 2. 先行検査品（優先度1）
+                if (val_str == "先行検査" or
+                    val_str == "当日先行検査"):
+                    return (1, val_str)
+                
+                # 3. 当日洗浄上がり品（優先度2）
                 if (val_str == "当日洗浄上がり品" or
                     val_str == "当日洗浄品" or
                     "当日洗浄" in val_str):
-                    return (1, val_str)
-                
-                # 3. 先行検査品（優先度2）
-                if (val_str == "先行検査" or
-                    val_str == "当日先行検査"):
                     return (2, val_str)
                 
                 # 4. 今日より後〜3営業日以内（週末除外、優先度3）
