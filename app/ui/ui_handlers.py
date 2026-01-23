@@ -6,6 +6,7 @@
 import os
 import sys
 import hashlib
+import copy
 from pathlib import Path
 from collections import defaultdict, deque
 import warnings  # 警告抑制のため
@@ -32,6 +33,7 @@ import numpy as np
 import pyodbc
 from datetime import datetime, date, timedelta
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import re
@@ -363,7 +365,7 @@ class ModernDataExtractorUI:
         self.inspectable_lots_entry = None  # 検査可能ロット数／日入力フィールド
         self.machine_entry = None  # 号機入力フィールド
         self.inspection_headcount_entry = None  # 検査割当て人数入力フィールド
-        self.weekday_option = None  # 曜日選択
+        self.weekday_vars = {}  # 曜日選択（複数）
         self.manual_active_option = None  # 有効設定選択
         self.register_button = None  # 登録確定ボタン
         self.registered_products = []  # 登録された品番のリスト [{品番, ロット数}, ...]
@@ -459,6 +461,13 @@ class ModernDataExtractorUI:
         self.cache_timestamps = {}
         self.cache_file_mtimes = {}  # ファイル更新時刻を保存（高速化）
         self.cache_ttl = timedelta(minutes=self.MASTER_CACHE_TTL_MINUTES)
+        self._configured_styles = set()
+
+        # スクロール間引きとテーブル描画の最適化
+        self._scroll_debounce_jobs = {}
+        self._scroll_debounce_accumulators = {}
+        self._scroll_debounce_delay_ms = 40
+        self._treeview_batch_threshold = 200
 
         # Accessデータ取得キャッシュ
         self._access_lots_cache: Dict[Tuple[str, Tuple[str, ...], Tuple[str, ...]], pd.DataFrame] = {}
@@ -605,6 +614,60 @@ class ModernDataExtractorUI:
 
         except Exception as e:
             logger.error(f"メインスクロールバインド中にエラーが発生しました: {str(e)}")
+
+    def _debounced_tree_scroll(self, tree, event, key: str) -> str:
+        """ツリーのスクロール処理を間引いて負荷を軽減する"""
+        try:
+            if tree is None or event is None:
+                return "break"
+            delta = event.delta
+            if not delta:
+                return "break"
+            steps = -int(delta / 120) if abs(delta) >= 120 else (-1 if delta < 0 else 1)
+            if steps == 0:
+                return "break"
+            pending = self._scroll_debounce_accumulators.get(key, 0) + steps
+            self._scroll_debounce_accumulators[key] = pending
+            if key in self._scroll_debounce_jobs:
+                return "break"
+
+            def _apply_scroll():
+                self._scroll_debounce_jobs.pop(key, None)
+                amount = self._scroll_debounce_accumulators.pop(key, 0)
+                if amount:
+                    try:
+                        tree.yview_scroll(amount, "units")
+                    except Exception:
+                        pass
+
+            job = tree.after(self._scroll_debounce_delay_ms, _apply_scroll)
+            self._scroll_debounce_jobs[key] = job
+        except Exception:
+            return "break"
+        return "break"
+
+    def _suspend_treeview_redraw(self, tree, row_count: int) -> bool:
+        """大量挿入時に再描画を抑制する"""
+        if tree is None or row_count < self._treeview_batch_threshold:
+            return False
+        try:
+            backup = tree.cget("displaycolumns")
+            tree._displaycolumns_backup = backup
+            tree.configure(displaycolumns=())
+            return True
+        except Exception:
+            return False
+
+    def _resume_treeview_redraw(self, tree, suspended: bool) -> None:
+        if not suspended or tree is None:
+            return
+        try:
+            backup = getattr(tree, "_displaycolumns_backup", None)
+            if not backup:
+                backup = tree["columns"]
+            tree.configure(displaycolumns=backup)
+        except Exception:
+            pass
     
     def setup_logging(self, execution_id: str = None, use_existing_file: bool = False):
         """ログ設定
@@ -1136,23 +1199,26 @@ class ModernDataExtractorUI:
         )
         weekday_border.pack(fill="x")
 
-        self.weekday_option = ctk.CTkOptionMenu(
-            weekday_border,
-            values=["未設定", "月曜", "火曜", "水曜", "木曜", "金曜", "土曜", "日曜"],
-            font=ctk.CTkFont(family="Yu Gothic", size=14),
-            dropdown_font=ctk.CTkFont(family="Yu Gothic", size=13),
-            height=40,
-            fg_color="#F9FAFB",
-            button_color="#DBEAFE",
-            button_hover_color="#BFDBFE",
-            dropdown_fg_color="#F8FAFC",
-            dropdown_hover_color="#DBEAFE",
-            dropdown_text_color="#1F2937",
-            text_color="#374151",
-            corner_radius=6
-        )
-        self.weekday_option.set("未設定")
-        self.weekday_option.pack(fill="x", padx=1, pady=1)
+        weekday_grid = ctk.CTkFrame(weekday_border, fg_color="transparent")
+        weekday_grid.pack(fill="x", padx=6, pady=6)
+
+        self.weekday_vars = {}
+        weekday_items = ["月曜", "火曜", "水曜", "木曜", "金曜"]
+        for idx, day in enumerate(weekday_items):
+            var = ctk.BooleanVar(value=False)
+            self.weekday_vars[day] = var
+            checkbox = ctk.CTkCheckBox(
+                weekday_grid,
+                text=day,
+                variable=var,
+                font=ctk.CTkFont(family="Yu Gothic", size=13),
+                text_color="#374151",
+                fg_color="#2563EB",
+                border_color="#9CA3AF",
+                hover_color="#1D4ED8",
+                corner_radius=4,
+            )
+            checkbox.grid(row=0, column=idx, padx=6, pady=4, sticky="w")
 
         manual_frame = ctk.CTkFrame(extra_fields_frame, fg_color="transparent")
         manual_frame.grid(row=0, column=3, sticky="ew", padx=(8, 0))
@@ -1264,7 +1330,7 @@ class ModernDataExtractorUI:
         lots = self.inspectable_lots_entry.get().strip()
         machine = self.machine_entry.get().strip() if self.machine_entry else ""
         headcount_raw = self.inspection_headcount_entry.get().strip() if self.inspection_headcount_entry else ""
-        weekday_value = self.weekday_option.get().strip() if hasattr(self, "weekday_option") else "未設定"
+        weekday_value = self._get_weekday_value_from_vars(self.weekday_vars) if hasattr(self, "weekday_vars") else ""
         manual_active_value = self.manual_active_option.get().strip() if hasattr(self, "manual_active_option") else "自動"
         headcount_value: Any = ""
         if headcount_raw:
@@ -1291,7 +1357,7 @@ class ModernDataExtractorUI:
                 item['工程名'] = process_name
                 item['号機'] = machine
                 item['検査割当て人数'] = headcount_value
-                item['曜日'] = weekday_value
+                item['曜日'] = self._normalize_weekday_value(weekday_value)
                 item['有効設定'] = manual_active_value
                 if '固定検査員' not in item:
                     item['固定検査員'] = []
@@ -1315,7 +1381,7 @@ class ModernDataExtractorUI:
             '工程名': process_name,
             '号機': machine,
             '検査割当て人数': headcount_value,
-            '曜日': weekday_value,
+            '曜日': self._normalize_weekday_value(weekday_value),
             '有効設定': manual_active_value,
             '固定検査員': []
         })
@@ -1331,8 +1397,8 @@ class ModernDataExtractorUI:
             self.machine_entry.delete(0, "end")
         if self.inspection_headcount_entry:
             self.inspection_headcount_entry.delete(0, "end")
-        if hasattr(self, "weekday_option"):
-            self.weekday_option.set("未設定")
+        if hasattr(self, "weekday_vars"):
+            self._set_weekday_vars(self.weekday_vars, "")
         if hasattr(self, "manual_active_option"):
             self.manual_active_option.set("自動")
         self.check_input_fields()
@@ -1492,8 +1558,8 @@ class ModernDataExtractorUI:
             sub_row.pack(fill="x", anchor="w", pady=(2, 0))
 
             weekday_raw = str(item.get('曜日', '') or '').strip()
-            weekday_text = weekday_raw if weekday_raw and weekday_raw != "未設定" else "未設定"
-            weekday_value_color = highlight_text_color if weekday_raw and weekday_raw != "未設定" else "#6B7280"
+            weekday_text = self._format_weekday_display(weekday_raw)
+            weekday_value_color = highlight_text_color if weekday_text != "未設定" else "#6B7280"
 
             manual_setting = str(item.get('有効設定', '') or '').strip() or "自動"
             manual_value_color = "#EF4444" if manual_setting == "無効" else "#3B82F6"
@@ -1513,7 +1579,7 @@ class ModernDataExtractorUI:
                 text=weekday_text,
                 font=ctk.CTkFont(family="Yu Gothic", size=14, weight="bold"),
                 text_color=weekday_value_color,
-                width=50,
+                width=100,
                 anchor="w"
             )
             weekday_value.pack(side="left", padx=(0, 8))
@@ -1836,7 +1902,7 @@ class ModernDataExtractorUI:
                 ("工程名:", str(current_process or "未指定")),
                 ("号機:", str(current_machine or "未指定")),
                 ("割当て人数:", f"{current_headcount}人" if str(current_headcount).strip() else "未指定"),
-                ("曜日:", str(current_weekday or "未設定")),
+                ("曜日:", self._format_weekday_display(current_weekday)),
                 ("有効設定:", str(current_manual_setting or "自動")),
             ]
             for row_index, (label_text, value_text) in enumerate(current_labels):
@@ -1921,28 +1987,31 @@ class ModernDataExtractorUI:
                 fg_color="white",
                 border_width=1,
                 border_color="#9CA3AF",
-                corner_radius=6,
-                height=40
+                corner_radius=6
             )
             weekday_option_frame.grid_columnconfigure(0, weight=1)
-            weekday_option_frame.pack_propagate(False)
 
-            weekday_option = ctk.CTkOptionMenu(
-                weekday_option_frame,
-                values=["未設定", "月曜", "火曜", "水曜", "木曜", "金曜", "土曜", "日曜"],
-                font=ctk.CTkFont(family="Yu Gothic", size=14),
-                dropdown_font=ctk.CTkFont(family="Yu Gothic", size=13),
-                height=40,
-                fg_color="white",
-                button_color="#E5E7EB",
-                button_hover_color="#CBD5E1",
-                dropdown_fg_color="#F8FAFC",
-                dropdown_hover_color="#DBEAFE",
-                dropdown_text_color="#1F2937",
-                text_color="#374151"
-            )
-            weekday_option.set(str(current_weekday or "未設定"))
-            weekday_option.pack(fill="x", padx=1, pady=1)
+            weekday_vars = {}
+            weekday_grid = ctk.CTkFrame(weekday_option_frame, fg_color="transparent")
+            weekday_grid.pack(fill="x", padx=6, pady=6, expand=True)
+            weekday_items = ["月曜", "火曜", "水曜", "木曜", "金曜"]
+            for idx, day in enumerate(weekday_items):
+                var = ctk.BooleanVar(value=False)
+                weekday_vars[day] = var
+                checkbox = ctk.CTkCheckBox(
+                    weekday_grid,
+                    text=day,
+                    variable=var,
+                    font=ctk.CTkFont(family="Yu Gothic", size=13),
+                    text_color="#374151",
+                    fg_color="#2563EB",
+                    border_color="#9CA3AF",
+                    hover_color="#1D4ED8",
+                    corner_radius=4,
+                )
+                checkbox.grid(row=0, column=idx, padx=6, pady=4, sticky="w")
+                weekday_grid.grid_columnconfigure(idx, weight=1)
+            self._set_weekday_vars(weekday_vars, current_weekday)
             add_input_row(4, "曜日:", weekday_option_frame)
 
             manual_setting_frame = ctk.CTkFrame(
@@ -1987,7 +2056,7 @@ class ModernDataExtractorUI:
                 new_process = process_entry.get().strip()
                 new_machine = machine_entry.get().strip()
                 new_headcount_raw = headcount_entry.get().strip()
-                new_weekday = weekday_option.get().strip()
+                new_weekday = self._get_weekday_value_from_vars(weekday_vars)
                 new_manual_setting = manual_setting_option.get().strip()
                 new_headcount_value: Any = ""
                 if new_headcount_raw:
@@ -2005,7 +2074,7 @@ class ModernDataExtractorUI:
                 item['工程名'] = new_process
                 item['号機'] = new_machine
                 item['検査割当て人数'] = new_headcount_value
-                item['曜日'] = new_weekday
+                item['曜日'] = self._normalize_weekday_value(new_weekday)
                 item['有効設定'] = new_manual_setting
                 self.update_registered_list()
                 self.save_registered_products()
@@ -2406,20 +2475,7 @@ class ModernDataExtractorUI:
                     else:
                         item['検査割当て人数'] = ''
                     weekday_raw = str(item.get('曜日', '') or '').strip()
-                    legacy_weekday_map = {
-                        "月": "月曜",
-                        "火": "火曜",
-                        "水": "水曜",
-                        "木": "木曜",
-                        "金": "金曜",
-                        "土": "土曜",
-                        "日": "日曜",
-                    }
-                    if weekday_raw in legacy_weekday_map:
-                        weekday_raw = legacy_weekday_map[weekday_raw]
-                        item['曜日'] = weekday_raw
-                    if weekday_raw not in {"", "未設定", "月曜", "火曜", "水曜", "木曜", "金曜", "土曜", "日曜"}:
-                        item['曜日'] = ''
+                    item['曜日'] = self._normalize_weekday_value(weekday_raw)
                     manual_setting_raw = str(item.get('有効設定', '') or '').strip()
                     if manual_setting_raw not in {"自動", "有効", "無効"}:
                         item['有効設定'] = "自動"
@@ -2456,11 +2512,7 @@ class ModernDataExtractorUI:
                         item.pop(legacy_key, None)
                     if '号機' in item:
                         item['号機'] = str(item.get('号機', '') or '').strip()
-                    item['曜日'] = str(item.get('曜日', '') or '').strip()
-                    if item['曜日'] in legacy_weekday_map:
-                        item['曜日'] = legacy_weekday_map[item['曜日']]
-                    if item['曜日'] not in {"", "未設定", "月曜", "火曜", "水曜", "木曜", "金曜", "土曜", "日曜"}:
-                        item['曜日'] = ""
+                    item['曜日'] = self._normalize_weekday_value(item.get('曜日', ''))
                     item['有効設定'] = str(item.get('有効設定', '') or '').strip() or "自動"
                     if item['有効設定'] not in {"自動", "有効", "無効"}:
                         item['有効設定'] = "自動"
@@ -2483,6 +2535,56 @@ class ModernDataExtractorUI:
 
     def _normalize_product_number(self, value: Any) -> str:
         return str(value or "").strip()
+
+    def _normalize_weekday_tokens(self, weekday_raw: str) -> list[str]:
+        weekday_items = ["月曜", "火曜", "水曜", "木曜", "金曜"]
+        if not weekday_raw:
+            return []
+        legacy_weekday_map = {
+            "月": "月曜",
+            "火": "火曜",
+            "水": "水曜",
+            "木": "木曜",
+            "金": "金曜",
+            "土": "土曜",
+            "日": "日曜",
+        }
+        parts = [p.strip() for p in re.split(r"[,、/\\s]+", str(weekday_raw)) if p.strip()]
+        normalized = []
+        for part in parts:
+            mapped = legacy_weekday_map.get(part, part)
+            if mapped in weekday_items and mapped not in normalized:
+                normalized.append(mapped)
+        return [day for day in weekday_items if day in normalized]
+
+    def _normalize_weekday_value(self, weekday_raw: str) -> str:
+        tokens = self._normalize_weekday_tokens(weekday_raw)
+        return ",".join(tokens)
+
+    def _format_weekday_display(self, weekday_raw: str) -> str:
+        normalized = self._normalize_weekday_value(weekday_raw)
+        return normalized if normalized else "未設定"
+
+    def _get_weekday_value_from_vars(self, weekday_vars: dict[str, Any]) -> str:
+        weekday_items = ["月曜", "火曜", "水曜", "木曜", "金曜"]
+        selected = [
+            day for day in weekday_items
+            if weekday_vars.get(day) is not None and bool(weekday_vars[day].get())
+        ]
+        return ",".join(selected)
+
+    def _set_weekday_vars(self, weekday_vars: dict[str, Any], weekday_raw: str) -> None:
+        selected = set(self._normalize_weekday_tokens(weekday_raw))
+        weekday_items = ["月曜", "火曜", "水曜", "木曜", "金曜"]
+        for day in weekday_items:
+            if day in weekday_vars:
+                weekday_vars[day].set(day in selected)
+
+    def _parse_fixed_inspectors_input(self, text: str) -> list[str]:
+        if not text:
+            return []
+        parts = [p.strip() for p in re.split(r"[,、/\\s]+", text) if p.strip()]
+        return list(dict.fromkeys(parts))
 
     def get_excluded_product_numbers_set(self) -> set[str]:
         """抽出対象外（品番）のセットを返す（空白は除外）。"""
@@ -3263,6 +3365,21 @@ class ModernDataExtractorUI:
             text_color="white"
         )
         self.extract_button.pack(side="left", padx=(0, 15))
+
+        self.non_inspection_update_button = ctk.CTkButton(
+            left_buttons_frame,
+            text="検査対象外のみ更新",
+            command=self.start_non_inspection_only_update,
+            font=ctk.CTkFont(family="Yu Gothic", size=15, weight="bold"),
+            height=45,
+            width=160,
+            fg_color="#0EA5E9",
+            hover_color="#0284C7",
+            corner_radius=10,
+            border_width=0,
+            text_color="white"
+        )
+        self.non_inspection_update_button.pack(side="left", padx=(0, 15))
         
         # 設定リロードボタン（左側）
         self.reload_button = ctk.CTkButton(
@@ -3923,12 +4040,53 @@ class ModernDataExtractorUI:
         self._progress_monotonic_lock = True
         self._refresh_progress_display_mapping()
         self.extract_button.configure(state="disabled", text="抽出中...")
+        if hasattr(self, "non_inspection_update_button"):
+            self.non_inspection_update_button.configure(state="disabled")
+        if hasattr(self, "additional_assignment_button"):
+            self.additional_assignment_button.configure(state="disabled")
         self.progress_bar.set(0)
         self.progress_label.configure(text="データベースに接続中...")
         
         # スレッドでデータ抽出を実行
         thread = threading.Thread(
             target=self.extract_data_thread,
+            args=(start_date, end_date)
+        )
+        thread.daemon = True
+        thread.start()
+
+    def start_non_inspection_only_update(self):
+        """検査対象外ロットのみを更新"""
+        if self.is_extracting:
+            messagebox.showwarning("警告", "既にデータ抽出が実行中です")
+            return
+
+        if not self.config or not self.config.validate_config():
+            messagebox.showerror("エラー", "データベース設定が無効です。設定を確認してください。")
+            return
+
+        start_date, end_date = self.validate_dates()
+        if start_date is None or end_date is None:
+            return
+
+        self.is_extracting = True
+        self._auto_open_non_inspection_window_done = False
+        self._progress_monotonic_lock = True
+        self._refresh_progress_display_mapping()
+        self._progress_value = 0.0
+        if hasattr(self, "extract_button"):
+            self.extract_button.configure(state="disabled")
+        if hasattr(self, "non_inspection_update_button"):
+            self.non_inspection_update_button.configure(state="disabled", text="更新中...")
+        if hasattr(self, "additional_assignment_button"):
+            self.additional_assignment_button.configure(state="disabled")
+
+        self.progress_bar.set(0)
+        self.progress_label.configure(text="検査対象外ロットを更新中...")
+        self.update_progress(0.0, "検査対象外ロットを更新中...")
+
+        thread = threading.Thread(
+            target=self._non_inspection_only_update_thread,
             args=(start_date, end_date)
         )
         thread.daemon = True
@@ -4073,6 +4231,130 @@ class ModernDataExtractorUI:
                         pass
             finally:
                 pythoncom.CoUninitialize()
+
+    def _non_inspection_only_update_thread(self, start_date, end_date):
+        """検査対象外ロット情報のみを更新（スレッド処理）"""
+        connection = None
+        success = False
+        try:
+            with perf_timer(logger, "logging.setup"):
+                self.setup_logging(use_existing_file=True)
+
+            self.log_message("検査対象外ロットのみ更新を開始します")
+            self.log_message(f"抽出期間: {start_date} ～ {end_date}")
+
+            try:
+                self.update_progress(0.01, "不足集計を更新中...")
+                self.start_progress_pulse(0.01, 0.04, "不足集計を更新中...")
+                self._run_access_vba_shortage_aggregate(start_date, end_date)
+                self.stop_progress_pulse(final_value=0.04, message="不足集計の更新が完了しました")
+            except Exception as e:
+                self.log_message(f"Access VBAの実行に失敗しました: {e}", level="error")
+                raise
+
+            self.update_progress(0.06, "データベースに接続中...")
+            self.start_progress_pulse(0.06, 0.08, "データベースに接続中...")
+            with perf_timer(logger, "db.connect"):
+                connection = self.config.get_connection()
+            self.stop_progress_pulse(final_value=0.08, message="データベース接続が完了しました")
+
+            self.update_progress(0.10, "検査対象CSVを読み込み中...")
+            with perf_timer(logger, "inspection_target_csv.load_cached"):
+                self.inspection_target_keywords = self.load_inspection_target_csv_cached()
+
+            self.update_progress(0.15, "検査対象外ロット情報を取得中...")
+            self.start_progress_pulse(0.15, 0.30, "検査対象外ロット情報を取得中...")
+            shortage_df = self._load_shortage_data_for_non_inspection(connection, start_date, end_date)
+            if shortage_df is None or shortage_df.empty:
+                self.stop_progress_pulse(final_value=0.30, message="不足データがありませんでした")
+                self.log_message("不足データがありませんでした")
+            else:
+                self.log_non_inspection_lots_info(connection, shortage_df)
+                self.stop_progress_pulse(final_value=0.30, message="検査対象外ロット情報の取得が完了しました")
+
+            self.update_progress(1.0, "検査対象外ロットの更新が完了しました")
+            success = True
+        except Exception as e:
+            self.log_message(f"検査対象外ロットの更新中にエラーが発生しました: {str(e)}")
+            logger.error(f"検査対象外ロットの更新中にエラーが発生しました: {str(e)}", exc_info=True)
+        finally:
+            self._additional_assignment_fixed_overrides = {}
+            self._additional_assignment_headcount_overrides = {}
+            try:
+                if connection is not None:
+                    connection.close()
+            except Exception:
+                pass
+            self.root.after(0, lambda: self._finish_non_inspection_only_update(success))
+
+    def _load_shortage_data_for_non_inspection(self, connection, start_date, end_date) -> pd.DataFrame:
+        """検査対象外ロット取得用の不足データを最小列で取得"""
+        try:
+            actual_columns = None
+            if (ModernDataExtractorUI._table_structure_cache is not None and
+                ModernDataExtractorUI._table_structure_cache_timestamp is not None):
+                elapsed = time.time() - ModernDataExtractorUI._table_structure_cache_timestamp
+                if elapsed < ModernDataExtractorUI.TABLE_STRUCTURE_CACHE_TTL:
+                    actual_columns = ModernDataExtractorUI._table_structure_cache
+
+            if actual_columns is None:
+                columns_query = f"SELECT TOP 1 * FROM [{self.config.access_table_name}]"
+                with perf_timer(logger, "access.table_structure.read_sql"):
+                    sample_df = pd.read_sql(columns_query, connection)
+                if sample_df.empty:
+                    self.log_message("抽出データがありません")
+                    return pd.DataFrame()
+                actual_columns = sample_df.columns.tolist()
+                ModernDataExtractorUI._table_structure_cache = actual_columns
+                ModernDataExtractorUI._table_structure_cache_timestamp = time.time()
+
+            required_columns = ["品番", "不足数", "出荷予定日"]
+            available_columns = [col for col in required_columns if col in actual_columns]
+            if "品番" not in available_columns or "不足数" not in available_columns:
+                self.log_message("不足データ取得に必要な列（品番/不足数）が見つかりません")
+                return pd.DataFrame()
+
+            columns_str = ", ".join([f"[{col}]" for col in available_columns])
+            if "出荷予定日" in available_columns:
+                start_date_str = pd.to_datetime(start_date).strftime('#%Y-%m-%d#')
+                end_date_str = pd.to_datetime(end_date).strftime('#%Y-%m-%d#')
+                query = (
+                    f"SELECT {columns_str} FROM [{self.config.access_table_name}] "
+                    f"WHERE [出荷予定日] >= {start_date_str} AND [出荷予定日] <= {end_date_str} "
+                    f"ORDER BY [出荷予定日]"
+                )
+            else:
+                query = f"SELECT {columns_str} FROM [{self.config.access_table_name}]"
+
+            with perf_timer(logger, "access.shortage.read_sql"):
+                df = pd.read_sql(query, connection)
+
+            if df.empty:
+                return df
+
+            excluded_products = self.get_excluded_product_numbers_set()
+            if excluded_products and "品番" in df.columns:
+                df = df[~df["品番"].fillna("").astype(str).str.strip().isin(excluded_products)].copy()
+
+            return df
+        except Exception as e:
+            self.log_message(f"不足データ取得中にエラーが発生しました: {str(e)}")
+            logger.error(f"不足データ取得中にエラーが発生しました: {str(e)}", exc_info=True)
+            return pd.DataFrame()
+
+    def _finish_non_inspection_only_update(self, success: bool) -> None:
+        """検査対象外ロット更新のUI状態を復帰"""
+        if not success:
+            self.reset_ui_state()
+        else:
+            self.is_extracting = False
+            self._progress_monotonic_lock = False
+            if hasattr(self, "extract_button"):
+                self.extract_button.configure(state="normal", text="データ抽出開始")
+            if hasattr(self, "non_inspection_update_button"):
+                self.non_inspection_update_button.configure(state="normal", text="検査対象外のみ更新")
+            if hasattr(self, "additional_assignment_button"):
+                self.additional_assignment_button.configure(state="normal")
     
     def extract_data_thread(self, start_date, end_date):
         """データ抽出のスレッド処理"""
@@ -4474,6 +4756,10 @@ class ModernDataExtractorUI:
             else:
                 # 成功時はボタンのみ有効化（ステータスバーは維持）
                 self.root.after(0, lambda: self.extract_button.configure(state="normal", text="データ抽出開始"))
+                if hasattr(self, "non_inspection_update_button"):
+                    self.root.after(0, lambda: self.non_inspection_update_button.configure(state="normal", text="検査対象外のみ更新"))
+                if hasattr(self, "additional_assignment_button"):
+                    self.root.after(0, lambda: self.additional_assignment_button.configure(state="normal"))
                 self.root.after(0, lambda: setattr(self, 'is_extracting', False))
                 self.root.after(0, lambda: setattr(self, '_progress_monotonic_lock', False))
     
@@ -4791,26 +5077,28 @@ class ModernDataExtractorUI:
         """
         style = ttk.Style()
         
-        # 基本スタイル設定
-        style.configure(
-            style_name,
-            background="#FFFFFF",
-            foreground="#1F2937",
-            fieldbackground="#FFFFFF",
-            font=("Yu Gothic UI", 10),
-            rowheight=30,  # 行の高さを少し増やして見やすく
-            borderwidth=0,
-            relief="flat"
-        )
-        
-        # ヘッダースタイルはデフォルトの設定を使用（元の設定に戻す）
-        
-        # 選択時のスタイル
-        style.map(
-            style_name,
-            background=[('selected', '#3B82F6')],
-            foreground=[('selected', '#FFFFFF')]
-        )
+        if style_name not in self._configured_styles:
+            # 基本スタイル設定
+            style.configure(
+                style_name,
+                background="#FFFFFF",
+                foreground="#1F2937",
+                fieldbackground="#FFFFFF",
+                font=("Yu Gothic UI", 10),
+                rowheight=30,  # 行の高さを少し増やして見やすく
+                borderwidth=0,
+                relief="flat"
+            )
+            
+            # ヘッダースタイルはデフォルトの設定を使用（元の設定に戻す）
+            
+            # 選択時のスタイル
+            style.map(
+                style_name,
+                background=[('selected', '#3B82F6')],
+                foreground=[('selected', '#FFFFFF')]
+            )
+            self._configured_styles.add(style_name)
         
         # スタイルを適用
         tree.configure(style=style_name)
@@ -4998,8 +5286,7 @@ class ModernDataExtractorUI:
             
             # マウスホイールイベントのバインド
             def on_data_mousewheel(event):
-                data_tree.yview_scroll(int(-1 * (event.delta / 120)), "units")
-                return "break"
+                return self._debounced_tree_scroll(data_tree, event, "data_tree")
             
             data_tree.bind("<MouseWheel>", on_data_mousewheel)
             
@@ -5938,14 +6225,20 @@ class ModernDataExtractorUI:
             .reset_index(drop=True)
         )
     
-    def get_registered_products_lots(self, connection):
+    def get_registered_products_lots(self, connection, product_numbers: Optional[List[str]] = None):
         """登録済み品番のロットをt_現品票履歴から取得"""
         try:
-            if not self.registered_products:
-                return pd.DataFrame()
-            
-            # 登録済み品番のリストを取得
-            registered_product_numbers = [item['品番'] for item in self.registered_products]
+            registered_product_numbers = []
+            if product_numbers is not None:
+                registered_product_numbers = [
+                    str(val).strip()
+                    for val in product_numbers
+                    if val is not None and str(val).strip()
+                ]
+            else:
+                if not self.registered_products:
+                    return pd.DataFrame()
+                registered_product_numbers = [item['品番'] for item in self.registered_products]
             if not registered_product_numbers:
                 return pd.DataFrame()
             
@@ -6027,18 +6320,8 @@ class ModernDataExtractorUI:
             return False
 
         weekday_setting = str(registered_item.get('曜日', '') or '').strip()
-        legacy_weekday_map = {
-            "月": "月曜",
-            "火": "火曜",
-            "水": "水曜",
-            "木": "木曜",
-            "金": "金曜",
-            "土": "土曜",
-            "日": "日曜",
-        }
-        if weekday_setting in legacy_weekday_map:
-            weekday_setting = legacy_weekday_map[weekday_setting]
-        if not weekday_setting or weekday_setting == "未設定":
+        weekday_tokens = self._normalize_weekday_tokens(weekday_setting)
+        if not weekday_tokens:
             return True
 
         if target_date is None:
@@ -6049,23 +6332,42 @@ class ModernDataExtractorUI:
             today_label = weekday_map[target_date.weekday()]
         except Exception:
             return True
-        return weekday_setting == today_label
+        return today_label in weekday_tokens
 
-    def assign_registered_products_lots(self, connection, main_df, assignment_df):
+    def assign_registered_products_lots(
+        self,
+        connection,
+        main_df,
+        assignment_df,
+        target_indices: Optional[Set[int]] = None,
+        exclude_lot_ids: Optional[Set[str]] = None,
+        allow_inactive_targets: bool = False,
+        custom_items: Optional[List[Dict[str, Any]]] = None
+    ):
         """登録済み品番のロットを割り当て"""
         try:
-            if not self.registered_products:
+            items_to_process = custom_items if custom_items is not None else self.registered_products
+            if not items_to_process:
                 return assignment_df
             
             # 登録済み品番のロットを取得
             with perf_timer(logger, "lots.registered.get_registered_products_lots"):
-                registered_lots_df = self.get_registered_products_lots(connection)
+                registered_lots_df = self.get_registered_products_lots(
+                    connection,
+                    product_numbers=[item.get('品番', '') for item in items_to_process]
+                )
             
             if registered_lots_df.empty:
                 return assignment_df
             
             # 登録済み品番ごとに処理
             additional_assignments = []
+            target_index_set = set(target_indices) if target_indices else None
+            exclude_lot_ids_set = {
+                str(val).strip()
+                for val in (exclude_lot_ids or set())
+                if val is not None and str(val).strip()
+            }
 
             main_row_by_product = {}
             if main_df is not None and not main_df.empty and '品番' in main_df.columns:
@@ -6074,8 +6376,10 @@ class ModernDataExtractorUI:
                 except Exception:
                     main_row_by_product = {}
 
-            for registered_item in self.registered_products:
-                if not self._is_registered_product_active(registered_item):
+            for idx, registered_item in enumerate(items_to_process):
+                if target_index_set is not None and idx not in target_index_set and custom_items is None:
+                    continue
+                if (not allow_inactive_targets) and (not self._is_registered_product_active(registered_item)):
                     continue
                 product_number = registered_item.get('品番', '')
                 max_lots_per_day = int(registered_item.get('ロット数', 0))
@@ -6102,6 +6406,17 @@ class ModernDataExtractorUI:
                             f"登録済み品番 {product_number}: 号機を指定しましたが、号機列がないため割当をスキップします"
                         )
                         continue
+
+                if exclude_lot_ids_set and "生産ロットID" in product_lots.columns:
+                    before_filter = len(product_lots)
+                    product_lots = product_lots[
+                        ~product_lots["生産ロットID"].astype(str).str.strip().isin(exclude_lot_ids_set)
+                    ].copy()
+                    removed = before_filter - len(product_lots)
+                    if removed > 0:
+                        self.log_message(
+                            f"登録済み品番 {product_number}: 既割当ロットを除外しました ({removed}件)"
+                        )
 
                 lots_before_filter = len(product_lots)
                 
@@ -7703,6 +8018,7 @@ class ModernDataExtractorUI:
             row_index = 0
             # 列名から列インデックスへのマッピングを作成（高速化：itertuples()を使用）
             lot_col_idx_map = {col: assignment_df.columns.get_loc(col) for col in lot_columns}
+            suspended = self._suspend_treeview_redraw(lot_tree, len(assignment_df))
             
             for row_tuple in assignment_df.itertuples(index=True):
                 index = row_tuple[0]  # インデックス
@@ -7736,6 +8052,7 @@ class ModernDataExtractorUI:
                 tag = "even" if row_index % 2 == 0 else "odd"
                 lot_tree.insert("", "end", values=values, tags=(tag,))
                 row_index += 1
+            self._resume_treeview_redraw(lot_tree, suspended)
             
             # タグの設定（交互行色）
             lot_tree.tag_configure("even", background="#F9FAFB")
@@ -7743,8 +8060,7 @@ class ModernDataExtractorUI:
             
             # マウスホイールイベントのバインド
             def on_lot_mousewheel(event):
-                lot_tree.yview_scroll(int(-1 * (event.delta / 120)), "units")
-                return "break"
+                return self._debounced_tree_scroll(lot_tree, event, "lot_tree")
             
             lot_tree.bind("<MouseWheel>", on_lot_mousewheel)
             
@@ -7770,6 +8086,10 @@ class ModernDataExtractorUI:
         """UIの状態をリセット"""
         self.is_extracting = False
         self.extract_button.configure(state="normal", text="データ抽出開始")
+        if hasattr(self, "non_inspection_update_button"):
+            self.non_inspection_update_button.configure(state="normal", text="検査対象外のみ更新")
+        if hasattr(self, "additional_assignment_button"):
+            self.additional_assignment_button.configure(state="normal")
         self.root.after(0, self._stop_progress_pulse)
         self._progress_monotonic_lock = False
         self.progress_bar.set(0)
@@ -8860,6 +9180,21 @@ class ModernDataExtractorUI:
             action_flow_frame = ctk.CTkFrame(button_frame, fg_color="transparent")
             action_flow_frame.pack(side="right", padx=(0, 25))
 
+            self.additional_assignment_button = ctk.CTkButton(
+                button_frame,
+                text="追加割当",
+                command=self.show_additional_assignment_dialog,
+                width=110,
+                height=30,
+                font=ctk.CTkFont(family="Yu Gothic", size=12, weight="bold"),
+                fg_color="#6366F1",
+                hover_color="#4F46E5",
+                corner_radius=10,
+                border_width=0,
+                text_color="white"
+            )
+            self.additional_assignment_button.pack(side="right", padx=(0, 10))
+
             def append_arrow():
                 arrow_label = ctk.CTkLabel(
                     action_flow_frame,
@@ -8993,6 +9328,7 @@ class ModernDataExtractorUI:
             target_tree_item = None  # 選択する行のTreeviewアイテム
             # 列名から列インデックスへのマッピングを作成（高速化：itertuples()を使用）
             inspector_col_idx_map = {col: inspector_df.columns.get_loc(col) for col in inspector_columns if col in inspector_df.columns}
+            suspended = self._suspend_treeview_redraw(inspector_tree, len(inspector_df))
             
             for row_tuple in inspector_df.itertuples(index=True):
                 row_idx = row_tuple[0]  # インデックス
@@ -9036,6 +9372,7 @@ class ModernDataExtractorUI:
                     target_tree_item = tree_item
                 
                 row_index += 1
+            self._resume_treeview_redraw(inspector_tree, suspended)
             
             # タグの設定（交互行色）
             inspector_tree.tag_configure("even", background="#F9FAFB")
@@ -9043,10 +9380,7 @@ class ModernDataExtractorUI:
             
             # マウスホイールイベントのバインド（テーブルとフレーム全体にバインド）
             def on_inspector_mousewheel(event):
-                # スクロール量を計算（元の速度に戻す）
-                scroll_amount = int(-1 * (event.delta / 120))
-                inspector_tree.yview_scroll(scroll_amount, "units")
-                return "break"  # イベントの伝播を止める
+                return self._debounced_tree_scroll(inspector_tree, event, "inspector_tree")
             
             # テーブルとフレーム全体にマウスホイールイベントをバインド
             inspector_tree.bind("<MouseWheel>", on_inspector_mousewheel)
@@ -9281,10 +9615,11 @@ class ModernDataExtractorUI:
             return name[:open_idx].strip()
         return name
     
-    def open_seating_chart(self):
+    def open_seating_chart(self, open_browser: bool = True, show_dialogs: bool = True):
         """Export current lot assignments to the seating UI."""
         if self.current_inspector_data is None or self.current_inspector_data.empty:
-            messagebox.showwarning("Seat chart", "Inspector assignment data is not available.")
+            if show_dialogs:
+                messagebox.showwarning("Seat chart", "Inspector assignment data is not available.")
             return
         split_suffix_pattern = re.compile(r"-S\\d+$")
         def count_explicit_split(target_chart: Optional[Dict[str, List[Dict[str, object]]]]) -> int:
@@ -9315,7 +9650,8 @@ class ModernDataExtractorUI:
             len(lots_by_inspector),
         )
         if not lots_by_inspector:
-            messagebox.showinfo("Seat chart", "No lot data is available for seating layout export.")
+            if show_dialogs:
+                messagebox.showinfo("Seat chart", "No lot data is available for seating layout export.")
             return
         current_lot_id_counts: Dict[str, int] = defaultdict(int)
         for inspector_name, lots in lots_by_inspector.items():
@@ -9445,11 +9781,13 @@ class ModernDataExtractorUI:
                 inspector_candidates=inspector_names,
                 save_endpoint=save_endpoint,
             )
-            self._open_seating_chart_html(SEATING_HTML_PATH)
+            if open_browser:
+                self._open_seating_chart_html(SEATING_HTML_PATH)
             self.log_message(f"Seat chart generated: {SEATING_HTML_PATH}")
             self._set_seating_flow_prompt("座席表で割当を変更したら「ロット振分変更反映」を押してください。")
         except Exception as exc:
-            messagebox.showerror("Seat chart", f"Failed to generate seat chart: {exc}")
+            if show_dialogs:
+                messagebox.showerror("Seat chart", f"Failed to generate seat chart: {exc}")
             logger.error("Seat chart export failed", exc_info=True)
 
     def _open_seating_chart_html(self, html_path: str) -> None:
@@ -10988,6 +11326,719 @@ class ModernDataExtractorUI:
             self.log_message(error_msg)
             logger.error(error_msg)
             messagebox.showerror("エラー", error_msg)
+
+    def show_additional_assignment_dialog(self):
+        """追加割当の対象品番を選択するダイアログを表示"""
+        if self.is_extracting:
+            messagebox.showwarning("警告", "処理中のため追加割当を開始できません。")
+            return
+        if self.current_assignment_data is None or self.current_assignment_data.empty:
+            messagebox.showwarning("警告", "ロット割り当て結果がありません。\n先にデータを抽出してください。")
+            return
+        if self.current_inspector_data is None or self.current_inspector_data.empty:
+            messagebox.showwarning("警告", "検査員割振り結果がありません。\n先に検査員割振りを実行してください。")
+            return
+        if not self.registered_products:
+            messagebox.showinfo("情報", "登録済み品番がありません。")
+            return
+
+        dialog = ctk.CTkToplevel(self.root)
+        dialog.title("追加割当 - 登録済み品番を選択")
+        dialog.geometry("620x720")
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        label = ctk.CTkLabel(
+            dialog,
+            text="追加で割り当てる登録済み品番を選択してください",
+            font=ctk.CTkFont(family="Yu Gothic", size=14, weight="bold")
+        )
+        label.pack(pady=(10, 6))
+
+        manual_frame = ctk.CTkFrame(dialog, fg_color="#F8FAFC", corner_radius=8)
+        manual_frame.pack(fill="x", padx=20, pady=(0, 8))
+
+        manual_title = ctk.CTkLabel(
+            manual_frame,
+            text="直接入力で追加",
+            font=ctk.CTkFont(family="Yu Gothic", size=13, weight="bold"),
+            text_color="#1E3A8A"
+        )
+        manual_title.pack(anchor="w", padx=10, pady=(8, 4))
+
+        manual_fields = ctk.CTkFrame(manual_frame, fg_color="transparent")
+        manual_fields.pack(fill="x", padx=10, pady=(0, 8))
+        manual_fields.grid_columnconfigure((0, 1, 2), weight=1)
+
+        manual_product_entry = ctk.CTkEntry(
+            manual_fields,
+            placeholder_text="品番を入力",
+            height=32
+        )
+        manual_product_entry.grid(row=0, column=0, padx=6, pady=4, sticky="ew")
+
+        manual_lots_entry = ctk.CTkEntry(
+            manual_fields,
+            placeholder_text="検査ロット数",
+            height=32
+        )
+        manual_lots_entry.grid(row=0, column=1, padx=6, pady=4, sticky="ew")
+
+        manual_process_entry = ctk.CTkEntry(
+            manual_fields,
+            placeholder_text="工程名（任意）",
+            height=32
+        )
+        manual_process_entry.grid(row=0, column=2, padx=6, pady=4, sticky="ew")
+
+        manual_machine_entry = ctk.CTkEntry(
+            manual_fields,
+            placeholder_text="号機（任意）",
+            height=32
+        )
+        manual_machine_entry.grid(row=1, column=0, padx=6, pady=4, sticky="ew")
+
+        manual_headcount_entry = ctk.CTkEntry(
+            manual_fields,
+            placeholder_text="割当て人数（任意）",
+            height=32
+        )
+        manual_headcount_entry.grid(row=1, column=1, padx=6, pady=4, sticky="ew")
+
+        manual_fixed_entry = ctk.CTkEntry(
+            manual_fields,
+            placeholder_text="固定検査員（例: 山田, 佐藤）",
+            height=32
+        )
+        manual_fixed_entry.grid(row=1, column=2, padx=6, pady=4, sticky="ew")
+
+        scroll_frame = ctk.CTkScrollableFrame(dialog)
+        scroll_frame.pack(fill="both", expand=True, padx=20, pady=(0, 10))
+
+        selected_keys = set()
+        checkbox_vars = {}
+        item_by_key = {}
+        override_by_key = {}
+        manual_items = []
+        manual_seq = 0
+
+        def _is_descendant(widget, parent):
+            while widget is not None:
+                if widget == parent:
+                    return True
+                widget = widget.master
+            return False
+
+        def _bind_scroll_wheel():
+            canvas = getattr(scroll_frame, "_parent_canvas", None)
+            if canvas is None:
+                return
+
+            def _on_mousewheel(event):
+                if not _is_descendant(event.widget, scroll_frame):
+                    return
+                if hasattr(event, "delta") and event.delta:
+                    canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+                elif getattr(event, "num", None) == 4:
+                    canvas.yview_scroll(-1, "units")
+                elif getattr(event, "num", None) == 5:
+                    canvas.yview_scroll(1, "units")
+
+            dialog.bind("<MouseWheel>", _on_mousewheel)
+            dialog.bind("<Button-4>", _on_mousewheel)
+            dialog.bind("<Button-5>", _on_mousewheel)
+
+        _bind_scroll_wheel()
+
+        def toggle_key(key, var):
+            if var.get():
+                selected_keys.add(key)
+            else:
+                selected_keys.discard(key)
+
+        def build_label(item):
+            product_number = str(item.get("品番", "") or "").strip()
+            return f"品番:{product_number}"
+
+        def open_override_dialog(key, product_number):
+            existing = override_by_key.get(key, {})
+            override_dialog = ctk.CTkToplevel(dialog)
+            override_dialog.title(f"追加割当設定 - {product_number}")
+            override_dialog.geometry("420x380")
+            override_dialog.transient(dialog)
+            override_dialog.grab_set()
+
+            frame = ctk.CTkFrame(override_dialog, fg_color="transparent")
+            frame.pack(fill="x", padx=16, pady=12)
+            frame.grid_columnconfigure(0, weight=1)
+
+            lot_entry = ctk.CTkEntry(frame, placeholder_text="検査ロット数（未入力で登録値を使用）")
+            lot_entry.grid(row=0, column=0, sticky="ew", pady=6)
+            process_entry = ctk.CTkEntry(frame, placeholder_text="工程名（未入力で登録値を使用）")
+            process_entry.grid(row=1, column=0, sticky="ew", pady=6)
+            machine_entry = ctk.CTkEntry(frame, placeholder_text="号機（未入力で登録値を使用）")
+            machine_entry.grid(row=2, column=0, sticky="ew", pady=6)
+            headcount_entry = ctk.CTkEntry(frame, placeholder_text="割当て人数（未入力で登録値を使用）")
+            headcount_entry.grid(row=3, column=0, sticky="ew", pady=6)
+            fixed_entry = ctk.CTkEntry(frame, placeholder_text="固定検査員（例: 山田, 佐藤）")
+            fixed_entry.grid(row=4, column=0, sticky="ew", pady=6)
+
+            if existing.get("ロット数") is not None:
+                lot_entry.insert(0, str(existing.get("ロット数")))
+            if existing.get("工程名"):
+                process_entry.insert(0, str(existing.get("工程名")))
+            if existing.get("号機"):
+                machine_entry.insert(0, str(existing.get("号機")))
+            if existing.get("検査割当て人数") is not None:
+                headcount_entry.insert(0, str(existing.get("検査割当て人数")))
+            if existing.get("固定検査員"):
+                fixed_entry.insert(0, ", ".join(existing.get("固定検査員")))
+
+            def save_override():
+                overrides = {}
+                lot_raw = lot_entry.get().strip()
+                if lot_raw:
+                    try:
+                        lot_val = int(lot_raw)
+                    except ValueError:
+                        messagebox.showwarning("警告", "検査ロット数は数値で入力してください。")
+                        return
+                    if lot_val <= 0:
+                        messagebox.showwarning("警告", "検査ロット数は1以上で入力してください。")
+                        return
+                    overrides["ロット数"] = lot_val
+
+                process_raw = process_entry.get().strip()
+                if process_raw:
+                    overrides["工程名"] = process_raw
+
+                machine_raw = machine_entry.get().strip()
+                if machine_raw:
+                    overrides["号機"] = machine_raw
+
+                headcount_raw = headcount_entry.get().strip()
+                if headcount_raw:
+                    try:
+                        headcount_val = int(headcount_raw)
+                    except ValueError:
+                        messagebox.showwarning("警告", "割当て人数は数値で入力してください。")
+                        return
+                    if headcount_val <= 0:
+                        messagebox.showwarning("警告", "割当て人数は1以上で入力してください。")
+                        return
+                    overrides["検査割当て人数"] = headcount_val
+
+                fixed_raw = fixed_entry.get().strip()
+                if fixed_raw:
+                    overrides["固定検査員"] = self._parse_fixed_inspectors_input(fixed_raw)
+
+                override_by_key[key] = overrides
+                override_dialog.destroy()
+
+            save_button = ctk.CTkButton(
+                override_dialog,
+                text="設定を保存",
+                command=save_override,
+                width=120
+            )
+            save_button.pack(pady=12)
+
+        def add_item_row(key, item, is_manual=False):
+            row = ctk.CTkFrame(scroll_frame, fg_color="transparent")
+            row.pack(fill="x", pady=2, padx=2)
+
+            checkbox_var = tk.BooleanVar(value=False)
+            label_text = build_label(item)
+            if not is_manual and not self._is_registered_product_active(item):
+                label_text += "（対象外）"
+            checkbox = ctk.CTkCheckBox(
+                row,
+                text=label_text,
+                variable=checkbox_var,
+                command=lambda k=key, v=checkbox_var: toggle_key(k, v),
+                font=ctk.CTkFont(family="Yu Gothic", size=12, weight="bold")
+            )
+            checkbox.pack(side="left", padx=(4, 6))
+
+            settings_button = ctk.CTkButton(
+                row,
+                text="設定",
+                width=60,
+                height=26,
+                command=lambda k=key, pn=item.get("品番", ""): open_override_dialog(k, pn)
+            )
+            settings_button.pack(side="right", padx=(6, 4))
+
+            checkbox_vars[key] = checkbox_var
+            item_by_key[key] = item
+
+        def add_manual_item():
+            nonlocal manual_seq
+            product_number = manual_product_entry.get().strip()
+            lots_raw = manual_lots_entry.get().strip()
+            if not product_number:
+                messagebox.showwarning("警告", "品番を入力してください。")
+                return
+            if not lots_raw:
+                messagebox.showwarning("警告", "検査ロット数を入力してください。")
+                return
+            try:
+                lots_val = int(lots_raw)
+            except ValueError:
+                messagebox.showwarning("警告", "検査ロット数は数値で入力してください。")
+                return
+            if lots_val <= 0:
+                messagebox.showwarning("警告", "検査ロット数は1以上で入力してください。")
+                return
+
+            headcount_val = None
+            headcount_raw = manual_headcount_entry.get().strip()
+            if headcount_raw:
+                try:
+                    headcount_val = int(headcount_raw)
+                except ValueError:
+                    messagebox.showwarning("警告", "割当て人数は数値で入力してください。")
+                    return
+                if headcount_val <= 0:
+                    messagebox.showwarning("警告", "割当て人数は1以上で入力してください。")
+                    return
+
+            fixed_list = self._parse_fixed_inspectors_input(manual_fixed_entry.get().strip())
+
+            manual_item = {
+                "品番": product_number,
+                "ロット数": lots_val,
+                "工程名": manual_process_entry.get().strip(),
+                "号機": manual_machine_entry.get().strip(),
+                "検査割当て人数": headcount_val or "",
+                "固定検査員": fixed_list,
+                "有効設定": "有効",
+            }
+            manual_id = f"manual_{manual_seq}"
+            manual_seq += 1
+            manual_items.append(manual_item)
+            key = ("manual", manual_id)
+            add_item_row(key, manual_item, is_manual=True)
+            checkbox_vars[key].set(True)
+            selected_keys.add(key)
+
+            manual_product_entry.delete(0, "end")
+            manual_lots_entry.delete(0, "end")
+            manual_process_entry.delete(0, "end")
+            manual_machine_entry.delete(0, "end")
+            manual_headcount_entry.delete(0, "end")
+            manual_fixed_entry.delete(0, "end")
+
+        add_manual_button = ctk.CTkButton(
+            manual_frame,
+            text="直接入力を追加",
+            command=add_manual_item,
+            width=120,
+            height=28
+        )
+        add_manual_button.pack(anchor="e", padx=10, pady=(0, 8))
+
+        for idx, item in enumerate(self.registered_products):
+            key = ("registered", idx)
+            add_item_row(key, item, is_manual=False)
+
+        button_frame = ctk.CTkFrame(dialog, fg_color="transparent")
+        button_frame.pack(pady=10)
+
+        def select_all():
+            for key, var in checkbox_vars.items():
+                var.set(True)
+                selected_keys.add(key)
+
+        def clear_all():
+            for key, var in checkbox_vars.items():
+                var.set(False)
+            selected_keys.clear()
+
+        def on_ok():
+            if not selected_keys:
+                messagebox.showwarning("警告", "追加割当の対象が選択されていません。")
+                return
+
+            custom_items = []
+            for key in selected_keys:
+                base_item = item_by_key.get(key)
+                if not base_item:
+                    continue
+                item = copy.deepcopy(base_item)
+                overrides = override_by_key.get(key, {})
+                if overrides.get("ロット数") is not None:
+                    item["ロット数"] = overrides["ロット数"]
+                if overrides.get("工程名"):
+                    item["工程名"] = overrides["工程名"]
+                if overrides.get("号機"):
+                    item["号機"] = overrides["号機"]
+                if overrides.get("検査割当て人数") is not None:
+                    item["検査割当て人数"] = overrides["検査割当て人数"]
+                    item["_override_headcount"] = overrides["検査割当て人数"]
+                if overrides.get("固定検査員") is not None:
+                    item["_override_fixed_inspectors"] = overrides["固定検査員"]
+                process_override = overrides.get("工程名", "") or item.get("工程名", "")
+                if overrides.get("検査割当て人数") is not None or overrides.get("固定検査員") is not None:
+                    item["_override_process"] = process_override
+                if key[0] == "manual":
+                    if item.get("検査割当て人数"):
+                        item["_override_headcount"] = item.get("検査割当て人数")
+                        item["_override_process"] = process_override
+                    if item.get("固定検査員"):
+                        item["_override_fixed_inspectors"] = item.get("固定検査員")
+                        item["_override_process"] = process_override
+                custom_items.append(item)
+
+            if not custom_items:
+                messagebox.showwarning("警告", "追加割当の対象が選択されていません。")
+                return
+            dialog.destroy()
+            self.start_additional_assignment(custom_items)
+
+        select_all_button = ctk.CTkButton(
+            button_frame,
+            text="全選択",
+            command=select_all,
+            width=80,
+            height=32,
+            font=ctk.CTkFont(family="Yu Gothic", size=12, weight="bold")
+        )
+        select_all_button.pack(side="left", padx=6)
+
+        clear_all_button = ctk.CTkButton(
+            button_frame,
+            text="全解除",
+            command=clear_all,
+            width=80,
+            height=32,
+            font=ctk.CTkFont(family="Yu Gothic", size=12, weight="bold")
+        )
+        clear_all_button.pack(side="left", padx=6)
+
+        ok_button = ctk.CTkButton(
+            button_frame,
+            text="追加割当開始",
+            command=on_ok,
+            width=120,
+            height=32,
+            font=ctk.CTkFont(family="Yu Gothic", size=12, weight="bold"),
+            fg_color="#2563EB",
+            hover_color="#1D4ED8"
+        )
+        ok_button.pack(side="left", padx=10)
+
+        cancel_button = ctk.CTkButton(
+            button_frame,
+            text="キャンセル",
+            command=dialog.destroy,
+            width=90,
+            height=32,
+            font=ctk.CTkFont(family="Yu Gothic", size=12, weight="bold"),
+            fg_color="#6B7280",
+            hover_color="#4B5563"
+        )
+        cancel_button.pack(side="left", padx=6)
+
+    def start_additional_assignment(self, custom_items: List[Dict[str, Any]]) -> None:
+        """追加割当を開始"""
+        if self.is_extracting:
+            messagebox.showwarning("警告", "処理中のため追加割当を開始できません。")
+            return
+        if self.current_assignment_data is None or self.current_assignment_data.empty:
+            messagebox.showwarning("警告", "ロット割り当て結果がありません。\n先にデータを抽出してください。")
+            return
+        if self.current_inspector_data is None or self.current_inspector_data.empty:
+            messagebox.showwarning("警告", "検査員割振り結果がありません。\n先に検査員割振りを実行してください。")
+            return
+        if not self.config or not self.config.validate_config():
+            messagebox.showerror("エラー", "データベース設定が無効です。設定を確認してください。")
+            return
+        if not custom_items:
+            messagebox.showwarning("警告", "追加割当の対象が選択されていません。")
+            return
+
+        self.is_extracting = True
+        self._progress_monotonic_lock = True
+        self._refresh_progress_display_mapping()
+        self._progress_value = 0.0
+        if hasattr(self, "extract_button"):
+            self.extract_button.configure(state="disabled")
+        if hasattr(self, "non_inspection_update_button"):
+            self.non_inspection_update_button.configure(state="disabled")
+        if hasattr(self, "additional_assignment_button"):
+            self.additional_assignment_button.configure(state="disabled", text="追加中...")
+
+        self.progress_bar.set(0)
+        self.progress_label.configure(text="追加割当を開始します...")
+        self.update_progress(0.0, "追加割当を開始します...")
+
+        thread = threading.Thread(
+            target=self._additional_assignment_thread,
+            args=(custom_items,)
+        )
+        thread.daemon = True
+        thread.start()
+
+    def _additional_assignment_thread(self, custom_items: List[Dict[str, Any]]) -> None:
+        """追加割当のスレッド処理"""
+        connection = None
+        success = False
+        try:
+            self.log_message("追加割当を開始します")
+            self.update_progress(0.05, "追加割当: データ取得中...")
+
+            connection = self.config.get_connection()
+            existing_lot_ids = self._collect_assigned_lot_ids(self.current_assignment_data)
+
+            with perf_timer(logger, "lots.registered.additional"):
+                additional_assignment_df = self.assign_registered_products_lots(
+                    connection,
+                    self.current_main_data,
+                    pd.DataFrame(),
+                    target_indices=None,
+                    exclude_lot_ids=existing_lot_ids,
+                    allow_inactive_targets=True,
+                    custom_items=custom_items
+                )
+
+            if additional_assignment_df is None or additional_assignment_df.empty:
+                self.log_message("追加割当: 追加対象ロットがありませんでした")
+                self.update_progress(1.0, "追加割当が完了しました（追加対象なし）")
+                success = True
+                return
+
+            fixed_overrides = {}
+            headcount_overrides = {}
+            for item in custom_items:
+                product_number = str(item.get("品番", "") or "").strip()
+                if not product_number:
+                    continue
+                process_override = str(item.get("_override_process", "") or item.get("工程名", "") or "").strip()
+                fixed_list = item.get("_override_fixed_inspectors")
+                if fixed_list:
+                    fixed_overrides[product_number] = {
+                        "process": process_override,
+                        "inspectors": list(dict.fromkeys([str(name).strip() for name in fixed_list if str(name).strip()])),
+                    }
+                headcount_override = item.get("_override_headcount")
+                if headcount_override:
+                    try:
+                        headcount_val = int(headcount_override)
+                    except Exception:
+                        headcount_val = None
+                    if headcount_val and headcount_val > 0:
+                        headcount_overrides[product_number] = {
+                            "process": process_override,
+                            "headcount": headcount_val,
+                        }
+            self._additional_assignment_fixed_overrides = fixed_overrides
+            self._additional_assignment_headcount_overrides = headcount_overrides
+
+            self.update_progress(0.40, "追加割当: 検査員割振りを実行中...")
+            additional_display_df, additional_with_skills_df, inspector_master_df = self._assign_additional_inspector_lots(
+                additional_assignment_df
+            )
+            if additional_display_df is None or additional_display_df.empty:
+                self.log_message("追加割当: 検査員割振り結果がありませんでした")
+                return
+
+            self.current_assignment_data = (
+                additional_assignment_df.copy()
+                if self.current_assignment_data is None or self.current_assignment_data.empty
+                else pd.concat([self.current_assignment_data, additional_assignment_df], ignore_index=True)
+            )
+            self.current_inspector_data = (
+                additional_display_df.copy()
+                if self.current_inspector_data is None or self.current_inspector_data.empty
+                else pd.concat([self.current_inspector_data, additional_display_df], ignore_index=True)
+            )
+            self.original_inspector_data = (
+                additional_with_skills_df.copy()
+                if self.original_inspector_data is None or self.original_inspector_data.empty
+                else pd.concat([self.original_inspector_data, additional_with_skills_df], ignore_index=True)
+            )
+
+            try:
+                effective_inspector_master_df = None
+                if inspector_master_df is not None and not inspector_master_df.empty:
+                    effective_inspector_master_df = inspector_master_df
+                elif self.inspector_master_data is not None and not self.inspector_master_data.empty:
+                    effective_inspector_master_df = self.inspector_master_data
+                if effective_inspector_master_df is not None:
+                    self.inspector_manager._rebuild_assignment_histories(
+                        self.current_inspector_data,
+                        effective_inspector_master_df
+                    )
+            except Exception as e:
+                self.log_message(f"追加割当後の履歴再構築でエラーが発生しました: {e}", level="warning")
+
+            self.log_message(f"追加割当が完了しました: {len(additional_assignment_df)}件")
+            self.update_progress(1.0, "追加割当が完了しました")
+            success = True
+
+            self.root.after(0, self._refresh_after_additional_assignment)
+        except Exception as e:
+            self.log_message(f"追加割当中にエラーが発生しました: {str(e)}")
+            logger.error(f"追加割当中にエラーが発生しました: {str(e)}", exc_info=True)
+        finally:
+            try:
+                if connection is not None:
+                    connection.close()
+            except Exception:
+                pass
+            self.root.after(0, lambda: self._finish_additional_assignment_ui(success))
+
+    def _collect_assigned_lot_ids(self, assignment_df: Optional[pd.DataFrame]) -> Set[str]:
+        if assignment_df is None or assignment_df.empty:
+            return set()
+        if "生産ロットID" not in assignment_df.columns:
+            return set()
+        series = assignment_df["生産ロットID"].dropna().astype(str).str.strip()
+        return {val for val in series if val}
+
+    def _assign_additional_inspector_lots(self, assignment_df: pd.DataFrame):
+        """追加ロットの検査員割振り（既存履歴を参照しない）"""
+        if assignment_df is None or assignment_df.empty:
+            return None, None, None
+
+        self.update_progress(0.45, "追加割当: マスタ読み込み中...")
+        self.start_progress_pulse(0.45, 0.55, "追加割当: マスタ読み込み中...")
+        masters = self.load_masters_parallel(progress_base=0.45, progress_range=0.10)
+        self.stop_progress_pulse()
+
+        product_master_df = masters.get('product')
+        inspector_master_df = masters.get('inspector')
+        skill_master_df = masters.get('skill')
+
+        if product_master_df is None or inspector_master_df is None or skill_master_df is None:
+            self.log_message("追加割当: マスタの読み込みに失敗しました")
+            return None, None, inspector_master_df
+
+        self.inspector_master_data = inspector_master_df
+        self.skill_master_data = skill_master_df
+
+        self._set_fixed_inspectors_to_manager()
+        self._set_preinspection_assignment_targets_to_manager()
+
+        temp_manager = InspectorAssignmentManager(
+            log_callback=self.log_message,
+            product_limit_hard_threshold=self.app_config_manager.get_product_limit_hard_threshold(),
+            required_inspectors_threshold=self.app_config_manager.get_required_inspectors_threshold()
+        )
+
+        import copy
+        temp_manager.fixed_inspectors_by_product = copy.deepcopy(self.inspector_manager.fixed_inspectors_by_product)
+        temp_manager.preinspection_assignment_targets = copy.deepcopy(self.inspector_manager.preinspection_assignment_targets)
+
+        fixed_overrides = getattr(self, "_additional_assignment_fixed_overrides", {}) or {}
+        if fixed_overrides:
+            for product_number, entry in fixed_overrides.items():
+                inspectors = entry.get("inspectors", [])
+                if not inspectors:
+                    continue
+                process_name = str(entry.get("process", "") or "").strip()
+                temp_manager.fixed_inspectors_by_product[product_number] = [{
+                    "process": process_name,
+                    "inspectors": inspectors
+                }]
+
+        headcount_overrides = getattr(self, "_additional_assignment_headcount_overrides", {}) or {}
+        if headcount_overrides:
+            for product_number, entry in headcount_overrides.items():
+                headcount_val = entry.get("headcount")
+                try:
+                    headcount_val = int(headcount_val)
+                except Exception:
+                    headcount_val = None
+                if not headcount_val or headcount_val <= 0:
+                    continue
+                process_name = str(entry.get("process", "") or "").strip()
+                temp_manager.preinspection_assignment_targets[product_number] = [{
+                    "process": process_name,
+                    "headcount": headcount_val
+                }]
+
+        try:
+            vacation_data = getattr(self.inspector_manager, "vacation_data", {}) or {}
+            vacation_date = getattr(self.inspector_manager, "vacation_date", None)
+            if vacation_date is not None:
+                temp_manager.set_vacation_data(
+                    vacation_data,
+                    vacation_date,
+                    inspector_master_df=inspector_master_df
+                )
+        except Exception:
+            pass
+
+        product_master_path = self.config.product_master_path if self.config else None
+        process_master_path = self.config.process_master_path if self.config else None
+        inspection_target_keywords = self.load_inspection_target_csv()
+
+        inspector_df = temp_manager.create_inspector_assignment_table(
+            assignment_df,
+            product_master_df,
+            product_master_path=product_master_path,
+            process_master_path=process_master_path,
+            inspection_target_keywords=inspection_target_keywords
+        )
+        if inspector_df is None:
+            return None, None, inspector_master_df
+
+        process_master_df = None
+        if process_master_path:
+            process_master_df = temp_manager.load_process_master(process_master_path)
+
+        self.update_progress(0.60, "追加割当: 検査員を割り当て中...")
+        self.start_progress_pulse(0.60, 0.85, "追加割当: 検査員を割り当て中...")
+        inspector_df_with_skills = temp_manager.assign_inspectors(
+            inspector_df,
+            inspector_master_df,
+            skill_master_df,
+            show_skill_values=True,
+            process_master_df=process_master_df,
+            inspection_target_keywords=inspection_target_keywords
+        )
+        self.stop_progress_pulse()
+
+        display_df = inspector_df_with_skills.copy()
+        for col in display_df.columns:
+            if col.startswith("検査員"):
+                display_df[col] = display_df[col].astype(str).apply(
+                    lambda x: x.split('(')[0].strip() if '(' in x and ')' in x else x
+                )
+
+        return display_df, inspector_df_with_skills, inspector_master_df
+
+    def _refresh_after_additional_assignment(self) -> None:
+        """追加割当後に表示中のテーブルを更新"""
+        if self.current_display_table == "assignment" and self.current_assignment_data is not None:
+            self.display_lot_assignment_table(self.current_assignment_data)
+            if hasattr(self, 'assignment_button'):
+                self.update_button_states("assignment")
+        elif self.current_display_table == "inspector" and self.current_inspector_data is not None:
+            self.display_inspector_assignment_table(self.current_inspector_data)
+            if hasattr(self, 'inspector_button'):
+                self.update_button_states("inspector")
+        try:
+            self.open_seating_chart(open_browser=False, show_dialogs=False)
+        except Exception as e:
+            self.log_message(f"追加割当後の座席表更新に失敗しました: {str(e)}")
+
+    def _finish_additional_assignment_ui(self, success: bool) -> None:
+        """追加割当後にUI状態を復帰"""
+        if not success:
+            self.reset_ui_state()
+            return
+
+        self.is_extracting = False
+        self._progress_monotonic_lock = False
+        if hasattr(self, "extract_button"):
+            self.extract_button.configure(state="normal", text="データ抽出開始")
+        if hasattr(self, "non_inspection_update_button"):
+            self.non_inspection_update_button.configure(state="normal", text="検査対象外のみ更新")
+        if hasattr(self, "additional_assignment_button"):
+            self.additional_assignment_button.configure(state="normal", text="追加割当")
     
     def show_table(self, table_type):
         """選択されたテーブルを表示"""
