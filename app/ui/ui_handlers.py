@@ -587,6 +587,25 @@ class ModernDataExtractorUI:
         
         # ウィンドウを中央に配置
         self.root.geometry(f"{window_width}x{window_height}+{x}+{y}")
+
+    def _center_dialog_window(self, dialog: tk.Toplevel, parent: Optional[tk.Toplevel] = None) -> None:
+        """ダイアログを親ウィンドウ（または画面中央）に配置"""
+        try:
+            dialog.update_idletasks()
+            if parent is None:
+                width = dialog.winfo_width() or dialog.winfo_reqwidth()
+                height = dialog.winfo_height() or dialog.winfo_reqheight()
+                x = (dialog.winfo_screenwidth() - width) // 2
+                y = (dialog.winfo_screenheight() - height) // 2
+            else:
+                parent.update_idletasks()
+                width = dialog.winfo_width() or dialog.winfo_reqwidth()
+                height = dialog.winfo_height() or dialog.winfo_reqheight()
+                x = parent.winfo_rootx() + max(0, (parent.winfo_width() - width) // 2)
+                y = parent.winfo_rooty() + max(0, (parent.winfo_height() - height) // 2)
+            dialog.geometry(f"{width}x{height}+{x}+{y}")
+        except Exception:
+            pass
     
     def bind_main_scroll(self):
         """メイン画面のスクロールをバインド"""
@@ -1463,7 +1482,7 @@ class ModernDataExtractorUI:
                 text=item['品番'],
                 font=ctk.CTkFont(family="Yu Gothic", size=14, weight="bold"),
                 text_color=highlight_text_color if str(item.get('品番', '')).strip() else default_text_color,
-                width=160,
+                width=130,
                 anchor="w"
             )
             product_value.pack(side="left", padx=(0, 2))
@@ -1485,7 +1504,7 @@ class ModernDataExtractorUI:
                 text=f"{item['ロット数']}ロット",
                 font=ctk.CTkFont(family="Yu Gothic", size=14, weight="bold"),
                 text_color=highlight_text_color if str(item.get('ロット数', '')).strip() else "#6B7280",
-                width=40,
+                width=60,
                 anchor="w"
             )
             lots_value.pack(side="left", padx=(0, 2))
@@ -1883,6 +1902,7 @@ class ModernDataExtractorUI:
             dialog.minsize(520, 720)
             dialog.transient(self.root)
             dialog.grab_set()
+            self._center_dialog_window(dialog, self.root)
             
             # タイトルラベル
             title_label = ctk.CTkLabel(
@@ -2190,81 +2210,63 @@ class ModernDataExtractorUI:
             logger.error(f"登録変更ダイアログの表示に失敗しました: {str(e)}")
             self.log_message(f"エラー: 登録変更ダイアログの表示に失敗しました")
     
-    def fix_inspectors_for_product(self, index):
-        """品番に対する検査員を固定するダイアログを表示"""
+    def _show_fixed_inspector_selection_dialog(
+        self,
+        title: str,
+        description: str,
+        initial_selection: Optional[list[str]],
+        on_confirm,
+    ):
         try:
-            if index < 0 or index >= len(self.registered_products):
-                return
-            
-            item = self.registered_products[index]
-            product_number = item['品番']
-            
-            # 検査員マスタを読み込む（キャッシュを活用）
             inspector_master_df = self.load_inspector_master_cached()
             if inspector_master_df is None or inspector_master_df.empty:
                 self.log_message("エラー: 検査員マスタを読み込めません")
                 return
-            
-            # 検査員選択ダイアログを作成
+
             dialog = ctk.CTkToplevel(self.root)
-            dialog.title(f"検査員固定 - {product_number}")
+            dialog.title(title)
             dialog.geometry("500x600")
             dialog.transient(self.root)
             dialog.grab_set()
-            
-            # ラベル
+
             label = ctk.CTkLabel(
                 dialog,
-                text=f"品番「{product_number}」の固定検査員を選択してください",
+                text=description,
                 font=ctk.CTkFont(family="Yu Gothic", size=14, weight="bold")
             )
             label.pack(pady=10)
-            
-            # 現在の固定検査員を表示
-            current_fixed = item.get('固定検査員', [])
-            if current_fixed:
+
+            if initial_selection:
                 current_label = ctk.CTkLabel(
                     dialog,
-                    text=f"現在: {', '.join(current_fixed)}",
+                    text=f"現在: {', '.join(initial_selection)}",
                     font=ctk.CTkFont(family="Yu Gothic", size=12, weight="bold"),
                     text_color="#6B7280"
                 )
                 current_label.pack(pady=5)
-            
-            # スクロール可能なフレーム
+
             scroll_frame = ctk.CTkScrollableFrame(dialog)
             scroll_frame.pack(fill="both", expand=True, padx=20, pady=10)
-            
-            # マウスホイールイベントのバインド（CTkScrollableFrame用）
+
             def on_scroll_mousewheel(event):
-                # スクロール量を計算（速度を上げるため10倍にする）
                 scroll_amount = int(-1 * (event.delta / 120)) * 10
-                # CTkScrollableFrameの正しいスクロールメソッドを使用
                 if hasattr(scroll_frame, 'yview_scroll'):
                     scroll_frame.yview_scroll(scroll_amount, "units")
                 else:
-                    # CTkScrollableFrameの場合は内部のCanvasを直接操作
                     canvas = scroll_frame._parent_canvas
                     if canvas:
                         canvas.yview_scroll(scroll_amount, "units")
                 return "break"
-            
-            # スクロールフレームにマウスホイールイベントをバインド
+
             scroll_frame.bind("<MouseWheel>", on_scroll_mousewheel)
-            # ダイアログ全体にもバインド（フォーカスが外れている場合でも動作するように）
             dialog.bind("<MouseWheel>", on_scroll_mousewheel)
-            
-            # 選択された検査員を保持（セットで管理）
-            selected_inspectors = set(current_fixed)
-            
-            # 検査員リストを作成
+
+            selected_inspectors = set(initial_selection or [])
             inspector_names = inspector_master_df['#氏名'].dropna().astype(str).str.strip()
-            inspector_names = inspector_names[inspector_names != ''].unique().tolist()
-            
-            # 各検査員にチェックボックスを作成
-            inspector_checkboxes = {}
-            for inspector_name in sorted(inspector_names):
-                # チェックボックスを作成
+            inspector_names = sorted({name for name in inspector_names if name})
+
+            inspector_checkboxes: dict[str, tk.BooleanVar] = {}
+            for inspector_name in inspector_names:
                 checkbox_var = tk.BooleanVar(value=inspector_name in selected_inspectors)
                 checkbox = ctk.CTkCheckBox(
                     scroll_frame,
@@ -2275,31 +2277,23 @@ class ModernDataExtractorUI:
                 )
                 checkbox.pack(anchor="w", pady=2)
                 inspector_checkboxes[inspector_name] = checkbox_var
-            
-            # ボタンフレーム
+
             button_frame = ctk.CTkFrame(dialog, fg_color="transparent")
             button_frame.pack(pady=10)
-            
-            def on_ok():
-                # 固定検査員を更新
-                item['固定検査員'] = sorted(list(selected_inspectors))
-                self.update_registered_list()
-                self.save_registered_products()
-                self.log_message(f"品番「{product_number}」の固定検査員を設定しました: {', '.join(item['固定検査員']) if item['固定検査員'] else 'なし'}")
-                dialog.destroy()
-            
-            def on_cancel():
-                dialog.destroy()
-            
-            def on_clear():
+
+            def _clear_selection():
                 selected_inspectors.clear()
                 for var in inspector_checkboxes.values():
                     var.set(False)
-            
+
+            def _on_ok():
+                on_confirm(sorted(list(selected_inspectors)))
+                dialog.destroy()
+
             ok_button = ctk.CTkButton(
                 button_frame,
                 text="OK",
-                command=on_ok,
+                command=_on_ok,
                 width=100,
                 height=30,
                 fg_color="#3B82F6",
@@ -2311,7 +2305,7 @@ class ModernDataExtractorUI:
             clear_button = ctk.CTkButton(
                 button_frame,
                 text="クリア",
-                command=on_clear,
+                command=_clear_selection,
                 width=100,
                 height=30,
                 fg_color="#EF4444",
@@ -2319,28 +2313,56 @@ class ModernDataExtractorUI:
                 text_color="white"
             )
             clear_button.pack(side="left", padx=5)
-            
+
             cancel_button = ctk.CTkButton(
                 button_frame,
                 text="キャンセル",
-                command=on_cancel,
+                command=dialog.destroy,
                 width=100,
                 height=30,
                 fg_color="#6B7280",
                 hover_color="#4B5563"
             )
             cancel_button.pack(side="left", padx=5)
-            
-            # ダイアログを中央に配置
+
             dialog.update_idletasks()
             x = (dialog.winfo_screenwidth() // 2) - (dialog.winfo_width() // 2)
             y = (dialog.winfo_screenheight() // 2) - (dialog.winfo_height() // 2)
             dialog.geometry(f"+{x}+{y}")
-            
+
         except Exception as e:
             self.log_message(f"検査員固定ダイアログの表示に失敗しました: {str(e)}")
             logger.error(f"検査員固定ダイアログの表示に失敗しました: {str(e)}", exc_info=True)
-    
+
+    def fix_inspectors_for_product(self, index):
+        """品番に対する検査員を固定するダイアログを表示"""
+        try:
+            if index < 0 or index >= len(self.registered_products):
+                return
+
+            item = self.registered_products[index]
+            product_number = item['品番']
+
+            def on_confirm(selected):
+                item['固定検査員'] = selected
+                self.update_registered_list()
+                self.save_registered_products()
+                self.log_message(
+                    f"品番「{product_number}」の固定検査員を設定しました: "
+                    f"{', '.join(selected) if selected else 'なし'}"
+                )
+
+            self._show_fixed_inspector_selection_dialog(
+                title=f"検査員固定 - {product_number}",
+                description=f"品番「{product_number}」の固定検査員を選択してください",
+                initial_selection=item.get('固定検査員', []),
+                on_confirm=on_confirm,
+            )
+
+        except Exception as e:
+            self.log_message(f"検査員固定ダイアログの表示に失敗しました: {str(e)}")
+            logger.error(f"検査員固定ダイアログの表示に失敗しました: {str(e)}", exc_info=True)
+
     def _update_selected_inspectors(self, name, var, selected_set):
         """選択された検査員を更新"""
         if var.get():
@@ -11344,19 +11366,29 @@ class ModernDataExtractorUI:
 
         dialog = ctk.CTkToplevel(self.root)
         dialog.title("追加割当 - 登録済み品番を選択")
-        dialog.geometry("620x720")
+        screen_h = dialog.winfo_screenheight()
+        target_height = min(820, max(680, screen_h - 120))
+        dialog.geometry(f"620x{target_height}")
+        dialog.resizable(False, False)
         dialog.transient(self.root)
         dialog.grab_set()
+
+        dialog.grid_columnconfigure(0, weight=1)
+        dialog.grid_rowconfigure(1, weight=0)
+        dialog.grid_rowconfigure(2, weight=1)
+        dialog.grid_rowconfigure(3, weight=0)
 
         label = ctk.CTkLabel(
             dialog,
             text="追加で割り当てる登録済み品番を選択してください",
             font=ctk.CTkFont(family="Yu Gothic", size=14, weight="bold")
         )
-        label.pack(pady=(10, 6))
+        label.grid(row=0, column=0, padx=20, pady=(10, 6), sticky="ew")
 
         manual_frame = ctk.CTkFrame(dialog, fg_color="#F8FAFC", corner_radius=8)
-        manual_frame.pack(fill="x", padx=20, pady=(0, 8))
+        manual_frame.grid(row=1, column=0, padx=20, pady=(0, 8), sticky="ew")
+        manual_frame.configure(height=260)
+        manual_frame.grid_propagate(False)
 
         manual_title = ctk.CTkLabel(
             manual_frame,
@@ -11412,8 +11444,195 @@ class ModernDataExtractorUI:
         )
         manual_fixed_entry.grid(row=1, column=2, padx=6, pady=4, sticky="ew")
 
-        scroll_frame = ctk.CTkScrollableFrame(dialog)
-        scroll_frame.pack(fill="both", expand=True, padx=20, pady=(0, 10))
+        def open_manual_fixed_dialog():
+            current_fixed = self._parse_fixed_inspectors_input(manual_fixed_entry.get().strip())
+
+            def _apply_selection(selected):
+                manual_fixed_entry.delete(0, "end")
+                if selected:
+                    manual_fixed_entry.insert(0, ", ".join(selected))
+
+            self._show_fixed_inspector_selection_dialog(
+                title="追加割当 - 固定検査員の選択",
+                description="追加割当に割り当てる検査員を選択してください",
+                initial_selection=current_fixed,
+                on_confirm=_apply_selection,
+            )
+
+        manual_fixed_button = ctk.CTkButton(
+            manual_fields,
+            text="検査員選択",
+            command=open_manual_fixed_dialog,
+            width=120,
+            height=28
+        )
+        manual_fixed_button.grid(row=2, column=2, padx=6, pady=(0, 6), sticky="ew")
+
+        manual_autocomplete_holder = ctk.CTkFrame(manual_frame, fg_color="transparent")
+        manual_autocomplete_holder.pack(fill="x", padx=10, pady=(0, 6))
+        manual_autocomplete_holder.configure(height=70)
+        manual_autocomplete_holder.pack_propagate(False)
+
+        manual_autocomplete_dropdown = None
+        manual_autocomplete_job = None
+
+        def hide_manual_autocomplete():
+            nonlocal manual_autocomplete_dropdown, manual_autocomplete_job
+            if manual_autocomplete_job:
+                try:
+                    self.root.after_cancel(manual_autocomplete_job)
+                except Exception:
+                    pass
+                manual_autocomplete_job = None
+            if manual_autocomplete_dropdown:
+                try:
+                    manual_autocomplete_dropdown.destroy()
+                except Exception:
+                    pass
+                manual_autocomplete_dropdown = None
+
+        def _manual_dropdown_mousewheel(event, canvas):
+            target_event = event
+            if not getattr(event, "delta", None) and getattr(event, "num", None) in (4, 5):
+                fake_event = type("ManualMouseEvent", (), {})()
+                fake_event.delta = 120 if event.num == 4 else -120
+                target_event = fake_event
+            if getattr(target_event, "delta", None):
+                target_event.delta = int(target_event.delta * 10)
+            return self._debounced_tree_scroll(canvas, target_event, "additional_assignment_autocomplete")
+
+        def _bind_mousewheel_recursive(widget, handler):
+            try:
+                widget.bind("<MouseWheel>", handler, add="+")
+                widget.bind("<Button-4>", handler, add="+")
+                widget.bind("<Button-5>", handler, add="+")
+            except Exception:
+                pass
+            for child in widget.winfo_children():
+                _bind_mousewheel_recursive(child, handler)
+
+        def _build_manual_autocomplete(matches):
+            nonlocal manual_autocomplete_dropdown
+            hide_manual_autocomplete()
+            if not matches:
+                return
+
+            manual_autocomplete_dropdown = ctk.CTkFrame(
+                manual_autocomplete_holder,
+                fg_color="white",
+                corner_radius=8,
+                border_width=1,
+                border_color="#DBEAFE"
+            )
+            manual_autocomplete_dropdown.pack(fill="x")
+
+            max_height = min(len(matches) * 20 + 4, 60)
+            scrollable_frame = ctk.CTkScrollableFrame(
+                manual_autocomplete_dropdown,
+                fg_color="transparent",
+                height=max_height
+            )
+            scrollable_frame.pack(fill="x", padx=2, pady=2)
+
+            canvas = getattr(scrollable_frame, "_parent_canvas", None)
+
+            def _on_scroll(event):
+                if canvas:
+                    return _manual_dropdown_mousewheel(event, canvas)
+                return "break"
+
+            _bind_mousewheel_recursive(scrollable_frame, _on_scroll)
+            _bind_mousewheel_recursive(manual_autocomplete_dropdown, _on_scroll)
+
+            def _select_match(code):
+                manual_product_entry.delete(0, "end")
+                manual_product_entry.insert(0, code)
+                manual_lots_entry.focus_set()
+                hide_manual_autocomplete()
+
+            for product_code in matches:
+                btn = ctk.CTkButton(
+                    scrollable_frame,
+                    text=product_code,
+                    height=30,
+                    fg_color="transparent",
+                    text_color="#374151",
+                    hover_color="#E0E7FF",
+                    command=lambda code=product_code: _select_match(code)
+                )
+                btn.pack(fill="x", padx=2, pady=1)
+                _bind_mousewheel_recursive(btn, _on_scroll)
+        def _manual_search_now(text):
+            nonlocal manual_autocomplete_job
+            manual_autocomplete_job = None
+            if len(text) < self.min_search_length:
+                hide_manual_autocomplete()
+                return
+            if not self.product_code_autocomplete_list:
+                self.initialize_product_code_list()
+                manual_autocomplete_job = self.root.after(500, lambda txt=text: _manual_search_now(txt))
+                return
+            matches = [
+                product for product in self.product_code_autocomplete_list
+                if text.lower() in product.lower()
+            ]
+            matches = matches[: self.max_display_items]
+            if matches:
+                _build_manual_autocomplete(matches)
+            else:
+                hide_manual_autocomplete()
+
+        def _schedule_manual_search(text):
+            nonlocal manual_autocomplete_job
+            if manual_autocomplete_job:
+                try:
+                    self.root.after_cancel(manual_autocomplete_job)
+                except Exception:
+                    pass
+            manual_autocomplete_job = self.root.after(200, lambda txt=text: _manual_search_now(txt))
+
+        def _evaluate_manual_hide():
+            if manual_autocomplete_dropdown is None:
+                return
+            try:
+                focus_widget = self.root.focus_get()
+            except Exception:
+                focus_widget = None
+            if focus_widget == manual_product_entry:
+                return
+            hide_manual_autocomplete()
+
+        def on_manual_key_release(event):
+            text = manual_product_entry.get().strip()
+            if not text or len(text) < self.min_search_length:
+                hide_manual_autocomplete()
+                return
+            _schedule_manual_search(text)
+
+        def on_manual_focus_out(event):
+            self.root.after(100, _evaluate_manual_hide)
+
+        manual_product_entry.bind("<KeyRelease>", on_manual_key_release)
+        manual_product_entry.bind("<FocusOut>", on_manual_focus_out)
+
+        list_container = ctk.CTkFrame(
+            dialog,
+            fg_color="#F3F4F6",
+            corner_radius=8,
+            border_width=1,
+            border_color="#D1D5DB"
+        )
+        list_container.grid(row=2, column=0, padx=20, pady=(0, 12), sticky="nsew")
+        list_container.grid_rowconfigure(0, weight=1)
+        list_container.grid_columnconfigure(0, weight=1)
+
+        scroll_frame = ctk.CTkScrollableFrame(
+            list_container,
+            fg_color="transparent"
+        )
+        scroll_frame.grid(row=0, column=0, padx=8, pady=8, sticky="nsew")
+
+        list_parent = getattr(scroll_frame, "_scrollable_frame", scroll_frame)
 
         selected_keys = set()
         checkbox_vars = {}
@@ -11430,23 +11649,28 @@ class ModernDataExtractorUI:
             return False
 
         def _bind_scroll_wheel():
-            canvas = getattr(scroll_frame, "_parent_canvas", None)
-            if canvas is None:
-                return
-
+            speed_factor = 20
             def _on_mousewheel(event):
-                if not _is_descendant(event.widget, scroll_frame):
-                    return
-                if hasattr(event, "delta") and event.delta:
-                    canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-                elif getattr(event, "num", None) == 4:
-                    canvas.yview_scroll(-1, "units")
-                elif getattr(event, "num", None) == 5:
-                    canvas.yview_scroll(1, "units")
+                if not (_is_descendant(event.widget, scroll_frame) or _is_descendant(event.widget, list_container)):
+                    return "break"
+                canvas = getattr(scroll_frame, "_parent_canvas", None)
+                if canvas is None:
+                    return "break"
+                target_event = event
+                if not getattr(event, "delta", None) and getattr(event, "num", None) in (4, 5):
+                    fake_event = type("ManualMouseEvent", (), {})()
+                    fake_event.delta = 120 if event.num == 4 else -120
+                    target_event = fake_event
+                if getattr(target_event, "delta", None):
+                    target_event.delta = int(target_event.delta * speed_factor)
+                return self._debounced_tree_scroll(canvas, target_event, "additional_assignment_dialog")
 
             dialog.bind("<MouseWheel>", _on_mousewheel)
             dialog.bind("<Button-4>", _on_mousewheel)
             dialog.bind("<Button-5>", _on_mousewheel)
+            scroll_frame.bind("<MouseWheel>", _on_mousewheel)
+            scroll_frame.bind("<Button-4>", _on_mousewheel)
+            scroll_frame.bind("<Button-5>", _on_mousewheel)
 
         _bind_scroll_wheel()
 
@@ -11460,17 +11684,56 @@ class ModernDataExtractorUI:
             product_number = str(item.get("品番", "") or "").strip()
             return f"品番:{product_number}"
 
-        def open_override_dialog(key, product_number):
+        def open_override_dialog(key, registered_item):
             existing = override_by_key.get(key, {})
             override_dialog = ctk.CTkToplevel(dialog)
+            product_number = str(registered_item.get("品番", "") if registered_item else "") or "未設定"
             override_dialog.title(f"追加割当設定 - {product_number}")
             override_dialog.geometry("420x380")
             override_dialog.transient(dialog)
             override_dialog.grab_set()
+            self._center_dialog_window(override_dialog, dialog)
 
             frame = ctk.CTkFrame(override_dialog, fg_color="transparent")
             frame.pack(fill="x", padx=16, pady=12)
             frame.grid_columnconfigure(0, weight=1)
+            frame.grid_columnconfigure(1, weight=0)
+
+            def _build_registered_summary(item: dict[str, Any]) -> str:
+                if not item:
+                    return ""
+                parts: list[str] = []
+                lot_val = item.get("ロット数")
+                if lot_val not in (None, ""):
+                    parts.append(f"ロット数: {lot_val}")
+                process_val = str(item.get("工程名", "") or "").strip()
+                if process_val:
+                    parts.append(f"工程: {process_val}")
+                machine_val = str(item.get("号機", "") or "").strip()
+                if machine_val:
+                    parts.append(f"号機: {machine_val}")
+                headcount_val = item.get("検査割当て人数")
+                if headcount_val not in (None, ""):
+                    parts.append(f"検査割当人数: {headcount_val}")
+                fixed_list = [str(name).strip() for name in (item.get("固定検査員") or []) if str(name).strip()]
+                if fixed_list:
+                    parts.append(f"固定検査員: {', '.join(fixed_list)}")
+                weekday_val = str(item.get("曜日", "") or "").strip()
+                if weekday_val:
+                    parts.append(f"曜日: {weekday_val}")
+                return " / ".join(parts)
+
+            summary_text = _build_registered_summary(registered_item or {})
+            if summary_text:
+                summary_label = ctk.CTkLabel(
+                    override_dialog,
+                    text=f"登録値: {summary_text}",
+                    font=ctk.CTkFont(family="Yu Gothic", size=11),
+                    text_color="#374151",
+                    wraplength=380,
+                    justify="left"
+                )
+                summary_label.pack(anchor="w", padx=16, pady=(0, 4))
 
             lot_entry = ctk.CTkEntry(frame, placeholder_text="検査ロット数（未入力で登録値を使用）")
             lot_entry.grid(row=0, column=0, sticky="ew", pady=6)
@@ -11482,6 +11745,23 @@ class ModernDataExtractorUI:
             headcount_entry.grid(row=3, column=0, sticky="ew", pady=6)
             fixed_entry = ctk.CTkEntry(frame, placeholder_text="固定検査員（例: 山田, 佐藤）")
             fixed_entry.grid(row=4, column=0, sticky="ew", pady=6)
+            def apply_fixed_selection(selected):
+                fixed_entry.delete(0, "end")
+                if selected:
+                    fixed_entry.insert(0, ", ".join(selected))
+
+            fixed_button = ctk.CTkButton(
+                frame,
+                text="検査員選択",
+                width=120,
+                command=lambda: self._show_fixed_inspector_selection_dialog(
+                    title="固定検査員の選択",
+                    description="この品番に設定する固定検査員を選択してください",
+                    initial_selection=self._parse_fixed_inspectors_input(fixed_entry.get().strip()),
+                    on_confirm=apply_fixed_selection
+                )
+            )
+            fixed_button.grid(row=4, column=1, sticky="ew", padx=(6, 0), pady=6)
 
             if existing.get("ロット数") is not None:
                 lot_entry.insert(0, str(existing.get("ロット数")))
@@ -11533,6 +11813,10 @@ class ModernDataExtractorUI:
                     overrides["固定検査員"] = self._parse_fixed_inspectors_input(fixed_raw)
 
                 override_by_key[key] = overrides
+                checkbox_var = checkbox_vars.get(key)
+                if checkbox_var:
+                    checkbox_var.set(True)
+                selected_keys.add(key)
                 override_dialog.destroy()
 
             save_button = ctk.CTkButton(
@@ -11544,7 +11828,7 @@ class ModernDataExtractorUI:
             save_button.pack(pady=12)
 
         def add_item_row(key, item, is_manual=False):
-            row = ctk.CTkFrame(scroll_frame, fg_color="transparent")
+            row = ctk.CTkFrame(list_parent, fg_color="transparent")
             row.pack(fill="x", pady=2, padx=2)
 
             checkbox_var = tk.BooleanVar(value=False)
@@ -11565,7 +11849,7 @@ class ModernDataExtractorUI:
                 text="設定",
                 width=60,
                 height=26,
-                command=lambda k=key, pn=item.get("品番", ""): open_override_dialog(k, pn)
+                command=lambda k=key, itm=item: open_override_dialog(k, itm)
             )
             settings_button.pack(side="right", padx=(6, 4))
 
@@ -11643,7 +11927,7 @@ class ModernDataExtractorUI:
             add_item_row(key, item, is_manual=False)
 
         button_frame = ctk.CTkFrame(dialog, fg_color="transparent")
-        button_frame.pack(pady=10)
+        button_frame.grid(row=3, column=0, padx=20, pady=(0, 10), sticky="ew")
 
         def select_all():
             for key, var in checkbox_vars.items():
