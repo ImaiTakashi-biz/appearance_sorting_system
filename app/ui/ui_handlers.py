@@ -72,7 +72,7 @@ from PIL import Image
 
 class ModernDataExtractorUI:
     """近未来的なデザインのデータ抽出UI"""
-    
+
     # キャッシュ設定定数
     TABLE_STRUCTURE_CACHE_TTL = 3600  # 1時間（秒）
     MASTER_CACHE_TTL_MINUTES = 5  # 5分
@@ -5630,6 +5630,54 @@ class ModernDataExtractorUI:
         except Exception:
             pass
 
+    def _filter_lots_by_inspection_keywords(
+        self,
+        lots_df: pd.DataFrame,
+        context_label: str,
+        keywords: Optional[List[str]] = None
+    ) -> pd.DataFrame:
+        """検査対象CSVのキーワードで工程名を絞り込む（空の場合は全件を返す）"""
+        if lots_df.empty or "現在工程名" not in lots_df.columns:
+            return lots_df
+
+        effective_keywords = keywords if keywords is not None else self.inspection_target_keywords
+        if not effective_keywords:
+            return lots_df
+
+        valid_keywords = [
+            kw.strip()
+            for kw in effective_keywords
+            if isinstance(kw, str) and kw.strip()
+        ]
+        if not valid_keywords:
+            return lots_df
+
+        process_series = lots_df["現在工程名"].astype(str).fillna("")
+        pattern = "|".join(re.escape(keyword) for keyword in valid_keywords)
+        if not pattern:
+            return lots_df
+
+        match_mask = process_series.str.contains(pattern, case=False, regex=True)
+        if not match_mask.any():
+            self.log_message(
+                f"{context_label}: 検査対象CSV（{', '.join(valid_keywords)}）に一致する工程が見つかりません",
+                level="warning"
+            )
+            return pd.DataFrame(columns=lots_df.columns)
+
+        excluded_values = sorted({
+            val.strip()
+            for val in process_series[~match_mask]
+            if val and val.strip()
+        })
+        if excluded_values:
+            self.log_message(
+                f"{context_label}: 検査対象CSVに含まれない工程を除外しました（{', '.join(excluded_values)}）",
+                level="debug"
+            )
+
+        return lots_df[match_mask].copy()
+
     def get_available_lots_for_shortage(self, connection, shortage_df):
         """不足数がマイナスの品番に対して利用可能なロットを取得"""
         try:
@@ -5834,20 +5882,13 @@ class ModernDataExtractorUI:
             # 不足品番だけ返す（登録済み品番分はキャッシュに保持して二重クエリを回避）
             shortage_lots_df = lots_df[lots_df["品番"].isin(shortage_products)].copy()
 
-            # 不足品番側のみ、検査対象キーワードで絞り込み（Access側のOR/LIKEを避ける）
-            if (
-                not shortage_lots_df.empty
-                and self.inspection_target_keywords
-                and "現在工程名" in shortage_lots_df.columns
-            ):
-                with perf_timer(logger, "lots.shortage.keyword_filter"):
-                    process_series = shortage_lots_df["現在工程名"].astype(str)
-                    keyword_mask = pd.Series(False, index=shortage_lots_df.index, dtype=bool)
-                    for keyword in self.inspection_target_keywords:
-                        if not isinstance(keyword, str) or not keyword.strip():
-                            continue
-                        keyword_mask |= process_series.str.contains(keyword.strip(), na=False, regex=False)
-                    shortage_lots_df = shortage_lots_df[keyword_mask].copy()
+            # 不足品番側のみ、検査対象CSVキーワードで絞り込み
+            if not shortage_lots_df.empty:
+                shortage_lots_df = self._filter_lots_by_inspection_keywords(
+                    shortage_lots_df,
+                    "先行検査品",
+                    self.inspection_target_keywords
+                )
 
             self._store_access_cache(cache_key, shortage_lots_df)
             if isinstance(non_inspection_lots_df, pd.DataFrame) and not non_inspection_lots_df.empty:
@@ -6440,8 +6481,18 @@ class ModernDataExtractorUI:
                             f"登録済み品番 {product_number}: 既割当ロットを除外しました ({removed}件)"
                         )
 
+                product_lots = self._filter_lots_by_inspection_keywords(
+                    product_lots,
+                    f"登録済み品番 {product_number}"
+                )
+                if product_lots.empty:
+                    self.log_message(
+                        f"登録済み品番 {product_number}: 検査対象CSVのキーワードに一致する工程がありません",
+                        level='warning'
+                    )
+                    continue
                 lots_before_filter = len(product_lots)
-                
+
                 # 指示日順でソート（生産日の古い順）
                 process_filter = registered_item.get('工程名', '').strip()
                 if process_filter:
@@ -6469,9 +6520,9 @@ class ModernDataExtractorUI:
                                     mask |= column_mask
                                 if not mask.any():
                                     self.log_message(
-                                        f"工程名「{process_filter}」に一致するロットが見つかりません: {product_number}"
+                                        f"工程名「{process_filter}」に一致するロットが見つかりません: {product_number}（工程フィルタを緩和して全ロットを再利用）"
                                     )
-                                    continue
+                                    mask = pd.Series(True, index=product_lots.index, dtype=bool)
                                 product_lots = product_lots[mask].copy()
                             else:
                                 self.log_message(
@@ -9204,7 +9255,7 @@ class ModernDataExtractorUI:
 
             self.additional_assignment_button = ctk.CTkButton(
                 button_frame,
-                text="追加割当",
+                text="割当追加",
                 command=self.show_additional_assignment_dialog,
                 width=110,
                 height=30,
@@ -11350,9 +11401,9 @@ class ModernDataExtractorUI:
             messagebox.showerror("エラー", error_msg)
 
     def show_additional_assignment_dialog(self):
-        """追加割当の対象品番を選択するダイアログを表示"""
+        """割当追加の対象品番を選択するダイアログを表示"""
         if self.is_extracting:
-            messagebox.showwarning("警告", "処理中のため追加割当を開始できません。")
+            messagebox.showwarning("警告", "処理中のため割当追加を開始できません。")
             return
         if self.current_assignment_data is None or self.current_assignment_data.empty:
             messagebox.showwarning("警告", "ロット割り当て結果がありません。\n先にデータを抽出してください。")
@@ -11365,7 +11416,7 @@ class ModernDataExtractorUI:
             return
 
         dialog = ctk.CTkToplevel(self.root)
-        dialog.title("追加割当 - 登録済み品番を選択")
+        dialog.title("割当追加 - 登録済み品番を選択")
         screen_h = dialog.winfo_screenheight()
         target_height = min(820, max(680, screen_h - 120))
         dialog.geometry(f"620x{target_height}")
@@ -11380,7 +11431,7 @@ class ModernDataExtractorUI:
 
         label = ctk.CTkLabel(
             dialog,
-            text="追加で割り当てる登録済み品番を選択してください",
+            text="割当追加対象の登録済み品番を選択してください",
             font=ctk.CTkFont(family="Yu Gothic", size=14, weight="bold")
         )
         label.grid(row=0, column=0, padx=20, pady=(10, 6), sticky="ew")
@@ -12002,7 +12053,7 @@ class ModernDataExtractorUI:
 
         ok_button = ctk.CTkButton(
             button_frame,
-            text="追加割当開始",
+            text="割当追加開始",
             command=on_ok,
             width=120,
             height=32,
@@ -12023,6 +12074,8 @@ class ModernDataExtractorUI:
             hover_color="#4B5563"
         )
         cancel_button.pack(side="left", padx=6)
+
+        self._center_dialog_window(dialog, self.root)
 
     def start_additional_assignment(self, custom_items: List[Dict[str, Any]]) -> None:
         """追加割当を開始"""
@@ -12051,7 +12104,7 @@ class ModernDataExtractorUI:
         if hasattr(self, "non_inspection_update_button"):
             self.non_inspection_update_button.configure(state="disabled")
         if hasattr(self, "additional_assignment_button"):
-            self.additional_assignment_button.configure(state="disabled", text="追加中...")
+            self.additional_assignment_button.configure(state="disabled", text="地位応配置中...")
 
         self.progress_bar.set(0)
         self.progress_label.configure(text="追加割当を開始します...")
@@ -12322,7 +12375,7 @@ class ModernDataExtractorUI:
         if hasattr(self, "non_inspection_update_button"):
             self.non_inspection_update_button.configure(state="normal", text="検査対象外のみ更新")
         if hasattr(self, "additional_assignment_button"):
-            self.additional_assignment_button.configure(state="normal", text="追加割当")
+            self.additional_assignment_button.configure(state="normal", text="地位応配置")
     
     def show_table(self, table_type):
         """選択されたテーブルを表示"""
