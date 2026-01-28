@@ -8,7 +8,7 @@ import sys
 import hashlib
 import copy
 from pathlib import Path
-from collections import defaultdict, deque
+from collections import defaultdict, deque, Counter
 import warnings  # 警告抑制のため
 import webbrowser
 from typing import Deque, Dict, List, Optional, Tuple, Any, Set
@@ -136,7 +136,7 @@ class ModernDataExtractorUI:
         """
         実行結果が不変かどうかをログから機械的に比較できるよう、DataFrameのハッシュを出力する。
         """
-        if os.environ.get("DEBUG_SIGNATURE_LOG_ENABLED", "1") != "1":
+        if os.environ.get("DEBUG_SIGNATURE_LOG_ENABLED", "0") != "1":
             return
         try:
             rows = int(len(df)) if df is not None else 0
@@ -205,7 +205,7 @@ class ModernDataExtractorUI:
         """
         直前実行との差分（増減ロット）をログに出すために、キー一覧をローカルに保存し比較する。
         """
-        if os.environ.get("DEBUG_SNAPSHOT_DIFF_ENABLED", "1") != "1":
+        if os.environ.get("DEBUG_SNAPSHOT_DIFF_ENABLED", "0") != "1":
             return
         try:
             schema, keys = self._build_lot_key_set(df)
@@ -283,7 +283,7 @@ class ModernDataExtractorUI:
         """
         if os.environ.get("DEBUG_ASSIGNMENT_DIFF_ENABLED", "1") != "1":
             return
-        if os.environ.get("DEBUG_SNAPSHOT_DIFF_ENABLED", "1") != "1":
+        if os.environ.get("DEBUG_SNAPSHOT_DIFF_ENABLED", "0") != "1":
             return
         if df is None or df.empty:
             return
@@ -370,7 +370,12 @@ class ModernDataExtractorUI:
         self.register_button = None  # 登録確定ボタン
         self.registered_products = []  # 登録された品番のリスト [{品番, ロット数}, ...]
         self.registered_products_frame = None  # 登録リスト表示フレーム
+        self._runtime_preinspection_headcount_overrides: Dict[Tuple[str, str], int] = {}  # 今回のみ適用する割当人数補正
         self.registered_list_container = None  # 登録リストコンテナ
+        self.registered_order_confirm_button = None
+        self.registered_order_dirty = False
+        self._registered_list_frames: List[Any] = []
+        self._inspector_column_width_cache: Dict[str, Any] = {"key": None, "widths": None}
         
         # 登録済み品番リストの保存ファイルパス（exe化対応・NAS共有対応）
         if self.config.registered_products_path:
@@ -382,6 +387,8 @@ class ModernDataExtractorUI:
         else:
             # 開発環境の場合、プロジェクトルートに保存
             self.registered_products_file = Path(__file__).parent.parent.parent / "registered_products.json"
+        self.registered_products_order_file = self.registered_products_file.with_name("registered_products_order.json")
+        self.registered_products_display_order: List[str] = []
 
         # 抽出対象外（品番）マスタ
         self.excluded_products: List[Dict[str, str]] = []  # [{品番, メモ}, ...]
@@ -1304,14 +1311,32 @@ class ModernDataExtractorUI:
         self.registered_products_frame = ctk.CTkFrame(inspection_frame, fg_color="white", corner_radius=8, border_width=1, border_color="#DBEAFE")
         self.registered_products_frame.pack(fill="x", padx=10, pady=(8, 8))  # 上部に8pxの余白を追加
         
-        # 登録リストのタイトル
+        # 登録リストのタイトル + 並び替え確定ボタン
+        header_frame = ctk.CTkFrame(self.registered_products_frame, fg_color="transparent")
+        header_frame.pack(fill="x", padx=10, pady=(8, 5))
+        header_frame.grid_columnconfigure(0, weight=1)
+
         list_title = ctk.CTkLabel(
-            self.registered_products_frame,
+            header_frame,
             text="登録済み品番",
             font=ctk.CTkFont(family="Yu Gothic", size=16, weight="bold"),
             text_color="#374151"
         )
-        list_title.pack(pady=(8, 5))
+        list_title.grid(row=0, column=0, sticky="w")
+
+        self.registered_order_confirm_button = ctk.CTkButton(
+            header_frame,
+            text="並び替え確定",
+            command=self.confirm_registered_product_order,
+            font=ctk.CTkFont(family="Yu Gothic", size=12, weight="bold"),
+            height=28,
+            width=120,
+            fg_color="#10B981",
+            hover_color="#059669",
+            text_color="white",
+            state="disabled"
+        )
+        self.registered_order_confirm_button.grid(row=0, column=1, sticky="e")
         
         # 登録リストコンテナ（スクロールバーなし、リスト分のみ表示）
         self.registered_list_container = ctk.CTkFrame(
@@ -1382,6 +1407,7 @@ class ModernDataExtractorUI:
                     item['固定検査員'] = []
                 self.update_registered_list()
                 self.save_registered_products()
+                self._sync_registered_products_order(save=True)
                 self._ensure_excluded_product_registered(product_code)
                 self.product_code_entry.delete(0, "end")
                 self.inspectable_lots_entry.delete(0, "end")
@@ -1408,6 +1434,7 @@ class ModernDataExtractorUI:
         # リストとファイル更新
         self.update_registered_list()
         self.save_registered_products()
+        self._sync_registered_products_order(save=True)
         self._ensure_excluded_product_registered(product_code)
         self.product_code_entry.delete(0, "end")
         self.inspectable_lots_entry.delete(0, "end")
@@ -1427,6 +1454,7 @@ class ModernDataExtractorUI:
         # 既存のウィジェットを削除
         for widget in self.registered_list_container.winfo_children():
             widget.destroy()
+        self._registered_list_frames = []
         
         # 登録がない場合は非表示
         if not self.registered_products:
@@ -1435,9 +1463,28 @@ class ModernDataExtractorUI:
         
         # 登録リストを表示
         self.registered_products_frame.pack(fill="x", padx=10, pady=(8, 8))
+
+        self._sync_registered_products_order()
+        order_list = self.registered_products_display_order or []
+        index_map: Dict[str, List[int]] = {}
+        for idx, item in enumerate(self.registered_products):
+            key = self._registered_product_order_key(item)
+            index_map.setdefault(key, []).append(idx)
+        used_indices: Set[int] = set()
+        display_entries: List[Tuple[int, Dict[str, Any], Optional[int]]] = []
+        for pos, key in enumerate(order_list):
+            if key in index_map and index_map[key]:
+                idx = index_map[key].pop(0)
+                used_indices.add(idx)
+                display_entries.append((idx, self.registered_products[idx], pos))
+        for idx, item in enumerate(self.registered_products):
+            if idx in used_indices:
+                continue
+            display_entries.append((idx, item, None))
         
         # 各登録項目を表示
-        for idx, item in enumerate(self.registered_products):
+        for idx, item, order_pos in display_entries:
+            order_key = self._registered_product_order_key(item)
             # 検査員情報がない場合は初期化
             if '固定検査員' not in item:
                 item['固定検査員'] = []
@@ -1448,6 +1495,7 @@ class ModernDataExtractorUI:
             default_row_color = "#F3F4F6"
             item_frame = ctk.CTkFrame(self.registered_list_container, fg_color=default_row_color, corner_radius=6)
             item_frame.pack(fill="x", pady=(0, 4), padx=5)
+            item_frame._order_key = order_key
 
             item_frame.grid_columnconfigure(0, weight=1)
             item_frame.grid_columnconfigure(1, weight=0)
@@ -1717,6 +1765,49 @@ class ModernDataExtractorUI:
                 text_color="white"
             )
             modify_button.grid(row=0, column=1, sticky="ew")
+
+            order_frame = ctk.CTkFrame(button_column, fg_color="transparent")
+            order_frame.pack(anchor="e", pady=(6, 0))
+            order_frame.grid_columnconfigure(0, weight=1)
+            order_frame.grid_columnconfigure(1, weight=1)
+
+            move_up_state = "normal" if (order_pos is not None and order_pos > 0) else "disabled"
+            move_down_state = (
+                "normal"
+                if (order_pos is not None and order_pos < len(self.registered_products_display_order) - 1)
+                else "disabled"
+            )
+
+            move_up_button = ctk.CTkButton(
+                order_frame,
+                text="▲",
+                command=lambda pos=order_pos: self._move_registered_product_display_order(pos, -1),
+                font=ctk.CTkFont(family="Yu Gothic", size=12, weight="bold"),
+                height=26,
+                width=40,
+                fg_color="#E5E7EB",
+                hover_color="#D1D5DB",
+                text_color="#374151",
+                state=move_up_state
+            )
+            move_up_button.grid(row=0, column=0, padx=(0, 6))
+
+            move_down_button = ctk.CTkButton(
+                order_frame,
+                text="▼",
+                command=lambda pos=order_pos: self._move_registered_product_display_order(pos, 1),
+                font=ctk.CTkFont(family="Yu Gothic", size=12, weight="bold"),
+                height=26,
+                width=40,
+                fg_color="#E5E7EB",
+                hover_color="#D1D5DB",
+                text_color="#374151",
+                state=move_down_state
+            )
+            move_down_button.grid(row=0, column=1)
+            item_frame._move_up_button = move_up_button
+            item_frame._move_down_button = move_down_button
+            self._registered_list_frames.append(item_frame)
     
     def show_fixed_inspector_list(self, inspector_names):
         """固定検査員一覧をモーダル表示"""
@@ -1878,6 +1969,7 @@ class ModernDataExtractorUI:
             self.update_registered_list()
             # ファイルに保存
             self.save_registered_products()
+            self._sync_registered_products_order(save=True)
             self._remove_excluded_product_if_unused(deleted_product)
     
     def modify_registered_product(self, index):
@@ -2098,6 +2190,7 @@ class ModernDataExtractorUI:
                 item['有効設定'] = new_manual_setting
                 self.update_registered_list()
                 self.save_registered_products()
+                self._sync_registered_products_order(save=True)
                 self.log_message(f"品番「{product_number}」の登録内容を更新しました（ロット数: {new_lots}ロット）")
                 dialog.destroy()
             
@@ -2126,6 +2219,7 @@ class ModernDataExtractorUI:
                         self.registered_products.pop(index)
                         self.update_registered_list()
                         self.save_registered_products()
+                        self._sync_registered_products_order(save=True)
                         self.log_message(f"品番「{product_number}」を登録から削除しました")
                         self._remove_excluded_product_if_unused(deleted_product)
                     confirm_dialog.destroy()
@@ -2443,6 +2537,32 @@ class ModernDataExtractorUI:
                     'headcount': headcount_value
                 })
 
+            runtime_overrides = getattr(self, "_runtime_preinspection_headcount_overrides", {}) or {}
+            if runtime_overrides:
+                override_entries: Dict[str, List[Dict[str, Any]]] = {}
+                for (prod, process), value in runtime_overrides.items():
+                    norm_prod = str(prod or "").strip()
+                    if not norm_prod:
+                        continue
+                    norm_process = str(process or "").strip()
+                    try:
+                        numeric_value = int(value)
+                    except Exception:
+                        continue
+                    override_entries.setdefault(norm_prod, []).append({
+                        'process': norm_process,
+                        'headcount': numeric_value
+                    })
+                for prod, entries in override_entries.items():
+                    existing_entries = targets.get(prod, [])
+                    targets[prod] = entries + existing_entries
+                    for entry in entries:
+                        process_label = f"（工程: {entry['process']}）" if entry['process'] else ""
+                        self.log_message(
+                            f"先行検査品 {prod}{process_label}: 今回のみ割当人数を {entry['headcount']}人に変更しました"
+                        )
+                self._runtime_preinspection_headcount_overrides = {}
+
             self.inspector_manager.preinspection_assignment_targets = targets
 
             if targets:
@@ -2506,6 +2626,8 @@ class ModernDataExtractorUI:
                     item.pop('same_day_priority', None)
                     for legacy_key in legacy_key_map.keys():
                         item.pop(legacy_key, None)
+                self._load_registered_products_order()
+                self._sync_registered_products_order(save=True)
                 # UIが構築されている場合はリストを更新
                 if self.registered_list_container is not None:
                     self.update_registered_list()
@@ -2554,6 +2676,142 @@ class ModernDataExtractorUI:
             logger.debug(f"登録済み品番リストを保存しました: {len(self.registered_products)}件")
         except Exception as e:
             logger.error(f"登録済み品番リストの保存に失敗しました: {str(e)}")
+
+    def _registered_product_order_key(self, item: Dict[str, Any]) -> str:
+        product = str(item.get('品番', '') or '').strip()
+        process_name = str(item.get('工程名', '') or '').strip()
+        machine = str(item.get('号機', '') or '').strip()
+        return f"{product}|{process_name}|{machine}"
+
+    def _load_registered_products_order(self) -> None:
+        try:
+            if self.registered_products_order_file and self.registered_products_order_file.exists():
+                raw_bytes = self.registered_products_order_file.read_bytes()
+                last_error: Optional[Exception] = None
+                for enc in ("utf-8-sig", "utf-8", "cp932", "shift_jis"):
+                    try:
+                        data = json.loads(raw_bytes.decode(enc))
+                        if isinstance(data, list):
+                            self.registered_products_display_order = [
+                                str(item).strip() for item in data if str(item).strip()
+                            ]
+                        last_error = None
+                        break
+                    except Exception as e:
+                        last_error = e
+                if last_error is not None:
+                    raise last_error
+        except Exception:
+            self.registered_products_display_order = []
+
+    def _save_registered_products_order(self) -> None:
+        try:
+            if not self.registered_products_order_file:
+                return
+            tmp_path = self.registered_products_order_file.with_suffix(
+                self.registered_products_order_file.suffix + ".tmp"
+            )
+            with open(tmp_path, 'w', encoding='utf-8-sig') as f:
+                json.dump(self.registered_products_display_order, f, ensure_ascii=False, indent=2)
+            tmp_path.replace(self.registered_products_order_file)
+        except Exception:
+            pass
+
+    def _set_registered_order_dirty(self, dirty: bool) -> None:
+        self.registered_order_dirty = dirty
+        if self.registered_order_confirm_button is not None:
+            self.registered_order_confirm_button.configure(
+                state="normal" if dirty else "disabled"
+            )
+
+    def _update_registered_order_buttons(self, ordered_frames: List[Any]) -> None:
+        total = len(ordered_frames)
+        for idx, frame in enumerate(ordered_frames):
+            move_up_button = getattr(frame, "_move_up_button", None)
+            move_down_button = getattr(frame, "_move_down_button", None)
+            if move_up_button is not None:
+                move_up_button.configure(
+                    state="normal" if idx > 0 else "disabled",
+                    command=lambda pos=idx: self._move_registered_product_display_order(pos, -1),
+                )
+            if move_down_button is not None:
+                move_down_button.configure(
+                    state="normal" if idx < total - 1 else "disabled",
+                    command=lambda pos=idx: self._move_registered_product_display_order(pos, 1),
+                )
+
+    def _repack_registered_list_by_order(self) -> None:
+        if self.registered_list_container is None:
+            return
+        frames = list(self.registered_list_container.winfo_children())
+        if not frames:
+            return
+        order_keys = list(self.registered_products_display_order or [])
+        buckets: Dict[str, List[Any]] = {}
+        for frame in frames:
+            key = getattr(frame, "_order_key", None)
+            if key is None:
+                continue
+            buckets.setdefault(key, []).append(frame)
+        ordered_frames: List[Any] = []
+        for key in order_keys:
+            if buckets.get(key):
+                ordered_frames.append(buckets[key].pop(0))
+        # 念のため残りを末尾に追加
+        for remaining in buckets.values():
+            ordered_frames.extend(remaining)
+        for frame in ordered_frames:
+            frame.pack_forget()
+            frame.pack(fill="x", pady=(0, 4), padx=5)
+        self._update_registered_order_buttons(ordered_frames)
+
+    def _sync_registered_products_order(self, *, save: bool = False) -> None:
+        current_keys = [self._registered_product_order_key(item) for item in self.registered_products]
+        if not current_keys:
+            self.registered_products_display_order = []
+            if save:
+                self._save_registered_products_order()
+                self._set_registered_order_dirty(False)
+            return
+        existing = self.registered_products_display_order or []
+        remaining_counts = Counter(current_keys)
+        new_order: List[str] = []
+        for key in existing:
+            if remaining_counts.get(key, 0) > 0:
+                new_order.append(key)
+                remaining_counts[key] -= 1
+        for key in current_keys:
+            if remaining_counts.get(key, 0) > 0:
+                new_order.append(key)
+                remaining_counts[key] -= 1
+        if new_order != existing:
+            self.registered_products_display_order = new_order
+            if save:
+                self._save_registered_products_order()
+                self._set_registered_order_dirty(False)
+
+    def confirm_registered_product_order(self) -> None:
+        if not self.registered_products_display_order:
+            self._set_registered_order_dirty(False)
+            return
+        self._save_registered_products_order()
+        self._set_registered_order_dirty(False)
+
+    def _move_registered_product_display_order(self, order_index: int, direction: int) -> None:
+        if not self.registered_products_display_order:
+            return
+        target_index = order_index + direction
+        if target_index < 0 or target_index >= len(self.registered_products_display_order):
+            return
+        self.registered_products_display_order[order_index], self.registered_products_display_order[target_index] = (
+            self.registered_products_display_order[target_index],
+            self.registered_products_display_order[order_index],
+        )
+        self._set_registered_order_dirty(True)
+        if self.registered_list_container is not None and self.registered_list_container.winfo_children():
+            self._repack_registered_list_by_order()
+        else:
+            self.update_registered_list()
 
     def _normalize_product_number(self, value: Any) -> str:
         return str(value or "").strip()
@@ -5027,6 +5285,8 @@ class ModernDataExtractorUI:
         elif level_normalized == "error":
             loguru_logger.error(message)
         elif level_normalized == "debug":
+            if os.environ.get("UI_DEBUG_LOG_ENABLED", "0") != "1":
+                return
             loguru_logger.debug(message)
         else:
             loguru_logger.info(message)
@@ -5840,9 +6100,24 @@ class ModernDataExtractorUI:
                     return pd.DataFrame(columns=column_names)
                 return pd.DataFrame.from_records(rows, columns=column_names)
 
-            with perf_timer(logger, "access.lots_for_shortage.read_sql"):
-                # pd.read_sql は環境によって型推論/パースが重くなるため、pyodbcカーソルで直接取得して高速化する
-                lots_df = _read_sql_via_cursor(lots_query, params)
+            last_error = None
+            lots_df = None
+            for attempt in range(3):
+                try:
+                    with perf_timer(logger, "access.lots_for_shortage.read_sql"):
+                        # pd.read_sql は環境によって型推論/パースが重くなるため、pyodbcカーソルで直接取得して高速化する
+                        lots_df = _read_sql_via_cursor(lots_query, params)
+                    last_error = None
+                    break
+                except Exception as e:
+                    last_error = e
+                    self.log_message(
+                        f"利用可能ロット取得でリトライします ({attempt + 1}/3): {str(e)}",
+                        level="warning"
+                    )
+                    time.sleep(1 + attempt)
+            if last_error is not None:
+                raise last_error
 
             # Access側の ORDER BY を避け、同等の安定ソートをpandas側で実施（結果の選択順序を維持）
             sort_cols = []
@@ -5927,7 +6202,26 @@ class ModernDataExtractorUI:
             return shortage_lots_df
 
         except Exception as e:
-            self.log_message(f"利用可能ロットの取得中にエラーが発生しました: {str(e)}")
+            self.log_message(f"利用可能ロットの取得中にエラーが発生しました: {str(e)}", level="warning")
+
+            # 直近キャッシュがあればフォールバックして通常ロットを維持
+            try:
+                if isinstance(disk_cached_payload, dict):
+                    cached_shortage_df = disk_cached_payload.get("shortage_lots_df")
+                    if isinstance(cached_shortage_df, pd.DataFrame) and not cached_shortage_df.empty:
+                        self.log_message("利用可能ロット取得に失敗したため、ディスクキャッシュを使用します", level="warning")
+                        return cached_shortage_df.copy()
+            except Exception:
+                pass
+
+            try:
+                cached = self._try_get_access_cache(cache_key)
+                if isinstance(cached, pd.DataFrame) and not cached.empty:
+                    self.log_message("利用可能ロット取得に失敗したため、メモリキャッシュを使用します", level="warning")
+                    return cached.copy()
+            except Exception:
+                pass
+
             return pd.DataFrame()
     
     def get_non_inspection_target_lots_for_shortage(self, connection, shortage_df):
@@ -6397,6 +6691,210 @@ class ModernDataExtractorUI:
             return True
         return today_label in weekday_tokens
 
+    def _maybe_adjust_registered_headcount(
+        self,
+        product_number: str,
+        process_name: str,
+        configured_lots: int,
+        actual_lots: int,
+        headcount_value: Any,
+        prompted_products: Set[Tuple[str, str]],
+    ) -> Any:
+        """設定ロット数より抽出ロット数が少ない登録品番で割当人数を調整するか確認"""
+        if actual_lots <= 0 or configured_lots <= 0 or actual_lots >= configured_lots:
+            return headcount_value
+        norm_product_number = str(product_number or "").strip()
+        norm_process_name = str(process_name or "").strip()
+        if not norm_product_number:
+            return headcount_value
+        key = (norm_product_number, norm_process_name)
+        if key in prompted_products:
+            return headcount_value
+        prompted_products.add(key)
+
+        process_label = f"（工程: {norm_process_name}）" if norm_process_name else ""
+        current_headcount = str(headcount_value) if headcount_value else "未設定"
+        message = (
+            f"登録済品番 {norm_product_number}{process_label} は設定ロット数 {configured_lots}件ですが、\n"
+            f"抽出された先行検査ロット数は {actual_lots}件でした。\n"
+            f"現在の割当人数: {current_headcount}\n\n"
+            "抽出ロット数に合わせて今回の割当人数を変更しますか？"
+        )
+
+        decision, new_value = self._show_preinspection_headcount_adjustment_dialog(
+            message,
+            initial_value=max(actual_lots, 1),
+            default_process=norm_process_name
+        )
+        if decision != "change" or new_value is None:
+            return headcount_value
+        overrides = getattr(self, "_additional_assignment_headcount_overrides", {}) or {}
+        overrides[norm_product_number] = {
+            "process": norm_process_name,
+            "headcount": new_value
+        }
+        self._additional_assignment_headcount_overrides = overrides
+        runtime_key = (norm_product_number, norm_process_name)
+        self._runtime_preinspection_headcount_overrides[runtime_key] = new_value
+        self.log_message(
+            f"登録済品番 {norm_product_number}{process_label}: 今回の割当人数を {new_value}人に変更します（抽出ロット数 {actual_lots}件）"
+        )
+        return new_value
+
+    def _show_preinspection_headcount_adjustment_dialog(
+        self,
+        message: str,
+        *,
+        initial_value: int,
+        default_process: str,
+    ) -> Tuple[str, Optional[int]]:
+        """先行検査ロット数が設定値より少ない場合にユーザー確認ダイアログを表示"""
+        result = {'action': 'continue', 'value': None}
+        dialog = ctk.CTkToplevel(self.root)
+        dialog.title("先行検査ロット数の確認")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+        dialog.configure(fg_color="white")
+
+        def _safe_close():
+            try:
+                dialog.grab_release()
+            except Exception:
+                pass
+            try:
+                dialog.withdraw()
+            except Exception:
+                pass
+            dialog.after(0, dialog.destroy)
+
+        def _on_change():
+            raw = entry_value.get().strip()
+            try:
+                value = int(raw)
+            except Exception:
+                messagebox.showwarning(
+                    "入力エラー",
+                    "割当人数には1以上の整数を入力してください。",
+                    parent=dialog
+                )
+                return
+            if value <= 0:
+                messagebox.showwarning(
+                    "入力エラー",
+                    "割当人数には1以上の値を指定してください。",
+                    parent=dialog
+                )
+                return
+            result['action'] = 'change'
+            result['value'] = value
+            _safe_close()
+
+        def _on_continue():
+            result['action'] = 'continue'
+            _safe_close()
+
+        dialog.protocol("WM_DELETE_WINDOW", _on_continue)
+
+        main_frame = ctk.CTkFrame(dialog, fg_color="white")
+        main_frame.pack(fill="both", expand=True, padx=20, pady=20)
+
+        message_label = ctk.CTkLabel(
+            main_frame,
+            text=message,
+            justify="left",
+            wraplength=520
+        )
+        message_label.pack(fill="both", expand=True, pady=(0, 16))
+
+        entry_frame = ctk.CTkFrame(main_frame, fg_color="white")
+        entry_frame.pack(fill="x", pady=(0, 16))
+
+        entry_label = ctk.CTkLabel(entry_frame, text="今回の割当人数", width=120)
+        entry_label.grid(row=0, column=0, sticky="w")
+        entry_value = ctk.CTkEntry(entry_frame, width=140, justify="center")
+        entry_value.grid(row=0, column=1, padx=(8, 0))
+        entry_value.insert(0, str(initial_value))
+        entry_value.select_range(0, "end")
+        entry_value.focus_set()
+
+        helper_label = ctk.CTkLabel(
+            entry_frame,
+            text="（任意で入力。整数1以上）",
+            font=ctk.CTkFont(size=11),
+            text_color="#6B7280"
+        )
+        helper_label.grid(row=1, column=0, columnspan=2, pady=(4, 0))
+
+        button_frame = ctk.CTkFrame(main_frame, fg_color="transparent")
+        button_frame.pack(pady=(0, 0))
+
+        change_button = ctk.CTkButton(
+            button_frame,
+            text="検査割当て人数変更",
+            command=_on_change,
+            width=220,
+            height=44,
+            fg_color="#2563EB",
+            hover_color="#1D4ED8"
+        )
+        change_button.pack(side="left", padx=(0, 8))
+        continue_button = ctk.CTkButton(
+            button_frame,
+            text="そのまま続行",
+            command=_on_continue,
+            width=180,
+            height=44,
+            fg_color="#E5E7EB",
+            hover_color="#D1D5DB",
+            text_color="#111827"
+        )
+        continue_button.pack(side="left")
+
+        # 中央に表示
+        dialog.update_idletasks()
+        width = dialog.winfo_width()
+        height = dialog.winfo_height()
+        screen_width = dialog.winfo_screenwidth()
+        screen_height = dialog.winfo_screenheight()
+        x = (screen_width - width) // 2
+        y = (screen_height - height) // 2
+        dialog.geometry(f"{width}x{height}+{x}+{y}")
+
+        change_button.focus_set()
+        dialog.wait_window()
+        return result['action'], result.get('value')
+
+    def _update_registered_product_headcount(
+        self,
+        product_number: str,
+        process_name: str,
+        headcount_value: int
+    ) -> None:
+        """再指定された割当人数を登録済み品番リストに反映"""
+        norm_product_number = str(product_number or "").strip()
+        norm_process_name = str(process_name or "").strip()
+        if not norm_product_number:
+            return
+        updated = False
+        for item in self.registered_products:
+            item_product = str(item.get('品番', '') or '').strip()
+            if item_product != norm_product_number:
+                continue
+            item_process = str(item.get('工程名', '') or '').strip()
+            if norm_process_name and item_process != norm_process_name:
+                continue
+            item['検査割当て人数'] = headcount_value
+            updated = True
+            break
+        if updated:
+            try:
+                self.save_registered_products()
+                self.log_message(
+                    f"登録済み品番データ: 品番 {norm_product_number}{'（工程: ' + norm_process_name + '）' if norm_process_name else ''} の割当人数を {headcount_value}人に更新しました"
+                )
+            except Exception as exc:
+                self.log_message(f"登録済み品番データの保存に失敗しました: {exc}", level='warning')
     def assign_registered_products_lots(
         self,
         connection,
@@ -6405,13 +6903,16 @@ class ModernDataExtractorUI:
         target_indices: Optional[Set[int]] = None,
         exclude_lot_ids: Optional[Set[str]] = None,
         allow_inactive_targets: bool = False,
-        custom_items: Optional[List[Dict[str, Any]]] = None
+        custom_items: Optional[List[Dict[str, Any]]] = None,
+        prompted_products: Optional[Set[Tuple[str, str]]] = None
     ):
         """登録済み品番のロットを割り当て"""
         try:
             items_to_process = custom_items if custom_items is not None else self.registered_products
             if not items_to_process:
                 return assignment_df
+            if prompted_products is None:
+                prompted_products = set()
             
             # 登録済み品番のロットを取得
             with perf_timer(logger, "lots.registered.get_registered_products_lots"):
@@ -6568,6 +7069,14 @@ class ModernDataExtractorUI:
                         headcount_value = int(headcount_raw)
                     except ValueError:
                         headcount_value = ''
+                headcount_value = self._maybe_adjust_registered_headcount(
+                    product_number,
+                    process_filter,
+                    max_lots_per_day,
+                    len(product_lots),
+                    headcount_value,
+                    prompted_products
+                )
                 
                 with perf_timer(logger, f"lots.registered.build_assignments[{product_number}]"):
                     for lot in product_lots.itertuples(index=False):
@@ -7557,10 +8066,16 @@ class ModernDataExtractorUI:
                 self.log_message("出荷予定日からのデータが無いため、先行検査品と洗浄品の処理を続行します...")
             
             # 登録済み品番のロットを割り当て（追加）
+            prompted_products: Set[Tuple[str, str]] = set()
             if self.registered_products:
                 self.update_progress(start_progress + 0.30, "登録済み品番のロットを割り当て中...")
                 with perf_timer(logger, "lots.assign_registered_products"):
-                    assignment_df = self.assign_registered_products_lots(connection, main_df, assignment_df)
+                    assignment_df = self.assign_registered_products_lots(
+                        connection,
+                        main_df,
+                        assignment_df,
+                        prompted_products=prompted_products
+                    )
             
             # 洗浄二次処理依頼のロットを追加（不足数がマイナスの品番と一致するものも含む）
             if not cleaning_lots_df.empty:
@@ -7893,9 +8408,7 @@ class ModernDataExtractorUI:
                 inspector_df = inspector_df_with_skills.copy()
                 for col in inspector_df.columns:
                     if col.startswith('検査員'):
-                        inspector_df[col] = inspector_df[col].astype(str).apply(
-                            lambda x: x.split('(')[0].strip() if '(' in x and ')' in x else x
-                        )
+                        inspector_df[col] = inspector_df[col].apply(self._strip_skill_annotation)
 
             # 振分結果（表示用）の不変性チェック用
             self._log_df_signature(
@@ -9372,7 +9885,14 @@ class ModernDataExtractorUI:
             # 列幅を自動計算（Excel出力時の全データを使用）
             # current_inspector_dataが存在する場合はそれを使用、ない場合は表示用のinspector_dfを使用
             width_df = self.current_inspector_data if self.current_inspector_data is not None and not self.current_inspector_data.empty else inspector_df
-            inspector_column_widths = self.calculate_column_widths(width_df, inspector_columns)
+            width_cache_key = (id(width_df), len(width_df), tuple(inspector_columns))
+            cached_widths = self._inspector_column_width_cache.get("widths")
+            if self._inspector_column_width_cache.get("key") == width_cache_key and cached_widths:
+                inspector_column_widths = cached_widths
+            else:
+                inspector_column_widths = self.calculate_column_widths(width_df, inspector_columns)
+                self._inspector_column_width_cache["key"] = width_cache_key
+                self._inspector_column_width_cache["widths"] = inspector_column_widths
             
             # 右詰めにする数値列
             inspector_numeric_columns = ["ロット数量", "秒/個", "検査時間", "検査員人数", "分割検査時間"]
@@ -9401,49 +9921,53 @@ class ModernDataExtractorUI:
             target_tree_item = None  # 選択する行のTreeviewアイテム
             # 列名から列インデックスへのマッピングを作成（高速化：itertuples()を使用）
             inspector_col_idx_map = {col: inspector_df.columns.get_loc(col) for col in inspector_columns if col in inspector_df.columns}
+            date_display_cache = {}
+            for col in ("出荷予定日", "指示日"):
+                if col in inspector_df.columns:
+                    raw_series = inspector_df[col]
+                    fallback = raw_series.where(raw_series.notna(), "").astype(str)
+                    parsed = pd.to_datetime(raw_series, errors="coerce")
+                    formatted = parsed.dt.strftime("%Y/%m/%d")
+                    formatted = formatted.where(parsed.notna(), fallback)
+                    date_display_cache[col] = formatted.tolist()
+            inspector_display_cache = {}
+            for col in inspector_columns:
+                if col in inspector_df.columns and col.startswith("検査員"):
+                    inspector_display_cache[col] = inspector_df[col].map(self._strip_skill_annotation).tolist()
+
             suspended = self._suspend_treeview_redraw(inspector_tree, len(inspector_df))
-            
-            for row_tuple in inspector_df.itertuples(index=True):
+
+            for row_pos, row_tuple in enumerate(inspector_df.itertuples(index=True)):
                 row_idx = row_tuple[0]  # インデックス
-                row = inspector_df.loc[row_idx]  # Seriesとして扱うために元の行を取得
                 values = []
                 for col in inspector_columns:
                     # 列が存在しない場合は空文字を表示
                     if col not in inspector_df.columns:
                         values.append('')
                         continue
-                    
+                    if col in date_display_cache:
+                        values.append(date_display_cache[col][row_pos])
+                        continue
+                    if col in inspector_display_cache:
+                        values.append(inspector_display_cache[col][row_pos])
+                        continue
+
                     col_idx = inspector_col_idx_map.get(col)
-                    if col_idx is not None:
-                        # itertuples(index=True)では、row_tuple[0]がインデックス、row_tuple[1]以降が列の値
-                        # 列インデックスは0始まりなので、col_idx + 1でアクセス
-                        if col_idx + 1 < len(row_tuple):
-                            col_value = row_tuple[col_idx + 1]
-                        else:
-                            col_value = None
+                    if col_idx is not None and col_idx + 1 < len(row_tuple):
+                        col_value = row_tuple[col_idx + 1]
                     else:
                         col_value = None
-                    
-                    if col == '出荷予定日' or col == '指示日':
-                        try:
-                            date_value = pd.to_datetime(col_value) if pd.notna(col_value) else None
-                            values.append(date_value.strftime('%Y/%m/%d') if date_value is not None else '')
-                        except:
-                            values.append(str(col_value) if pd.notna(col_value) else '')
-                    elif col.startswith('検査員'):
-                        inspector_name = self._strip_skill_annotation(col_value if pd.notna(col_value) else None)
-                        values.append(inspector_name)
-                    else:
-                        values.append(str(col_value) if pd.notna(col_value) else '')
-                
+
+                    values.append(str(col_value) if pd.notna(col_value) else '')
+
                 # 交互行色を適用
                 tag = "even" if row_index % 2 == 0 else "odd"
                 tree_item = inspector_tree.insert("", "end", values=values, tags=(tag,))
-                
+
                 # 対象行を記録
                 if target_row_index is not None and row_idx == target_row_index:
                     target_tree_item = tree_item
-                
+
                 row_index += 1
             self._resume_treeview_redraw(inspector_tree, suspended)
             
@@ -9682,6 +10206,8 @@ class ModernDataExtractorUI:
             return ""
         name = str(inspector_name).strip()
         if not name:
+            return ""
+        if name.lower() in {"nan", "none", "null"}:
             return ""
         if "(" in name and ")" in name:
             open_idx = name.find("(")
@@ -10508,9 +11034,9 @@ class ModernDataExtractorUI:
             assigned = False
             for inspector_col in inspector_cols:
                 name_value = row.get(inspector_col)
-                if not (pd.notna(name_value) and str(name_value).strip()):
+                inspector_name = self._strip_skill_annotation(name_value)
+                if not inspector_name:
                     continue
-                inspector_name = str(name_value).strip()
                 lot_entry = lot_base.copy()
                 lot_entry["source_inspector_col"] = inspector_col
                 inspector_column_map.setdefault(inspector_name, inspector_col)
@@ -12104,7 +12630,7 @@ class ModernDataExtractorUI:
         if hasattr(self, "non_inspection_update_button"):
             self.non_inspection_update_button.configure(state="disabled")
         if hasattr(self, "additional_assignment_button"):
-            self.additional_assignment_button.configure(state="disabled", text="地位応配置中...")
+            self.additional_assignment_button.configure(state="disabled", text="追加割当中...")
 
         self.progress_bar.set(0)
         self.progress_label.configure(text="追加割当を開始します...")
@@ -12146,7 +12672,7 @@ class ModernDataExtractorUI:
                 return
 
             fixed_overrides = {}
-            headcount_overrides = {}
+            headcount_overrides = getattr(self, "_additional_assignment_headcount_overrides", {}) or {}
             for item in custom_items:
                 product_number = str(item.get("品番", "") or "").strip()
                 if not product_number:
@@ -12165,10 +12691,11 @@ class ModernDataExtractorUI:
                     except Exception:
                         headcount_val = None
                     if headcount_val and headcount_val > 0:
-                        headcount_overrides[product_number] = {
-                            "process": process_override,
-                            "headcount": headcount_val,
-                        }
+                        if product_number not in headcount_overrides:
+                            headcount_overrides[product_number] = {
+                                "process": process_override,
+                                "headcount": headcount_val,
+                            }
             self._additional_assignment_fixed_overrides = fixed_overrides
             self._additional_assignment_headcount_overrides = headcount_overrides
 
@@ -12283,6 +12810,9 @@ class ModernDataExtractorUI:
         headcount_overrides = getattr(self, "_additional_assignment_headcount_overrides", {}) or {}
         if headcount_overrides:
             for product_number, entry in headcount_overrides.items():
+                norm_product_number = str(product_number or "").strip()
+                if not norm_product_number:
+                    continue
                 headcount_val = entry.get("headcount")
                 try:
                     headcount_val = int(headcount_val)
@@ -12291,7 +12821,7 @@ class ModernDataExtractorUI:
                 if not headcount_val or headcount_val <= 0:
                     continue
                 process_name = str(entry.get("process", "") or "").strip()
-                temp_manager.preinspection_assignment_targets[product_number] = [{
+                temp_manager.preinspection_assignment_targets[norm_product_number] = [{
                     "process": process_name,
                     "headcount": headcount_val
                 }]
@@ -12375,7 +12905,7 @@ class ModernDataExtractorUI:
         if hasattr(self, "non_inspection_update_button"):
             self.non_inspection_update_button.configure(state="normal", text="検査対象外のみ更新")
         if hasattr(self, "additional_assignment_button"):
-            self.additional_assignment_button.configure(state="normal", text="地位応配置")
+            self.additional_assignment_button.configure(state="normal", text="追加割当")
     
     def show_table(self, table_type):
         """選択されたテーブルを表示"""
