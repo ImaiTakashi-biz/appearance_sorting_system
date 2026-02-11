@@ -16813,7 +16813,6 @@ class InspectorAssignmentManager:
         if not over_loaded or not under_loaded:
             return result_df
 
-        under_loaded_codes = {code for code, _ in under_loaded}
         over_loaded.sort(key=lambda x: x[1], reverse=True)
         self.log_message(
             f"偏り是正(後処理): 多忙 {len(over_loaded)}人 / 余裕 {len(under_loaded)}人, 平均 {avg_hours:.1f}h",
@@ -16859,7 +16858,7 @@ class InspectorAssignmentManager:
         if not inspector_cols:
             return result_df
 
-        max_reassignments = min(1200, max(180, int(len(result_df) * 0.45)))
+        max_reassignments = min(260, max(50, int(len(result_df) * 0.10)))
         reassignment_count = 0
 
         for overloaded_code, _ in over_loaded:
@@ -16885,7 +16884,7 @@ class InspectorAssignmentManager:
                 product_number = row.get('品番', '')
                 shipping_date_raw = row.get('出荷予定日', None)
                 normalized_ship_date = self._normalize_shipping_date(shipping_date_raw)
-                if False and normalized_ship_date <= bias_protect_until_ts:
+                if normalized_ship_date <= bias_protect_until_ts:
                     self.log_message(
                         f"偏り是正(後処理): ロット {idx} は優先保護のためスキップ（出荷予定日: {shipping_date_raw}）",
                         debug=True,
@@ -16899,13 +16898,12 @@ class InspectorAssignmentManager:
                     assigned_clean = str(assigned_name).split('(')[0].strip()
                     if self._normalize_person_name(assigned_clean) != overloaded_norm:
                         continue
-                    is_protected = 1 if normalized_ship_date <= bias_protect_until_ts else 0
-                    assigned_lots.append((is_protected, normalized_ship_date, idx, col))
+                    assigned_lots.append((normalized_ship_date, idx, col))
                     break
 
-            assigned_lots.sort(key=lambda x: (x[0], x[1]), reverse=True)
+            assigned_lots.sort(key=lambda x: x[0], reverse=True)
 
-            for _, _, lot_index, inspector_col in assigned_lots:
+            for _, lot_index, inspector_col in assigned_lots:
                 if reassignment_count >= max_reassignments:
                     break
 
@@ -17040,13 +17038,11 @@ class InspectorAssignmentManager:
                 replacement = None
                 for insp in candidate_pool:
                     candidate_code = _get_candidate_code(insp)
-                    if candidate_code not in under_loaded_codes:
-                        continue
                     candidate_daily_hours = _get_daily_hours(candidate_code, lot_date)
-                    if avg_hours_for_date > 0 and candidate_daily_hours >= avg_hours_for_date + 0.8:
+                    if avg_hours_for_date > 0 and candidate_daily_hours >= avg_hours_for_date + 0.2:
                         continue
                     candidate_total_hours = self.inspector_work_hours.get(candidate_code, 0.0)
-                    if candidate_total_hours >= avg_hours + 0.9:
+                    if candidate_total_hours >= avg_hours + 0.3:
                         continue
                     if candidate_daily_hours >= overloaded_daily_hours:
                         continue

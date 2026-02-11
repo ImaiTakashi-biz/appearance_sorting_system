@@ -4,6 +4,7 @@
 
 import os
 import re
+import unicodedata
 import time
 import copy
 import pyodbc
@@ -87,11 +88,31 @@ def _normalize_instruction_date(value: object) -> Optional[str]:
         year, month, day = match.groups()
         return f"{year}-{month.zfill(2)}-{day.zfill(2)}"
 
+    # 年が無い MM/DD 形式は当年として扱う（年跨ぎの誤判定を防ぐ）
+    md_match = re.fullmatch(r"(\d{1,2})[/-](\d{1,2})", raw)
+    if md_match:
+        month = int(md_match.group(1))
+        day = int(md_match.group(2))
+        today = datetime.now().date()
+        year = today.year
+        if month == 12 and today.month < 12:
+            year -= 1
+        return f"{year}-{month:02d}-{day:02d}"
+
     # ここまでで拾えない場合はパーサに委譲（失敗時はNone）
     parsed = pd.to_datetime(raw, errors="coerce")
     if pd.isna(parsed):
         return None
     return pd.Timestamp(parsed).strftime("%Y-%m-%d")
+
+
+def _normalize_key_text(value: object) -> str:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return ""
+    text = str(value).strip()
+    if not text:
+        return ""
+    return unicodedata.normalize("NFKC", text)
 
 
 def _parse_remarks(remarks: str) -> Optional[Dict[str, str]]:
@@ -176,14 +197,10 @@ def _generate_date_range(start_date_str: str, days: int) -> List[str]:
         # 年の決定ロジック：
         # 12月の日付が現在の月（1月など）より前の場合は、前年として解釈
         # 例: 現在が2026年1月で、12/20が指定された場合 → 2025年12月20日
-        if month == 12 and current_month < 12:
-            # 12月の日付で現在が12月より前の月の場合、前年として解釈
-            year = current_year - 1
-        elif month < current_month:
-            # 現在の月より前の月の場合、前年として解釈
+        if month == 12 and current_month <= 2:
+            # 年初（1-2月）に12月指定が来た場合のみ前年として扱う
             year = current_year - 1
         else:
-            # それ以外は現在の年を使用
             year = current_year
         
         start_date = datetime(year, month, day)
@@ -1335,11 +1352,12 @@ def get_cleaning_lots(
             
             mask = pd.Series([True] * len(filtered_df), index=filtered_df.index)
             
-            # 品番が指定されている場合は、品番でフィルタリング
+            # 品番が指定されている場合は、品番でフィルタリング（空白/全角差を吸収）
             if req.get("product_number") and "品番" in filtered_df.columns:
-                product_number_req = req["product_number"].strip()
+                product_number_req = _normalize_key_text(req["product_number"])
                 if product_number_req:
-                    mask = mask & (filtered_df['品番'] == product_number_req)
+                    product_series = filtered_df["品番"].astype(str).map(_normalize_key_text)
+                    mask = mask & (product_series == product_number_req)
             
             # 指示日が指定されている場合は、指示日でフィルタリング
             if req.get("instruction_date"):
@@ -1349,7 +1367,10 @@ def get_cleaning_lots(
             
             # 号機が指定されている場合は、号機でフィルタリング（品番が指定されている場合でも必須）
             if req.get("machine") and "号機" in filtered_df.columns:
-                mask = mask & (filtered_df['号機'] == req["machine"])
+                machine_req = _normalize_key_text(req["machine"])
+                if machine_req:
+                    machine_series = filtered_df["号機"].astype(str).map(_normalize_key_text)
+                    mask = mask & (machine_series == machine_req)
             
             if req.get("date_list"):
                 normalized_date_list = [_normalize_instruction_date(d) for d in req["date_list"]]

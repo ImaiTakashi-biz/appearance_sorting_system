@@ -281,7 +281,7 @@ class ModernDataExtractorUI:
         """
         振分結果の差分（どのロットで割当が変わったか）を、個人名を出さずに比較できる形で保存・出力する。
         """
-        if os.environ.get("DEBUG_ASSIGNMENT_DIFF_ENABLED", "1") != "1":
+        if os.environ.get("DEBUG_ASSIGNMENT_DIFF_ENABLED", "0") != "1":
             return
         if os.environ.get("DEBUG_SNAPSHOT_DIFF_ENABLED", "0") != "1":
             return
@@ -4377,6 +4377,18 @@ class ModernDataExtractorUI:
         # 例: 2025/12/24, 2026/01/31（ゼロ埋めあり）
         return f"{value.year}/{value.month:02d}/{value.day:02d}"
 
+    @staticmethod
+    def _parse_int(value: Any) -> int:
+        try:
+            if value is None or (isinstance(value, float) and pd.isna(value)):
+                return 0
+            raw = str(value).strip()
+            if not raw:
+                return 0
+            return int(raw.replace(',', ''))
+        except Exception:
+            return 0
+
     def _run_access_vba_shortage_aggregate(self, start_date: date, end_date: date) -> None:
         """
         Access の VBA マクロを実行し、T_出荷予定集計 を更新する。
@@ -5280,6 +5292,39 @@ class ModernDataExtractorUI:
         # print文を削除してloguruのみを使用（高速化）
         level_normalized = (level or "info").lower().strip()
         loguru_logger = logger.bind(channel=channel) if channel else logger
+
+        # 同一ログの連続出力を抑制して、UI体感とログI/Oを改善する（ロジック不変）。
+        suppress_enabled = os.environ.get("UI_LOG_SUPPRESS_DUPLICATES", "1") == "1"
+        suppress_threshold_raw = os.environ.get("UI_LOG_SUPPRESS_THRESHOLD", "3")
+        try:
+            suppress_threshold = max(2, int(suppress_threshold_raw))
+        except Exception:
+            suppress_threshold = 3
+        if not hasattr(self, "_last_log_key"):
+            self._last_log_key = None
+            self._last_log_repeat = 0
+        current_key = (level_normalized, channel, str(message))
+        if suppress_enabled:
+            if self._last_log_key == current_key:
+                self._last_log_repeat += 1
+                if self._last_log_repeat >= suppress_threshold:
+                    return
+            else:
+                if self._last_log_key is not None and self._last_log_repeat >= suppress_threshold:
+                    prev_level, prev_channel, prev_message = self._last_log_key
+                    summary = f"[repeated x{self._last_log_repeat}] {prev_message}"
+                    prev_logger = logger.bind(channel=prev_channel) if prev_channel else logger
+                    if prev_level == "warning":
+                        prev_logger.warning(summary)
+                    elif prev_level == "error":
+                        prev_logger.error(summary)
+                    elif prev_level == "debug":
+                        if os.environ.get("UI_DEBUG_LOG_ENABLED", "0") == "1":
+                            prev_logger.debug(summary)
+                    else:
+                        prev_logger.info(summary)
+                self._last_log_key = current_key
+                self._last_log_repeat = 1
         if level_normalized == "warning":
             loguru_logger.warning(message)
         elif level_normalized == "error":
@@ -7077,13 +7122,13 @@ class ModernDataExtractorUI:
                     headcount_value,
                     prompted_products
                 )
-                
+
                 with perf_timer(logger, f"lots.registered.build_assignments[{product_number}]"):
                     for lot in product_lots.itertuples(index=False):
                         if assigned_count >= max_lots_per_day:
                             break
                         
-                        lot_quantity = int(lot[lot_cols['数量']]) if pd.notna(lot[lot_cols['数量']]) else 0
+                        lot_quantity = self._parse_int(lot[lot_cols['数量']]) if '数量' in lot_cols else 0
                         
                         # 出荷予定日は「先行検査」とする
                         shipping_date = "先行検査"
@@ -7103,9 +7148,9 @@ class ModernDataExtractorUI:
                             '品番': product_number,
                             '品名': product_name,
                             '客先': customer_name,
-                            '出荷数': int(main_row.get('出荷数', 0)) if main_row is not None else 0,
-                            '在庫数': int(main_row.get('在庫数', 0)) if main_row is not None else 0,
-                            '在梱包数': int(main_row.get('梱包・完了', 0)) if main_row is not None else 0,
+                            '出荷数': self._parse_int(main_row.get('出荷数', 0)) if main_row is not None else 0,
+                            '在庫数': self._parse_int(main_row.get('在庫数', 0)) if main_row is not None else 0,
+                            '在梱包数': self._parse_int(main_row.get('梱包・完了', 0)) if main_row is not None else 0,
                             '不足数': 0,  # 登録済み品番は不足数0として扱う
                             'ロット数量': lot_quantity,
                             '指示日': lot[lot_cols.get('指示日', -1)] if '指示日' in lot_cols and pd.notna(lot[lot_cols['指示日']]) else '',
@@ -8187,7 +8232,7 @@ class ModernDataExtractorUI:
                                     '在庫数': int(main_row.get('在庫数', 0)),
                                     '在梱包数': int(main_row.get('梱包・完了', 0)),
                                     '不足数': 0,  # 不足数がマイナスでない場合は0
-                                    'ロット数量': int(lot_row.get('数量', lot_row.get('ロット数量', 0))),
+                                    'ロット数量': self._parse_int(lot_row.get('数量', lot_row.get('ロット数量', 0))),
                                     '指示日': lot_row.get('指示日', ''),
                                     '号機': lot_row.get('号機', ''),
                                     '洗浄指示_行番号': lot_row.get('洗浄指示_行番号', ''),
@@ -8209,7 +8254,7 @@ class ModernDataExtractorUI:
                                     '在庫数': 0,
                                     '在梱包数': 0,
                                     '不足数': 0,
-                                    'ロット数量': int(lot_row.get('数量', lot_row.get('ロット数量', 0))),
+                                    'ロット数量': self._parse_int(lot_row.get('数量', lot_row.get('ロット数量', 0))),
                                     '指示日': lot_row.get('指示日', ''),
                                     '号機': lot_row.get('号機', ''),
                                     '洗浄指示_行番号': lot_row.get('洗浄指示_行番号', ''),
@@ -9926,7 +9971,14 @@ class ModernDataExtractorUI:
                 if col in inspector_df.columns:
                     raw_series = inspector_df[col]
                     fallback = raw_series.where(raw_series.notna(), "").astype(str)
-                    parsed = pd.to_datetime(raw_series, errors="coerce")
+                    raw_str = fallback
+                    # 日付形式のみを抽出してパース（UserWarning回避）
+                    date_mask = raw_str.str.match(r"^\d{4}[/-]\d{1,2}[/-]\d{1,2}$")
+                    parsed = pd.Series([pd.NaT] * len(raw_series), index=raw_series.index)
+                    if date_mask.any():
+                        normalized = raw_str.where(date_mask, "")
+                        normalized = normalized.str.replace("-", "/", regex=False)
+                        parsed = pd.to_datetime(normalized, format="%Y/%m/%d", errors="coerce")
                     formatted = parsed.dt.strftime("%Y/%m/%d")
                     formatted = formatted.where(parsed.notna(), fallback)
                     date_display_cache[col] = formatted.tolist()
@@ -10941,7 +10993,7 @@ class ModernDataExtractorUI:
         lots = defaultdict(list)
         unassigned_lots = []
         def format_shipping_date(value):
-            if value is None or (isinstance(value, float) and pd.isna(value)):
+            if value is None or pd.isna(value):
                 return ""
             if isinstance(value, (datetime, date)):
                 return value.strftime("%Y-%m-%d")
@@ -13800,7 +13852,27 @@ class ModernDataExtractorUI:
             def _format_date_series_for_tree(series: pd.Series) -> pd.Series:
                 original = series.astype(object)
                 original_str = original.where(pd.notna(original), '').astype(str)
-                parsed = pd.to_datetime(original, errors='coerce')
+                normalized = original_str.str.strip().str.replace("-", "/", regex=False)
+                parsed = pd.Series(pd.NaT, index=series.index, dtype="datetime64[ns]")
+                date_mask = normalized.str.match(r"^\d{4}/\d{1,2}/\d{1,2}$")
+                dt_mask = normalized.str.match(r"^\d{4}/\d{1,2}/\d{1,2}\s+\d{1,2}:\d{1,2}(:\d{1,2})?$")
+                if date_mask.any():
+                    parsed.loc[date_mask] = pd.to_datetime(
+                        normalized.where(date_mask, ""),
+                        format="%Y/%m/%d",
+                        errors="coerce",
+                    )
+                if dt_mask.any():
+                    dt_values = normalized.where(dt_mask, "")
+                    parsed_dt = pd.to_datetime(dt_values, format="%Y/%m/%d %H:%M:%S", errors="coerce")
+                    need_minute_format = dt_mask & parsed_dt.isna()
+                    if need_minute_format.any():
+                        parsed_dt.loc[need_minute_format] = pd.to_datetime(
+                            dt_values.where(need_minute_format, ""),
+                            format="%Y/%m/%d %H:%M",
+                            errors="coerce",
+                        )
+                    parsed.loc[dt_mask] = parsed_dt.loc[dt_mask]
                 formatted = parsed.dt.strftime('%Y/%m/%d')
                 mask = parsed.notna()
                 return original_str.where(~mask, formatted)

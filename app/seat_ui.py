@@ -1078,6 +1078,37 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         );
       };
       const isSameDayCleaningShippingDate = (value) => /当日洗浄/.test(value);
+      const getUnassignedLotPriority = (lot) => {
+        const shippingValue = normalizeShippingDateValue(lot?.shipping_date);
+        const trimmed = shippingValue.trim();
+        const lowerCase = trimmed.toLowerCase();
+        const isSameDayCleaning = /当日洗浄/.test(trimmed);
+        const isPreinspection =
+          lowerCase === "先行検査" ||
+          lowerCase === "当日先行検査" ||
+          lowerCase.includes("先行検査");
+        if (isSameDayCleaning || isPreinspection) {
+          return { rank: 1, timestamp: 0 };
+        }
+        const parsedDate = parseShippingDateToDate(trimmed);
+        if (parsedDate) {
+          return { rank: 2, timestamp: parsedDate.getTime() };
+        }
+        return { rank: 3, timestamp: Number.MAX_SAFE_INTEGER };
+      };
+      const compareUnassignedLotPriority = (a, b) => {
+        const keyA = getUnassignedLotPriority(a);
+        const keyB = getUnassignedLotPriority(b);
+        if (keyA.rank !== keyB.rank) {
+          return keyA.rank - keyB.rank;
+        }
+        if (keyA.timestamp !== keyB.timestamp) {
+          return keyA.timestamp - keyB.timestamp;
+        }
+        const idA = String(a?.lot_id || a?.lot_key || "");
+        const idB = String(b?.lot_id || b?.lot_key || "");
+        return idA.localeCompare(idB);
+      };
       const loadLatestSeatingData = async () => {
         const url = buildFileUrl(SEATING_JSON_PATH);
         if (!url) {
@@ -1294,7 +1325,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           unassignedContainer.appendChild(empty);
           return;
         }
-        unassignedLots.forEach((lot) => {
+        const orderedUnassignedLots = [...unassignedLots].sort(compareUnassignedLotPriority);
+        orderedUnassignedLots.forEach((lot) => {
           unassignedContainer.appendChild(createLotCard("unassigned", lot));
         });
       };
