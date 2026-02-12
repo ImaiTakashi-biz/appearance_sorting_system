@@ -11996,15 +11996,18 @@ class ModernDataExtractorUI:
         dialog = ctk.CTkToplevel(self.root)
         dialog.title("割当追加 - 登録済み品番を選択")
         screen_h = dialog.winfo_screenheight()
-        target_height = min(820, max(680, screen_h - 120))
+        # 下部ボタンが画面内に収まるよう、ウィンドウ高さを控えめに設定（余白200px）
+        target_height = min(700, max(600, screen_h - 200))
         dialog.geometry(f"620x{target_height}")
-        dialog.resizable(False, False)
+        dialog.resizable(True, True)
+        dialog.minsize(520, 560)
         dialog.transient(self.root)
         dialog.grab_set()
 
         dialog.grid_columnconfigure(0, weight=1)
         dialog.grid_rowconfigure(1, weight=0)
-        dialog.grid_rowconfigure(2, weight=1)
+        # リスト行は残り空間のみ取り、最小0で下部ボタンが必ず表示されるようにする
+        dialog.grid_rowconfigure(2, weight=1, minsize=80)
         dialog.grid_rowconfigure(3, weight=0)
 
         label = ctk.CTkLabel(
@@ -12244,20 +12247,26 @@ class ModernDataExtractorUI:
         manual_product_entry.bind("<KeyRelease>", on_manual_key_release)
         manual_product_entry.bind("<FocusOut>", on_manual_focus_out)
 
+        # リスト領域の高さを上限し、下部ボタンが必ず表示されるようにする
+        # （見出し〜直接入力〜余白〜ボタン行を除いた高さ）
+        list_area_height = max(120, target_height - 380)
         list_container = ctk.CTkFrame(
             dialog,
             fg_color="#F3F4F6",
             corner_radius=8,
             border_width=1,
-            border_color="#D1D5DB"
+            border_color="#D1D5DB",
+            height=list_area_height
         )
         list_container.grid(row=2, column=0, padx=20, pady=(0, 12), sticky="nsew")
+        list_container.grid_propagate(False)
         list_container.grid_rowconfigure(0, weight=1)
         list_container.grid_columnconfigure(0, weight=1)
 
         scroll_frame = ctk.CTkScrollableFrame(
             list_container,
-            fg_color="transparent"
+            fg_color="transparent",
+            height=list_area_height - 16
         )
         scroll_frame.grid(row=0, column=0, padx=8, pady=8, sticky="nsew")
 
